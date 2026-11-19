@@ -94,3 +94,49 @@ async def sales_endpoint():
     assert "table:sales" in _reach(graph, "entrypoint:http:GET:/reports/sales"), got
     calls = {e.to_id for e in graph.edges.values() if e.type == "calls" and e.from_id == function_id("reports.stock_levels")}
     assert function_id("reports.run_query") in calls, calls
+
+
+
+def test_submitted_function_with_its_own_sql_reaches_endpoint(tmp_path: Path) -> None:
+    """The handler only hands functions to a pool / background tasks; the SQL
+    lives inside those functions. The endpoint must still reach the tables."""
+    _write(tmp_path, "schema.sql", SCHEMA)
+    _write(
+        tmp_path,
+        "jobs.py",
+        """
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+
+from fastapi import BackgroundTasks, FastAPI
+from sqlalchemy import text
+
+app = FastAPI()
+pool = ThreadPoolExecutor(2)
+
+
+def _load_stock(conn):
+    return conn.execute(text("SELECT sku, qty FROM stock")).fetchall()
+
+
+def _load_sales(conn, day):
+    return conn.execute(text("SELECT day, total FROM sales WHERE day = :d"), {"d": day})
+
+
+def _audit(conn):
+    conn.execute(text("INSERT INTO audit (id) VALUES ('x')"))
+
+
+@app.get("/dash")
+async def dash(background: BackgroundTasks, conn=None):
+    loop = asyncio.get_running_loop()
+    stock = pool.submit(_load_stock, conn).result()
+    sales = await loop.run_in_executor(pool, partial(_load_sales, conn), "2026-01-01")
+    background.add_task(_audit, conn)
+    return {"stock": stock, "sales": sales}
+""",
+    )
+    graph = scan_path(tmp_path)
+    reach = _reach(graph, "entrypoint:http:GET:/dash")
+    assert {"table:stock", "table:sales", "table:audit"} <= reach, reach

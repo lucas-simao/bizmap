@@ -59,6 +59,15 @@
 
 ### Added
 
+- **Python executors are calls**: a function handed to
+  `loop.run_in_executor(pool, fn, …)`, `pool.submit(fn, …)`,
+  `asyncio.to_thread(fn, …)`, `anyio … run_sync`, `run_in_threadpool`,
+  FastAPI/Starlette `BackgroundTasks.add_task(fn, …)`, multiprocessing
+  `apply_async`/`starmap`/`imap`, `executor.map`, `call_soon`/`call_later`,
+  `Thread(target=fn)` / `Process(target=fn)` / `Timer(t, fn)` (also through
+  `functools.partial`) is now called by the code that hands it over
+  (`inferred`), so the endpoint reaches the tables queried inside it.
+
 - **Python field dispatch**: functions assigned to a field of a dataclass /
   NamedTuple / pydantic model (keyword or positional, at module level or in a
   function) or to a string key of a dict literal are called by

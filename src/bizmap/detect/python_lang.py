@@ -962,6 +962,7 @@ class PythonAnalyzer:
 
         _link_function_tables(analysis, parsed)
         _link_field_dispatch(analysis, parsed)
+        _link_executor_calls(analysis, parsed)
         _link_sql_references(analysis, parsed, consts_by_module, dicts_by_module)
         unique: dict[tuple, PySqlSite] = {}
         for site in analysis.sql_sites:
@@ -3709,6 +3710,79 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                     continue
                 ev = Evidence(file=rel_file, line=line_of(node), symbol=fn.qualname)
                 for callee in sorted(targets):
+                    if callee == fn.qualname or (fn.qualname, callee) in existing:
+                        continue
+                    existing.add((fn.qualname, callee))
+                    analysis.calls.append((fn.qualname, callee, ev, Confidence.INFERRED))
+
+
+
+# ---------------------------------------------------------------------------
+# Executors: a function handed to a thread/process pool, the event loop, or a
+# background-task queue is called by the code that hands it over.
+# ---------------------------------------------------------------------------
+
+# callee name → index of the callable among positional args
+_EXECUTOR_POS = {
+    "run_in_executor": 1,  # loop.run_in_executor(pool, fn, *args)
+    "submit": 0,  # ThreadPoolExecutor / ProcessPoolExecutor
+    "to_thread": 0,  # asyncio.to_thread(fn, *args)
+    "run_sync": 0,  # anyio.to_thread.run_sync(fn, *args)
+    "run_in_threadpool": 0,  # starlette.concurrency
+    "add_task": 0,  # FastAPI / Starlette BackgroundTasks
+    "apply_async": 0,  # multiprocessing.Pool
+    "starmap": 0,
+    "imap": 0,
+    "imap_unordered": 0,
+    "map": 0,  # executor.map(fn, it) / builtin map
+    "call_soon": 0,
+    "call_soon_threadsafe": 0,
+    "call_later": 1,
+    "call_at": 1,
+    "Timer": 1,  # threading.Timer(interval, fn)
+}
+# constructors taking the callable as `target=`
+_EXECUTOR_TARGET = {"Thread", "Process", "Timer"}
+
+
+def _link_executor_calls(analysis: PyAnalysis, parsed: list) -> None:
+    functions = analysis.functions
+    existing = {(c, d) for c, d, _e, _k in analysis.calls}
+    for _path, rel_file, _src, _tree, module, imap, fns in parsed:
+        for fn in fns:
+            fdef = fn.node
+            if fdef.type == "decorated_definition":
+                fdef = fdef.child_by_field_name("definition") or fdef
+            for node in walk(fdef):
+                if node.type != "call":
+                    continue
+                owner = _enclosing_fn_node(node)
+                if owner is None or (owner.start_byte, owner.end_byte) != (fdef.start_byte, fdef.end_byte):
+                    continue
+                name = call_callee_name(node)
+                refs: list[str] = []
+                if name in _EXECUTOR_POS:
+                    pos = call_posargs(node)
+                    idx = _EXECUTOR_POS[name]
+                    if len(pos) > idx:
+                        ref = _fn_ref(pos[idx], module, imap, functions)
+                        if ref:
+                            refs.append(ref)
+                if name in _EXECUTOR_TARGET:
+                    args = node.child_by_field_name("arguments")
+                    for kw in args.named_children if args is not None else []:
+                        if kw.type == "keyword_argument" and text(kw.child_by_field_name("name")) in {
+                            "target",
+                            "function",
+                        }:
+                            value = kw.child_by_field_name("value")
+                            ref = _fn_ref(value, module, imap, functions) if value is not None else None
+                            if ref:
+                                refs.append(ref)
+                if not refs:
+                    continue
+                ev = Evidence(file=rel_file, line=line_of(node), symbol=fn.qualname)
+                for callee in refs:
                     if callee == fn.qualname or (fn.qualname, callee) in existing:
                         continue
                     existing.add((fn.qualname, callee))
