@@ -79,3 +79,93 @@ def test_report_cli_scans_paths_in_memory(tmp_path: Path) -> None:
     assert data["redacted"] is True
     assert "/api/orders" not in redacted.output
     assert not (tmp_path / "bizmap.graph.json").exists()
+
+
+SECRETS = (
+    "secretrepo",
+    "secret_table",
+    "secret_audit",
+    "secret_trigger_name",
+    "secret_fn",
+    "secret-route",
+    "secret_handler",
+    "secret_job",
+    "SECRET_SVC_URL",
+    "secret_app.py",
+)
+
+
+def _secret_repo(tmp_path: Path) -> Path:
+    root = tmp_path / "secretrepo"
+    root.mkdir()
+    (root / "bizmap.yaml").write_text("name: secretrepo\n", encoding="utf-8")
+    (root / "schema.sql").write_text(
+        """
+CREATE TABLE secret_table (id text, v text);
+CREATE TABLE secret_audit (id text);
+CREATE FUNCTION secret_fn() RETURNS trigger AS $$
+BEGIN
+  INSERT INTO secret_audit (id) VALUES (NEW.id);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER secret_trigger_name AFTER INSERT ON secret_table
+  FOR EACH ROW EXECUTE FUNCTION secret_fn();
+""",
+        encoding="utf-8",
+    )
+    (root / "secret_app.py").write_text(
+        '''
+import os
+
+import httpx
+from fastapi import FastAPI
+from sqlalchemy import text
+
+app = FastAPI()
+
+
+@app.post("/secret-route")
+def secret_handler(conn):
+    conn.execute(text("INSERT INTO secret_table (id, v) VALUES ('a', 'b')"))
+    httpx.post(os.environ["SECRET_SVC_URL"] + "/secret-route/sync")
+
+
+@app.get("/secret-route/ping")
+def secret_job():
+    return {}
+''',
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_redact_hides_every_code_and_schema_identifier(tmp_path: Path) -> None:
+    root = _secret_repo(tmp_path)
+    runner = CliRunner()
+    plain = runner.invoke(main, ["report", str(root)])
+    assert plain.exit_code == 0, plain.output
+    # the fixture really exercises triggers, routes and unresolved env keys
+    assert "secret_trigger_name" in plain.output, plain.output
+    assert "secret-route" in plain.output, plain.output
+    for args in (["--redact", "--salt", "s"], ["--redact", "--salt", "s", "--json"]):
+        out = runner.invoke(main, ["report", str(root), *args])
+        assert out.exit_code == 0, out.output
+        leaked = [name for name in SECRETS if name.lower() in out.output.lower()]
+        assert leaked == [], (leaked, out.output)
+
+
+def test_salt_file_makes_redacted_runs_comparable(tmp_path: Path) -> None:
+    root = _secret_repo(tmp_path)
+    salt_file = tmp_path / "private" / "salt"
+    runner = CliRunner()
+    first = runner.invoke(main, ["report", str(root), "--redact", "--json", "--salt-file", str(salt_file)])
+    assert first.exit_code == 0, first.output
+    assert salt_file.exists() and len(salt_file.read_text().strip()) >= 32
+    second = runner.invoke(main, ["report", str(root), "--redact", "--json", "--salt-file", str(salt_file)])
+    assert second.exit_code == 0, second.output
+
+    def _json(text: str) -> dict:
+        return json.loads(text[text.index("{") :])
+
+    assert _json(first.output) == _json(second.output)

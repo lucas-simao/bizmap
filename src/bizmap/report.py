@@ -18,6 +18,23 @@ from typing import Any
 DATA_PREFIXES = ("table:", "column:", "view:", "collection:")
 
 
+# Fixed vocabulary that never carries a name from the code or schema.
+# Everything else that reaches the output is hashed under --redact.
+_PUBLIC_VIA = {"traced_client", "route_literal", "sql_reference", "sql_key"}
+_PUBLIC_KINDS = {
+    "http",
+    "scheduled_job",
+    "firestore",
+    "celery_task",
+    "worker",
+    "pubsub",
+    "cloud_task",
+    "firebase_http",
+    "firebase_call",
+    "other",
+}
+
+
 class Redactor:
     def __init__(self, enabled: bool, salt: str = "") -> None:
         self.enabled = enabled
@@ -28,6 +45,18 @@ class Redactor:
             return value
         digest = hashlib.sha256((self.salt + "\0" + value).encode("utf-8")).hexdigest()
         return f"h:{digest[:10]}"
+
+    def via(self, value: str) -> str:
+        """`db_trigger:audit_x` → `db_trigger:h:…`; known derivations stay readable."""
+        if not self.enabled or value in _PUBLIC_VIA:
+            return value
+        kind, sep, rest = value.partition(":")
+        if sep and kind.isidentifier() and kind.islower():
+            return f"{kind}:{self(rest)}"
+        return self(value)
+
+    def kind(self, value: str) -> str:
+        return value if (not self.enabled or value in _PUBLIC_KINDS) else self(value)
 
 
 def _strip_repo(node_id: str) -> tuple[str, str]:
@@ -78,7 +107,7 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
             )
 
     calls_http = [e for e in edges if e.get("type") == "calls_http"]
-    via: Counter[str] = Counter(str(e.get("via") or "traced_client") for e in calls_http)
+    via: Counter[str] = Counter(r.via(str(e.get("via") or "traced_client")) for e in calls_http)
     cross_repo = 0
     for e in calls_http:
         a, _ = _strip_repo(e["from"])
@@ -96,7 +125,7 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
 
     confidence: Counter[str] = Counter(str(e.get("confidence") or "") for e in edges)
     data_via: Counter[str] = Counter(
-        str(e.get("via"))
+        r.via(str(e.get("via")))
         for e in edges
         if e.get("type") in {"reads", "writes"} and e.get("via")
     )
@@ -112,7 +141,9 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
             "total": total_entry,
             "reaching_data": total_reach,
             "reaching_data_pct": round(100.0 * total_reach / total_entry, 1) if total_entry else 0.0,
-            "by_kind": {k: {"total": by_kind[k], "reaching_data": reaching[k]} for k in sorted(by_kind)},
+            "by_kind": {
+                r.kind(k): {"total": by_kind[k], "reaching_data": reaching[k]} for k in sorted(by_kind)
+            },
             "without_data": sorted(no_data, key=lambda x: (x["repo"], x["entrypoint"])),
         },
         "http": {

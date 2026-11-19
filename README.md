@@ -135,8 +135,12 @@ edges by confidence: exact 31, inferred 23
 hash, so a report from a private codebase can be shared without sharing code:
 
 ```bash
-BIZMAP_REDACT_SALT=team-secret bizmap report ./svc-a ./svc-b --redact --json
+bizmap report ./svc-a ./svc-b --redact --salt-file ~/.bizmap-salt --json
 ```
+
+Only counts, edge types, entrypoint kinds and reasons stay readable. Without a
+salt each run uses a random one (hashes differ between runs); `--salt-file`
+creates a private salt once and reuses it so runs can be compared.
 
 ## What it understands
 

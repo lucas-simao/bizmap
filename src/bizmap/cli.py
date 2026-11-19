@@ -201,6 +201,14 @@ def why_cmd(column: str, graph_path: Path) -> None:
     envvar="BIZMAP_REDACT_SALT",
     help="Salt for --redact hashes (env BIZMAP_REDACT_SALT). Same salt = comparable runs.",
 )
+@click.option(
+    "--salt-file",
+    "salt_file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Read the --redact salt from this file, creating a random one on first use. "
+    "Keeps redacted runs comparable without putting the salt on the command line.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Print the report as JSON.")
 @click.option("--limit", type=int, default=20, show_default=True, help="Max rows per list.")
 @click.option(
@@ -215,6 +223,7 @@ def report_cmd(
     graph_path: Path,
     redact: bool,
     salt: str | None,
+    salt_file: Path | None,
     as_json: bool,
     limit: int,
     config_path: Path | None,
@@ -239,12 +248,26 @@ def report_cmd(
             data = json.loads(graph_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise click.ClickException(f"invalid graph JSON: {exc}") from exc
+    if redact and not salt and salt_file is not None:
+        import secrets
+
+        if salt_file.exists():
+            salt = salt_file.read_text(encoding="utf-8").strip()
+        if not salt:
+            salt = secrets.token_hex(16)
+            salt_file.parent.mkdir(parents=True, exist_ok=True)
+            salt_file.write_text(salt + "\n", encoding="utf-8")
+            click.echo(
+                f"note: wrote a new redaction salt to {salt_file}; keep it private and reuse it",
+                err=True,
+            )
     if redact and not salt:
         import secrets
 
-        salt = secrets.token_hex(8)
+        salt = secrets.token_hex(16)
         click.echo(
-            "note: random salt for this run; set --salt / BIZMAP_REDACT_SALT to compare runs",
+            "note: random salt for this run, so hashes differ between runs; "
+            "use --salt-file PATH (or --salt / BIZMAP_REDACT_SALT) to compare runs",
             err=True,
         )
     rep = build_report(data, redact=redact, salt=salt or "")
