@@ -66,3 +66,64 @@ def direct(conn):
         node = graph.get(function_id(fn))
         assert "db.rpc.rpc_sql" in (node.attrs.get("unresolved_calls") or []), (fn, node.attrs)
         assert (node.attrs.get("unresolved_call_reasons") or {}).get("db.rpc.rpc_sql") == "target_not_scanned"
+
+
+def test_local_sql_variable_to_dotted_unscanned_sink(tmp_path: Path) -> None:
+    """The real case: `sql = "..."; await conn.fetch(sql)` / `db.conn.fetch(...)`
+    with `db` not scanned → table resolved, `sink_not_scanned`, no table:unknown."""
+    _write(tmp_path, "schema.sql", SCHEMA)
+    _write(
+        tmp_path,
+        "api/handlers.py",
+        """
+import db
+from db import conn
+
+
+async def list_orders():
+    sql = "SELECT id, status FROM orders WHERE status = 'open'"
+    return await conn.fetch(sql)
+
+
+async def list_items():
+    return await db.conn.fetch("SELECT id FROM items")
+""",
+    )
+    graph = scan_path(tmp_path)
+    for fn, table, sink in (
+        ("api.handlers.list_orders", "orders", "db.conn.fetch"),
+        ("api.handlers.list_items", "items", "db.conn.fetch"),
+    ):
+        edges = _data_edges(graph, fn)
+        assert [e for e in edges if table in e.to_id], (fn, [e.id for e in edges])
+        assert not [e for e in edges if e.to_id == "table:unknown"], (fn, [e.id for e in edges])
+        assert all(e.attrs.get("sink_not_scanned") for e in edges if table in e.to_id)
+        node = graph.get(function_id(fn))
+        assert (node.attrs.get("unresolved_call_reasons") or {}).get(sink) == "target_not_scanned", node.attrs
+
+
+def test_declared_third_party_and_resolved_targets_are_not_unresolved(tmp_path: Path) -> None:
+    _write(tmp_path, "schema.sql", SCHEMA)
+    _write(tmp_path, "requirements.txt", "stripe>=7\nPyYAML==6.0\n")
+    _write(tmp_path, "helpers.py", "def run(x):\n    return x\n")
+    _write(
+        tmp_path,
+        "svc.py",
+        """
+import stripe
+import yaml
+
+import helpers
+from helpers import run
+
+
+def charge(amount):
+    stripe.Charge.create(amount=amount)
+    yaml.safe_load("a: 1")
+    helpers.run(1)
+    return run(2)
+""",
+    )
+    graph = scan_path(tmp_path)
+    node = graph.get(function_id("svc.charge"))
+    assert (node.attrs.get("unresolved_calls") or []) == [], node.attrs.get("unresolved_calls")
