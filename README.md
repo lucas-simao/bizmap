@@ -67,6 +67,26 @@ bizmap why orders.status --graph merged.json
 control repo-qualified ids, shared table ids, HTTP base-URL matching, and
 unscanned package const aliases (`PathPrefix`, `pkg.Name`).
 
+### Coverage report
+
+`bizmap report` tells you how much of a codebase BizMap understood: entrypoints
+that reach a table, HTTP links matched vs. unresolved (by reason, with a hint
+for each), how links were derived, and confidence. Pass roots to scan in
+memory, or read an existing graph:
+
+```bash
+bizmap report ./api ./web ./billing
+bizmap report --graph merged.json --json
+```
+
+`--redact` replaces every name, route, table, URL, env key, and file with a
+salted hash (`--salt` / `BIZMAP_REDACT_SALT` keeps runs comparable), so a
+report from a private codebase can be shared without sharing code:
+
+```bash
+BIZMAP_REDACT_SALT=team-secret bizmap report ./svc-a ./svc-b --redact
+```
+
 ### Example `why` output
 
 ```

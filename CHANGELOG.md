@@ -4,6 +4,14 @@
 
 ### Added
 
+- **`bizmap report`** (`--json`, `--redact`, `--salt`): coverage of a scan —
+  entrypoints reaching a table/collection (by kind, with the list that does
+  not), `calls_http` by derivation and cross-repo, `unresolved_http` by reason
+  with a hint each and the top base/env keys, data links by `via`, edges by
+  confidence. Accepts scan roots (in memory, nothing written) or `--graph`.
+  `--redact` hashes every name/URL/key with a salt so reports from private
+  codebases can be shared.
+
 - **Front-end → API by route literal** (`calls_http`, `inferred`,
   `via: route_literal`): API-looking strings and templates in JS/TS
   (`'/orders/' + id`, `` `${base}/orders/${id}` ``) link to the single

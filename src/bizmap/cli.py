@@ -10,6 +10,7 @@ from bizmap import __version__
 from bizmap.graph import Graph
 from bizmap.mermaid import DEFAULT_LIMIT, render_mermaid
 from bizmap.registry import graph_from_json, merge_graphs
+from bizmap.report import build_report, format_report
 from bizmap.scan import relink_merged_graph, scan_path, scan_paths
 from bizmap.why import format_why
 
@@ -181,6 +182,76 @@ def why_cmd(column: str, graph_path: Path) -> None:
     click.echo(text, nl=False)
     if text.startswith("unknown column"):
         sys.exit(1)
+
+
+@main.command("report")
+@click.argument("path", nargs=-1, type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--graph",
+    "graph_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=Path("bizmap.graph.json"),
+    show_default=True,
+    help="Graph JSON to report on (ignored when PATH roots are given).",
+)
+@click.option("--redact", is_flag=True, help="Replace every name/URL/key with a salted hash.")
+@click.option(
+    "--salt",
+    default=None,
+    envvar="BIZMAP_REDACT_SALT",
+    help="Salt for --redact hashes (env BIZMAP_REDACT_SALT). Same salt = comparable runs.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the report as JSON.")
+@click.option("--limit", type=int, default=20, show_default=True, help="Max rows per list.")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="bizmap.yaml for PATH scans.",
+)
+def report_cmd(
+    path: tuple[Path, ...],
+    graph_path: Path,
+    redact: bool,
+    salt: str | None,
+    as_json: bool,
+    limit: int,
+    config_path: Path | None,
+) -> None:
+    """Coverage report: entrypoints reaching data, HTTP links, unresolved reasons.
+
+    Pass PATH roots to scan in memory (nothing written), or read --graph.
+    With --redact the output contains counts and hashes only, so it can be
+    shared from a private codebase.
+    """
+    if path:
+        graph = (
+            scan_paths(list(path), config=config_path)
+            if len(path) > 1
+            else scan_path(path[0], config=config_path)
+        )
+        data = graph.to_dict()
+    else:
+        if not graph_path.exists():
+            raise click.UsageError(f"{graph_path} not found; run `bizmap scan` or pass PATH roots")
+        try:
+            data = json.loads(graph_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise click.ClickException(f"invalid graph JSON: {exc}") from exc
+    if redact and not salt:
+        import secrets
+
+        salt = secrets.token_hex(8)
+        click.echo(
+            "note: random salt for this run; set --salt / BIZMAP_REDACT_SALT to compare runs",
+            err=True,
+        )
+    rep = build_report(data, redact=redact, salt=salt or "")
+    if as_json:
+        click.echo(json.dumps(rep, indent=2, sort_keys=True))
+    else:
+        click.echo(format_report(rep, limit=limit), nl=False)
 
 
 @main.group("registry")
