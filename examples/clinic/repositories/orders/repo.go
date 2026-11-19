@@ -16,8 +16,8 @@ func New(db *pgxpool.Pool) *Repo {
 	return &Repo{db: db}
 }
 
-func (r *Repo) BindTenant(ctx context.Context, clinicID string) error {
-	_, err := r.db.Exec(ctx, `SELECT set_config('app.clinic_id', $1, true)`, clinicID)
+func (r *Repo) BindTenant(ctx context.Context, tenantID string) error {
+	_, err := r.db.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID)
 	if err != nil {
 		return err
 	}

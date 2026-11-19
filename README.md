@@ -5,7 +5,7 @@
 For each database table and column, BizMap answers:
 
 - **who writes it** (function / repository method)
-- **triggered by what** (HTTP route, scheduled job, DB trigger — queues/webhooks later)
+- **triggered by what** (HTTP route, scheduled job, DB trigger, queue, Firestore)
 - **in which situation** (the comment or docstring already sitting above that function, plus const/iota arguments when seen)
 - **who reads it**
 
@@ -29,6 +29,7 @@ Python 3.11+:
 pip install -e ".[dev]"
 bizmap scan examples/shop --mermaid
 bizmap why orders.status
+bizmap scan examples/pyplatform --mermaid
 ```
 
 With [uv](https://astral.sh/uv):
@@ -51,6 +52,17 @@ SQL origin.
 git toplevel. `exclude` globs skip seed/demo trees inside the scan root;
 `--exclude GLOB` (repeatable) merges with the YAML list. `--profile` prints
 parse / resolve / sql / propagate timings to stderr.
+
+Scan several service roots at once, or merge graphs later:
+
+```bash
+bizmap scan examples/pyplatform/catalog examples/pyplatform/storefront --out merged.json
+bizmap registry merge a.json b.json --out merged.json
+bizmap why orders.status --graph merged.json
+```
+
+`name` / `database` / `services` / `repos` in `bizmap.yaml` control
+repo-qualified ids, shared table ids, and HTTP base-URL matching.
 
 ### Example `why` output
 
@@ -93,12 +105,14 @@ flowchart LR
   GET_stock -->|reads inferred| inventory
 ```
 
-## How it works (v0.1.3)
+## How it works (v0.2.0)
 
 1. **Schema replayer** — applies `schema.sql` / migration folders in order
    (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`,
    drop/add constraints, `DO $$` blocks) and extracts `CREATE TRIGGER` plus the
-   tables/columns their plpgsql functions write.
+   tables/columns their plpgsql functions write. Also `CREATE POLICY`,
+   `ENABLE ROW LEVEL SECURITY`, and Alembic `upgrade()` chains (schema role,
+   not runtime writers).
 2. **Go detector** — Echo v4 routes (`group.POST(path, handler)` with group
    prefixes, cross-package consts, factory handlers, and wrappers such as
    `wrap(h.Version)`). Method names must be exactly `GET`/`POST`/…/`Any`/`Match`
@@ -108,28 +122,41 @@ flowchart LR
    uses `time.NewTicker` / `time.Tick` / `time.After` loops or a cron library.
    Packages are keyed by import path; display names are the directory relative
    to the scan root.
-3. **Call graph** — handler → service → repository using typed locals,
+3. **Python detector** — FastAPI/Flask routes (module/imported consts, `+`,
+   f-strings, `APIRouter` / `include_router` prefixes). Unresolvable path
+   pieces stay `{name}` placeholders (`unresolved`, never truncated).
+   SQLAlchemy Core/ORM usage and `text()`/`execute()` SQL. Firebase
+   Functions + Firestore collections. Celery / RQ / Cloud Tasks / Pub/Sub
+   and `while True` workers. `supabase.rpc("fn")` links to SQL functions.
+4. **JavaScript detector** — Express `app.get("/path", handler)`, `fetch()`,
+   and `supabase.rpc`. `.ts` files are parsed with the JavaScript grammar.
+5. **Call graph** — handler → service → repository using typed locals,
    constructors, import aliases, injected func fields
    (`Service{ring: notify.Send}`), and **interface dispatch**
    (`s.Bell.Changed(e)` → structural implementers, `inferred`, with
    `candidates` when several). Unscanned/unknown receivers stay unresolved.
    Reads/writes propagate to HTTP and job entrypoints as table-level
-   `inferred` edges; `table:unknown` does not.
-4. **SQL** — named columns stay column-level; `SELECT *` and column-less
+   `inferred` edges; `table:unknown` does not. HTTP clients emit
+   `calls_http` when the URL matches a scanned route (optionally via
+   `services:` base URLs). Queue produce sites emit `enqueues`.
+6. **SQL** — named columns stay column-level; `SELECT *` and column-less
    INSERT are table-level. FROM-less SELECT (`now()`, `set_config`) touches
    no table. CTE/subquery/LATERAL aliases (`l`, `r`, `l.x`) are never tables.
    When DDL is present, only schema-known tables (plus catalogs like
-   `pg_roles`) become table nodes.
-5. **Python detector** — enough FastAPI + SQL-literal capture to map a worker
-   that reads the same tables. SQLAlchemy `text()`/`execute()` is wired;
-   Express is a YAML stub for v0.2.
-6. **Overrides** — `bizmap.yaml` (`--config`, scan root, or git toplevel)
-   fills in `why`, extra edges, `exclude` globs, and `expand_star`.
-   `--exclude GLOB` merges with YAML. `--profile` times each scan phase.
+   `pg_roles`) become table nodes. `pg_catalog.*`, `information_schema.*`,
+   and `pg_*` are marked `external`.
+7. **Registry** — `bizmap scan a b` or `bizmap registry merge a.json b.json`
+   qualifies function/entrypoint/queue ids by repo. Tables and collections
+   share ids when `database:` is the same, so `why orders.status` on the
+   merged graph lists writers and readers from every service.
+8. **Overrides** — `bizmap.yaml` (`--config`, scan root, or git toplevel)
+   fills in `why`, extra edges, `exclude` globs, `expand_star`, plus
+   `name`, `database`, `services`, and `repos`. `--exclude GLOB` merges
+   with YAML. `--profile` times each scan phase.
 
 ### Performance
 
-v0.1.3 keeps the per-function type cache, skips `vendor`/`node_modules` during
+v0.2 keeps the per-function type cache, skips `vendor`/`node_modules` during
 file discovery, caches `go.mod` lookup, and walks named AST nodes iteratively.
 `--profile` reports parse / resolve / sql / propagate. Synthetic fixtures
 finish in tens of milliseconds; scans of ~150 Go files stay well under 10s.
@@ -138,13 +165,16 @@ Graph format: [docs/graph-schema.md](docs/graph-schema.md).
 YAML rule format: [docs/detector-rules.md](docs/detector-rules.md).  
 Changes: [CHANGELOG.md](CHANGELOG.md).
 
-Synthetic stand-ins (no proprietary code): `examples/shop` (happy path) and
+Synthetic stand-ins (no proprietary code): `examples/shop` (happy path),
 `examples/clinic` (colliding handler names, same-named packages, jobs, const
-paths, factory handlers).
+paths, factory handlers), and `examples/pyplatform` (FastAPI + Alembic +
+Firestore worker + HTTP client + Express proxy). New fixtures use generic
+table and collection names (`orders`, `users`, `tenants`, `notifications`,
+`documents`, `jobs`).
 
 ## Philosophy
 
-- **No AI in v0.1 (or in the core, ever).** Models are welcome as *clients* of
+- **No AI in the core, ever.** Models are welcome as *clients* of
   the graph (MCP), not as authors of it.
 - **Evidence over vibes.** Every edge stores `{file, line, symbol}`.
 - **Say when you do not know.** Dynamic SQL is `unknown`, not a hallucinated
@@ -154,9 +184,9 @@ paths, factory handlers).
 
 ## Roadmap
 
-- **v0.2** — first-class Python and TypeScript detectors (SQLAlchemy ORM,
-  Express/Fastify) plus a cross-repo registry so a table can be written in
-  service A and read in service B.
+- **v0.2** — Python stacks (SQLAlchemy/Alembic, FastAPI/Flask, Firebase,
+  queues), Express/`fetch` (JS grammar), and a cross-repo registry. **This
+  release.**
 - **v0.3** — GitHub Action that warns when a PR changes a writer of a column
   that another in-flight PR also touches (“lineage conflict”).
 - **v0.4** — MCP server so agents can query `why orders.status` without

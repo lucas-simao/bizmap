@@ -1,13 +1,9 @@
-# Example / v0.2-oriented rule. v0.1 implements `text()` and `execute()` SQL
-# string capture when this file is active; ORM mapper/relationship models are
-# not yet understood (see roadmap).
 id: sqlalchemy.sql
 language: python
 framework: sqlalchemy
 description: >
-  SQLAlchemy Core text() / execute() SQL strings. Community can extend this
-  YAML with additional call patterns (session.execute, op.execute, etc.)
-  without changing BizMap source.
+  SQLAlchemy Core text() / execute() SQL strings, plus ORM/Core usage
+  (select/insert/update/delete, session.add/query) handled by the Python engine.
 status: active
 when:
   imports:

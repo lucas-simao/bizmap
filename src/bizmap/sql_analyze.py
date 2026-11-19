@@ -219,6 +219,8 @@ def is_external_table(name: str | None) -> bool:
     raw = name.lower()
     if raw.startswith("information_schema.") or raw == "information_schema":
         return True
+    if raw.startswith("pg_catalog.") or raw == "pg_catalog":
+        return True
     leaf = raw.split(".")[-1]
     if leaf.startswith("pg_") or leaf in PG_CATALOG_TABLES:
         return True
@@ -254,7 +256,11 @@ def _table_name(table: exp.Table | exp.Expression | None) -> str:
     if table is None:
         return ""
     if isinstance(table, exp.Table):
-        return table.name or ""
+        name = table.name or ""
+        db = _ident(table.args.get("db"))
+        if db in {"pg_catalog", "information_schema"}:
+            return f"{db}.{name}" if name else db
+        return name
     return _ident(table)
 
 
@@ -485,8 +491,14 @@ def _add(
         return
     if not table or is_skipped_table_name(table):
         return
-    table = table.split(".")[-1]
     external = is_external_table(table)
+    if not external:
+        table = table.split(".")[-1]
+        external = is_external_table(table)
+    else:
+        # Keep catalog schema qualification to avoid colliding with app tables
+        # such as ``columns``.
+        pass
     key = (kind, table.lower(), (column or "").lower(), confidence.value, dynamic, external)
     if key in seen:
         return
@@ -795,6 +807,7 @@ def analyze_sql(
     dynamic: bool = False,
     expand_star: bool = False,
     known_tables: set[str] | None = None,
+    require_known: bool = True,
 ) -> list[SqlAccess]:
     """Parse a SQL string (postgres dialect) into per-column or table-level accesses.
 
@@ -809,6 +822,8 @@ def analyze_sql(
     known = {t.lower() for t in (known_tables or ())}
     if schema_columns:
         known.update(k.lower() for k in schema_columns.keys())
+    if not require_known:
+        known = set()
     phantoms = text_phantom_aliases(sql)
     if DYNAMIC_PLACEHOLDER.search(sql) and not re.search(
         r"(?is)\b(?:FROM|INTO|UPDATE|JOIN)\s+[A-Za-z_]", sql

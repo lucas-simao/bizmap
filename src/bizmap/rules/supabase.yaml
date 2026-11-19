@@ -1,0 +1,21 @@
+id: supabase.rpc
+language: python
+framework: supabase
+description: supabase.rpc('fn') calls linked to SQL functions when present.
+status: active
+when:
+  imports:
+    contains: supabase
+    optional: true
+detect:
+  calls:
+    method:
+      in: [rpc]
+    arguments:
+      name:
+        index: 0
+        capture: string
+produce:
+  rpc:
+    name: "{name}"
+    caller: "{enclosing_function}"

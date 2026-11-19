@@ -53,8 +53,13 @@ def call_callee_name(call: Node) -> str:
     if func.type == "selector_expression":
         field = func.child_by_field_name("field")
         return text(field) if field else text(func).rsplit(".", 1)[-1]
-    if func.type == "attribute":  # python
-        return text(func.named_children[-1]) if func.named_children else text(func)
+    if func.type in {"attribute", "member_expression"}:
+        # Python attribute / JS member_expression (app.get, supabase.rpc)
+        return (
+            text(func.named_children[-1])
+            if func.named_children
+            else text(func).rsplit(".", 1)[-1]
+        )
     return text(func)
 
 

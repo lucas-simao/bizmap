@@ -1,0 +1,12 @@
+name: pyplatform
+database: platform
+services:
+  catalog: http://catalog.internal
+  worker: http://worker.internal
+repos:
+  - catalog
+  - worker
+  - storefront
+  - web
+exclude:
+  - .venv

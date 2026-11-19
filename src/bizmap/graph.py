@@ -19,8 +19,8 @@ CONFIDENCE_RANK = {
 }
 
 
-NODE_TYPES = ("entrypoint", "function", "table", "column", "db_trigger")
-EDGE_TYPES = ("calls", "reads", "writes", "triggers")
+NODE_TYPES = ("entrypoint", "function", "table", "column", "db_trigger", "collection", "queue")
+EDGE_TYPES = ("calls", "reads", "writes", "triggers", "calls_http", "enqueues")
 
 
 def parse_confidence(value: str | Confidence | None) -> Confidence:
@@ -102,11 +102,14 @@ class Graph:
     """Lineage graph: nodes + edges + reconstructed schema."""
 
     def __init__(self) -> None:
-        self.version = "0.1.3"
+        self.version = "0.2.0"
         self.generated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.schema: dict[str, Any] = {"tables": {}}
         self.nodes: dict[str, Node] = {}
         self.edges: dict[str, Edge] = {}
+        self.repo: str | None = None
+        self.database: str | None = None
+        self.attrs: dict[str, Any] = {}
 
     def add_node(self, node_id: str, node_type: str, **attrs: Any) -> Node:
         existing = self.nodes.get(node_id)
@@ -175,20 +178,37 @@ class Graph:
     def to_dict(self) -> dict[str, Any]:
         nodes = sorted(self.nodes.values(), key=lambda n: (n.type, n.id))
         edges = sorted(self.edges.values(), key=lambda e: (e.type, e.from_id, e.to_id))
-        return {
+        payload: dict[str, Any] = {
             "version": self.version,
             "generated_at": self.generated_at,
             "schema": self.schema,
             "nodes": [n.to_dict() for n in nodes],
             "edges": [e.to_dict() for e in edges],
         }
+        if self.repo:
+            payload["repo"] = self.repo
+        if self.database:
+            payload["database"] = self.database
+        repos = self.attrs.get("repos")
+        if repos:
+            payload["repos"] = repos
+        services = self.attrs.get("services")
+        if services:
+            payload["services"] = services
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Graph:
         graph = cls()
-        graph.version = str(data.get("version") or "0.1.3")
+        graph.version = str(data.get("version") or "0.2.0")
         graph.generated_at = str(data.get("generated_at") or graph.generated_at)
         graph.schema = data.get("schema") or {"tables": {}}
+        graph.repo = data.get("repo")
+        graph.database = data.get("database")
+        graph.attrs["repo"] = graph.repo
+        graph.attrs["database"] = graph.database
+        graph.attrs["repos"] = data.get("repos") or []
+        graph.attrs["services"] = data.get("services") or {}
         for raw in data.get("nodes") or []:
             node_id = raw["id"]
             node_type = raw["type"]
@@ -234,3 +254,11 @@ def entrypoint_id(kind: str, key: str) -> str:
 
 def trigger_id(name: str) -> str:
     return f"db_trigger:{name.lower()}"
+
+
+def collection_id(name: str) -> str:
+    return f"collection:{name.lower()}"
+
+
+def queue_id(kind: str, name: str) -> str:
+    return f"queue:{kind}:{name}"

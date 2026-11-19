@@ -1,0 +1,4 @@
+name: storefront
+database: platform
+services:
+  catalog: http://catalog.internal

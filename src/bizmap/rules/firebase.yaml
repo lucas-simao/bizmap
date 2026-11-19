@@ -1,0 +1,46 @@
+id: firebase.functions
+language: python
+framework: firebase
+description: >
+  Firebase Functions v2 entrypoints (https, firestore document, scheduler,
+  Cloud Tasks, Pub/Sub) and Firestore collection reads/writes.
+status: active
+when:
+  imports:
+    contains_any:
+      - firebase_functions
+      - firebase_admin
+      - functions_framework
+      - google.cloud.firestore
+    optional: true
+detect:
+  decorators:
+    method:
+      in:
+        - on_request
+        - on_call
+        - on_document_created
+        - on_document_updated
+        - on_document_deleted
+        - on_document_written
+        - on_schedule
+        - on_task_dispatched
+        - on_message_published
+        - http
+        - cloud_event
+    arguments:
+      document: {capture: keyword}
+      topic: {capture: keyword}
+  calls:
+    method:
+      in: [collection, document, get, set, update, delete, add, stream, where]
+    arguments:
+      path:
+        index: 0
+        capture: string
+produce:
+  entrypoint:
+    kind: firebase
+    handler: "{function}"
+  collection:
+    name: "{path}"

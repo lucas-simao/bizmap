@@ -1,7 +1,10 @@
 id: fastapi.routes
 language: python
 framework: fastapi
-description: FastAPI HTTP routes registered with @app.get("/path") / @router.post(...).
+description: >
+  FastAPI HTTP routes (@app.get, @router.post) including APIRouter(prefix=)
+  and app.include_router(..., prefix=). Paths resolve module/imported constants,
+  concatenation, and f-strings.
 status: active
 when:
   imports:

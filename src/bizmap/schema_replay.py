@@ -25,6 +25,16 @@ CREATE_TRG = re.compile(
     r"CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+([A-Za-z_][A-Za-z0-9_.]*)",
     re.IGNORECASE,
 )
+CREATE_POLICY = re.compile(
+    r"""CREATE\s+POLICY\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))\s+ON\s+([A-Za-z_][A-Za-z0-9_.]*)""",
+    re.IGNORECASE,
+)
+POLICY_FOR = re.compile(r"\bFOR\s+(ALL|SELECT|INSERT|UPDATE|DELETE)\b", re.IGNORECASE)
+POLICY_TO = re.compile(r"\bTO\s+([A-Za-z_][A-Za-z0-9_, ]*)", re.IGNORECASE)
+ENABLE_RLS = re.compile(
+    r"ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_.]*)\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY",
+    re.IGNORECASE,
+)
 SQL_VERB = re.compile(
     r"(?is)\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|SELECT|WITH)\b"
 )
@@ -48,11 +58,24 @@ class ForeignKey:
 
 
 @dataclass
+class Policy:
+    name: str
+    table: str
+    command: str = "ALL"
+    role: str | None = None
+    using: str | None = None
+    with_check: str | None = None
+    evidence: Evidence | None = None
+
+
+@dataclass
 class Table:
     name: str
     columns: dict[str, Column] = field(default_factory=dict)
     foreign_keys: list[ForeignKey] = field(default_factory=list)
     constraints: dict[str, str] = field(default_factory=dict)
+    policies: list[Policy] = field(default_factory=list)
+    rls: bool = False
 
 
 @dataclass
@@ -107,6 +130,19 @@ class Schema:
                     for fk in table.foreign_keys
                 ],
             }
+            if table.policies:
+                tables[name]["policies"] = [
+                    {
+                        "name": p.name,
+                        "command": p.command,
+                        **({"role": p.role} if p.role else {}),
+                        **({"using": p.using} if p.using else {}),
+                        **({"with_check": p.with_check} if p.with_check else {}),
+                    }
+                    for p in table.policies
+                ]
+            if table.rls:
+                tables[name]["rls"] = True
         return {"tables": tables}
 
 
@@ -497,7 +533,9 @@ def _apply_function(schema: Schema, sql: str, evidence: Evidence) -> None:
     )
     colmap = schema.column_names()
     for inner in extract_sql_from_plpgsql(fn.body):
-        fn.accesses.extend(analyze_sql(inner, schema_columns=colmap))
+        fn.accesses.extend(
+            analyze_sql(inner, schema_columns=colmap, require_known=False)
+        )
     schema.functions[name] = fn
 
 
@@ -537,6 +575,47 @@ def _apply_trigger_regex(schema: Schema, sql: str, evidence: Evidence) -> None:
     )
 
 
+def _paren_expr(sql: str, keyword: str) -> str | None:
+    m = re.search(rf"\b{keyword}\s*\(", sql, re.IGNORECASE)
+    if not m:
+        return None
+    i = m.end()
+    depth = 1
+    start = i
+    while i < len(sql) and depth:
+        if sql[i] == "(":
+            depth += 1
+        elif sql[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return sql[start:i].strip()
+        i += 1
+    return sql[start:].strip() or None
+
+
+def _apply_policy(schema: Schema, sql: str, evidence: Evidence) -> None:
+    m = CREATE_POLICY.search(sql)
+    if not m:
+        return
+    name = next(g for g in m.groups()[:3] if g)
+    table_name = m.group(4).split(".")[-1].lower()
+    command_m = POLICY_FOR.search(sql)
+    role_m = POLICY_TO.search(sql)
+    table = _table(schema, table_name)
+    table.policies.append(
+        Policy(
+            name=name,
+            table=table_name,
+            command=(command_m.group(1).upper() if command_m else "ALL"),
+            role=(role_m.group(1).strip() if role_m else None),
+            using=_paren_expr(sql, "USING"),
+            with_check=_paren_expr(sql, "WITH\\s+CHECK"),
+            evidence=evidence,
+        )
+    )
+    table.rls = True
+
+
 def apply_statement(schema: Schema, sql: str, evidence: Evidence) -> None:
     stripped = sql.strip()
     if not stripped:
@@ -564,6 +643,9 @@ def apply_statement(schema: Schema, sql: str, evidence: Evidence) -> None:
         elif isinstance(stmt, exp.Alter):
             _apply_alter(schema, stmt)
             handled = True
+            m_rls = ENABLE_RLS.search(stripped)
+            if m_rls:
+                _table(schema, m_rls.group(1).split(".")[-1]).rls = True
         elif isinstance(stmt, exp.Command):
             cmd = str(stmt.this or "").upper()
             if cmd == "DO":
@@ -574,6 +656,9 @@ def apply_statement(schema: Schema, sql: str, evidence: Evidence) -> None:
                 handled = True
             elif cmd == "CREATE" and re.search(r"(?is)TRIGGER", str(stmt.args.get("expression") or stripped)):
                 _apply_trigger_regex(schema, stripped, evidence)
+                handled = True
+            elif cmd == "CREATE" and re.search(r"(?is)POLICY", str(stmt.args.get("expression") or stripped)):
+                _apply_policy(schema, stripped, evidence)
                 handled = True
 
     if handled:
@@ -586,6 +671,14 @@ def apply_statement(schema: Schema, sql: str, evidence: Evidence) -> None:
         return
     if CREATE_TRG.search(stripped):
         _apply_trigger_regex(schema, stripped, evidence)
+        return
+    if CREATE_POLICY.search(stripped):
+        _apply_policy(schema, stripped, evidence)
+        return
+    m_rls = ENABLE_RLS.search(stripped)
+    if m_rls:
+        table = _table(schema, m_rls.group(1).split(".")[-1])
+        table.rls = True
 
 
 def _stmt_symbol(stmt: str) -> str:

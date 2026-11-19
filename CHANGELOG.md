@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.2.0 — 2026-11-19
+
+Python stacks, Firestore/queues, PL/pgSQL + RLS, and a cross-repo registry.
+Behavior is generic; tests and fixtures are synthetic only (`examples/shop`,
+`examples/clinic`, `examples/pyplatform`, tmp fixtures). Clinic SQL that
+binds a session GUC uses `app.tenant_id` (not a domain-specific setting).
+
+### Added
+
+- **SQLAlchemy Core/ORM + Alembic**: `__tablename__` / `mapped_column` /
+  `Table(...)` become schema nodes. `select`/`insert`/`update`/`delete`,
+  `session.add`, `.values(...)`, and `text()`/`execute()` become reads and
+  writes. Alembic `upgrade()` revisions follow `down_revision` and are
+  **schema** (`role: schema`), not runtime writers. `bizmap why` lists them
+  under **defined/altered by**.
+- **Firebase / Firestore**: `https_fn`, `firestore_fn` document triggers,
+  scheduler, Cloud Tasks, and Pub/Sub entrypoints. `collection()` /
+  `document()` chains become `collection:` nodes with reads/writes.
+  Writers of a collection `triggers` matching `on_document_*` handlers.
+- **Python constant resolution** for routes: module and imported consts,
+  `+` concatenation, f-strings, `APIRouter(prefix=)`, and
+  `include_router(..., prefix=)`. Unresolvable pieces stay as `{name}`
+  placeholders with `unresolved: true` / `confidence: unknown` — never a
+  truncated path.
+- **Queues and workers**: Celery `@task` / `.delay()`, RQ `enqueue`,
+  Cloud Tasks `create_task` (HTTP URL → `calls_http`), Pub/Sub `publish`,
+  and `while True` / `run_forever` workers. Produce sites emit `enqueues`
+  edges to `queue:` nodes.
+- **PL/pgSQL, POLICY, RPC**: function bodies are scanned for SQL;
+  `CREATE POLICY` / `ENABLE ROW LEVEL SECURITY` attach to tables;
+  `supabase.rpc("fn")` (Python and JS) `calls` `function:sql.fn`.
+- **Cross-repo HTTP + registry**: `httpx`/`requests`/`fetch` URLs match
+  scanned routes via `bizmap.yaml` `services:`. `bizmap scan a b` and
+  `bizmap registry merge a.json b.json` merge graphs. Function /
+  entrypoint / queue ids are repo-qualified; tables and collections
+  **share** ids when `database:` matches, so `why` on a merged graph
+  shows writers and readers across repos.
+- **Catalog tables as external**: `pg_catalog.*`, `information_schema.*`,
+  and `pg_*` names are table nodes marked `external`.
+- **JavaScript detector** (Express routes, `fetch()`, `supabase.rpc`).
+  `.ts`/`.tsx` are parsed with the JavaScript grammar (best-effort).
+- Synthetic **`examples/pyplatform`**: FastAPI catalog (SQLAlchemy +
+  Alembic + RLS), Firebase worker, storefront HTTP client, Express web
+  proxy. Generic names only (`orders`, `users`, `tenants`,
+  `notifications`, `documents`, `jobs`).
+- YAML rules: `flask.yaml`, `firebase.yaml`, `celery.yaml`, `httpx.yaml`,
+  `supabase.yaml`. `express.yaml` is **active** (was a stub).
+
+### Changed
+
+- Graph format **0.2.0**: node types `collection` and `queue`; edge types
+  `calls_http` and `enqueues`; top-level `repo`, `database`, `repos`,
+  `services`.
+- `bizmap scan` accepts **one or more** roots. `bizmap.yaml` gains
+  `name`, `database`, `services`, and `repos`.
+- SQLAlchemy YAML rule is no longer “partial”; ORM/Core usage is handled
+  by the Python engine alongside `text()`/`execute()`.
+
 ## 0.1.3 — 2026-11-19
 
 Interface dispatch, dynamic SQL expansion, and alias-scope fixes after a

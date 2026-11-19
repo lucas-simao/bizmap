@@ -94,7 +94,7 @@ def test_looks_like_sql() -> None:
 def test_fromless_select_is_not_a_table() -> None:
     for sql in (
         "SELECT now()",
-        "SELECT set_config('app.clinic_id', $1, true)",
+        "SELECT set_config('app.tenant_id', $1, true)",
         "SELECT 1",
     ):
         acc = analyze_sql(sql, known_tables={"appointments", "patients"})

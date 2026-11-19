@@ -1,0 +1,20 @@
+id: python.queues
+language: python
+framework: celery
+description: Celery tasks, RQ enqueue, Cloud Tasks create_task, Pub/Sub publish.
+status: active
+when:
+  imports:
+    contains_any: [celery, rq, google.cloud.tasks, google.cloud.pubsub]
+    optional: true
+detect:
+  decorators:
+    method:
+      in: [task, shared_task]
+  calls:
+    method:
+      in: [delay, apply_async, enqueue, create_task, publish]
+produce:
+  entrypoint:
+    kind: queue
+    handler: "{function}"
