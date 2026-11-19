@@ -359,3 +359,52 @@ def unresolved_http_keys(url: str) -> list[str]:
     if parsed.netloc and not parsed.netloc.startswith("{"):
         add(parsed.netloc.split("@")[-1])
     return keys
+
+
+def _segments(path: str) -> list[str]:
+    return [p for p in normalize_path(path).split("/") if p]
+
+
+def suffix_template_match(template: str, actual: str) -> bool:
+    """True when ``actual`` matches the *tail* of a longer route template.
+
+    ``/orders/:id`` is a suffix of ``/api/v1/orders/:id`` (the client base
+    carried ``/api/v1``). Same-length paths are not suffix matches.
+    """
+    t_parts = _segments(template)
+    a_parts = _segments(actual)
+    if not a_parts or len(t_parts) <= len(a_parts):
+        return False
+    tail = "/" + "/".join(t_parts[-len(a_parts) :])
+    return path_template_match(tail, "/" + "/".join(a_parts))
+
+
+def route_literal_hits(
+    path: str,
+    method: str | None,
+    routes: list[tuple[str, str, str]],
+) -> list[str]:
+    """Routes that an API-looking string literal plausibly targets.
+
+    Precision rules (a literal carries no client/base information):
+
+    * same-length template match: any literal with a non-param segment;
+    * suffix match (unknown base prefix): needs 2+ literal segments, or a
+      method hint from the surrounding call (``.get(...)``, ``method: 'POST'``);
+    * the method hint, when present, must equal the route method;
+    * callers link only when exactly one route remains (ambiguous → nothing).
+    """
+    if literal_segment_count(path) < 1:
+        return []
+    method_u = method.upper() if method else None
+    full: list[str] = []
+    suffix: list[str] = []
+    allow_suffix = literal_segment_count(path) >= 2 or method_u is not None
+    for eid, rmethod, rpath in routes:
+        if method_u and rmethod.upper() not in {method_u, "ANY", "ALL"}:
+            continue
+        if path_template_match(rpath, path):
+            full.append(eid)
+        elif allow_suffix and suffix_template_match(rpath, path):
+            suffix.append(eid)
+    return full or suffix

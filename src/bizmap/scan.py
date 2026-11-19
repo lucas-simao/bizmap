@@ -27,9 +27,14 @@ from bizmap.graph import (
 )
 from bizmap.http_match import (
     classify_unresolved_http,
+    drop_leading_placeholders,
     match_http,
+    normalize_path,
+    path_template_match,
     path_without_placeholders,
+    route_literal_hits,
     strip_service_base,
+    suffix_template_match,
     unresolved_http_keys,
 )
 from bizmap.overrides import ScanConfig, apply_overrides, load_scan_config
@@ -1233,6 +1238,121 @@ def _stash_http_call(
     node.attrs["http_calls"] = bucket
 
 
+def _stash_route_literal(
+    graph: Graph,
+    fid: str,
+    item: dict,
+    *,
+    name: str,
+    language: str,
+) -> None:
+    node = graph.get(fid)
+    if node is None:
+        graph.add_node(fid, "function", name=name, language=language, evidence=item.get("evidence"))
+        node = graph.get(fid)
+    if node is None:
+        return
+    bucket = list(node.attrs.get("route_literals") or [])
+    clean = {k: v for k, v in item.items() if v is not None}
+    if clean not in bucket:
+        bucket.append(clean)
+    node.attrs["route_literals"] = bucket
+
+
+def _literal_covers(note_url: str, path: str) -> bool:
+    """True when an unresolved client URL is the same call as a matched literal."""
+    stripped = drop_leading_placeholders(normalize_path(note_url))
+    return path_template_match(stripped, path) or suffix_template_match(stripped, path)
+
+
+def _link_route_literals(graph: Graph) -> None:
+    """Link API-looking string literals to routes when the client was not traced.
+
+    Fallback for front-end clients built through factories / DI / wrappers the
+    detectors cannot follow: a literal like ``/orders/${id}`` inside
+    ``loadOrder`` becomes ``calls_http`` (``inferred``, ``via: route_literal``)
+    to the *single* route it matches. Ambiguous literals link to nothing.
+    Literals never link to a route registered in the same file.
+    """
+    routes: list[tuple[str, str, str]] = []
+    route_home: dict[str, tuple[str, str]] = {}
+    for node in graph.nodes.values():
+        if node.type != "entrypoint":
+            continue
+        if node.attrs.get("kind") not in {None, "http", "firebase_http"}:
+            continue
+        if node.attrs.get("unresolved"):
+            continue
+        method = str(node.attrs.get("method") or "")
+        path = str(node.attrs.get("path") or "")
+        if not method or not path:
+            continue
+        routes.append((node.id, method, path))
+        ev = node.attrs.get("evidence") or {}
+        ev_file = ev.get("file") if isinstance(ev, dict) else getattr(ev, "file", "")
+        route_home[node.id] = (str(node.attrs.get("repo") or graph.repo or ""), str(ev_file or ""))
+    if not routes:
+        return
+    existing: dict[str, set[str]] = defaultdict(set)
+    for edge in graph.edges.values():
+        if edge.type == "calls_http":
+            existing[edge.from_id].add(edge.to_id)
+    covered: dict[str, list[str]] = defaultdict(list)
+    for node in list(graph.nodes.values()):
+        literals = node.attrs.get("route_literals") or []
+        if not literals:
+            continue
+        repo = str(node.attrs.get("repo") or graph.repo or "")
+        for lit in literals:
+            path = str(lit.get("path") or "")
+            ev_raw = lit.get("evidence") or {}
+            lit_file = str(ev_raw.get("file") or "")
+            hits = [
+                eid
+                for eid in route_literal_hits(path, lit.get("method"), routes)
+                if route_home.get(eid) != (repo, lit_file)
+                and not (lit.get("same_repo") and route_home.get(eid, ("", ""))[0] != repo)
+            ]
+            if len(hits) != 1:
+                continue
+            target = hits[0]
+            covered[node.id].append(path)
+            if target in existing[node.id]:
+                continue
+            graph.add_edge(
+                "calls_http",
+                node.id,
+                target,
+                confidence=Confidence.INFERRED,
+                evidence=Evidence.from_dict(ev_raw),
+                via="route_literal",
+            )
+            existing[node.id].add(target)
+    if not covered:
+        return
+    for fid, paths in covered.items():
+        node = graph.get(fid)
+        if node is None:
+            continue
+        notes = node.attrs.get("unresolved_http") or []
+        kept = [
+            n
+            for n in notes
+            if not (isinstance(n, dict) and any(_literal_covers(str(n.get("url") or ""), p) for p in paths))
+        ]
+        if len(kept) != len(notes):
+            node.attrs["unresolved_http"] = kept
+    summary = graph.attrs.get("unresolved_http") or []
+    graph.attrs["unresolved_http"] = [
+        u
+        for u in summary
+        if not (
+            u.get("from") in covered
+            and any(_literal_covers(str(u.get("url") or ""), p) for p in covered[u["from"]])
+        )
+    ]
+
+
 def _link_http(
     graph: Graph,
     py: PyAnalysis | None,
@@ -1575,6 +1695,7 @@ def relink_merged_graph(graph: Graph, services: dict[str, str] | None = None) ->
     """Re-run HTTP and queue matching on a (merged) graph using stored call info."""
     services = services or graph.attrs.get("services") or {}
     _relink_http_from_graph(graph, services)
+    _link_route_literals(graph)
     _relink_queues_from_graph(graph, services)
 
 
@@ -1771,6 +1892,20 @@ def _scan_one(
             language="javascript",
             client_unknown=bool(getattr(call, "client_unknown", False)),
         )
+    for lit in js_analysis.route_literals:
+        _stash_route_literal(
+            graph,
+            function_id(lit.symbol),
+            {
+                "path": lit.path,
+                "method": lit.method,
+                "same_repo": True if lit.same_repo else None,
+                "evidence": {"file": lit.file, "line": lit.line, "symbol": lit.symbol},
+            },
+            name=lit.symbol,
+            language="javascript",
+        )
+    _link_route_literals(graph)
     for call in getattr(go_analysis, "http_calls", None) or []:
         _stash_http_call(
             graph,

@@ -817,9 +817,26 @@ class JsTableAccess:
 
 
 @dataclass
+class JsRouteLiteral:
+    """A string/template that looks like an API path, wherever it appears.
+
+    Linked to backend routes by path (``via: route_literal``) when the client
+    that sends it could not be traced through factories / DI / wrappers.
+    """
+
+    path: str
+    method: str | None
+    file: str
+    line: int
+    symbol: str
+    same_repo: bool = False
+
+
+@dataclass
 class JsAnalysis:
     routes: list[JsRoute] = field(default_factory=list)
     http_calls: list[JsHttpCall] = field(default_factory=list)
+    route_literals: list[JsRouteLiteral] = field(default_factory=list)
     rpc_calls: list[JsRpcCall] = field(default_factory=list)
     functions: dict[str, tuple[str, int]] = field(default_factory=dict)
     accesses: list[JsAccess] = field(default_factory=list)
@@ -956,6 +973,7 @@ class JsAnalyzer:
                 imports,
                 fn_nodes,
             )
+            _collect_route_literals(analysis, tree, rel_file, module, consts, routers)
         return analysis
 
     def _scan_file(
@@ -2426,3 +2444,274 @@ def _supabase_table(call: Node, consts: dict[str, str]) -> str | None:
             continue
         break
     return None
+
+
+# ---------------------------------------------------------------------------
+# Route literals: API-looking path strings, linked to routes by path.
+# ---------------------------------------------------------------------------
+
+# Object keys / JSX attributes whose string values are front-end navigation,
+# assets, or route *definitions* — never an outbound API call.
+_LITERAL_SKIP_KEYS = {
+    "path",
+    "to",
+    "href",
+    "redirect",
+    "redirectto",
+    "pathname",
+    "from",
+    "link",
+    "as",
+    "src",
+    "icon",
+    "image",
+    "asset",
+    "component",
+    "element",
+    "pattern",
+    "matcher",
+    "source",
+    "destination",
+}
+# Callees whose string arguments are navigation, matching, logging, or
+# route registration rather than an HTTP request.
+_LITERAL_SKIP_CALLS = {
+    "navigate",
+    "navigateto",
+    "push",
+    "replace",
+    "redirect",
+    "assign",
+    "open",
+    "require",
+    "import",
+    "prefetch",
+    "revalidatepath",
+    "revalidatetag",
+    "usematch",
+    "matchpath",
+    "matchroute",
+    "creatematcher",
+    "createroute",
+    "createfileroute",
+    "route",
+    "use",
+    "basepath",
+    "mount",
+    "register",
+    "group",
+    "on",
+    "static",
+    "sendfile",
+    "describe",
+    "it",
+    "test",
+    "log",
+    "warn",
+    "error",
+    "info",
+    "debug",
+    "startswith",
+    "endswith",
+    "includes",
+    "indexof",
+    "match",
+    "split",
+    "t",
+    "translate",
+}
+_ASSET_EXT = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,4}$")
+_SEGMENT_OK = re.compile(r"^[A-Za-z0-9_.~@:{}\-]+$")
+_METHOD_IN_OPTIONS = re.compile(r"""method\s*:\s*['"`]([A-Za-z]+)['"`]""")
+_HTTP_VERBS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+
+
+def _is_plus(node: Node) -> bool:
+    ops = [c for c in node.children if not c.is_named]
+    return bool(ops) and text(ops[0]) == "+"
+
+
+def _literal_top(node: Node) -> Node:
+    cur = node
+    while cur.parent is not None and (
+        (cur.parent.type == "binary_expression" and _is_plus(cur.parent))
+        or cur.parent.type == "parenthesized_expression"
+    ):
+        cur = cur.parent
+    return cur
+
+
+def _is_route_registration(call: Node, routers: dict[str, str]) -> bool:
+    recv = _receiver_ident(call)
+    assigned = _assigned_name(call)
+    return bool(
+        recv in routers
+        or _is_router_factory(call)
+        or (assigned and assigned in routers)
+    )
+
+
+def _literal_is_excluded(top: Node, routers: dict[str, str]) -> bool:
+    parent = top.parent
+    if parent is None:
+        return True
+    ptype = parent.type
+    if ptype in {
+        "import_statement",
+        "export_statement",
+        "jsx_attribute",
+        "switch_case",
+        "array",
+        "binary_expression",  # comparisons (`===`, `!==`, `in`)
+        "property_identifier",
+        "type_annotation",
+        "literal_type",
+    }:
+        return True
+    if ptype == "jsx_expression" and parent.parent is not None and parent.parent.type == "jsx_attribute":
+        return True
+    if ptype == "pair":
+        key = parent.child_by_field_name("key")
+        if key is None or key == top or key.start_byte == top.start_byte:
+            return True
+        if _unquote(text(key)).lower() in _LITERAL_SKIP_KEYS:
+            return True
+    if ptype in {"assignment_expression", "augmented_assignment_expression"}:
+        left = parent.child_by_field_name("left")
+        ltxt = text(left).lower() if left is not None else ""
+        if ltxt.endswith("href") or ltxt.endswith("location") or ltxt.endswith("pathname"):
+            return True
+    if ptype == "arguments" and parent.parent is not None and parent.parent.type in {
+        "call_expression",
+        "new_expression",
+    }:
+        call = parent.parent
+        name = call_callee_name(call).lower()
+        if name in _LITERAL_SKIP_CALLS:
+            return True
+        if name in ROUTE_HTTP_METHODS and _is_route_registration(call, routers):
+            return True
+        if call.type == "new_expression" and name in {"regexp", "urlpattern", "url"}:
+            return name != "url"
+    return False
+
+
+def _literal_method_hint(top: Node, consts: dict[str, str]) -> str | None:
+    parent = top.parent
+    if parent is None:
+        return None
+    if parent.type == "arguments" and parent.parent is not None and parent.parent.type == "call_expression":
+        call = parent.parent
+        name = call_callee_name(call).lower()
+        if name in CLIENT_HTTP_METHODS:
+            return name.upper()
+        args = call_args(call)
+        if name == "fetch":
+            if len(args) > 1:
+                m = _METHOD_IN_OPTIONS.search(text(args[1]))
+                if m and m.group(1).upper() in _HTTP_VERBS:
+                    return m.group(1).upper()
+            return "GET"
+        for arg in args:
+            if arg.start_byte == top.start_byte:
+                continue
+            if arg.type == "string":
+                verb = _unquote(text(arg)).upper()
+                if verb in _HTTP_VERBS:
+                    return verb
+            if arg.type == "object":
+                m = _METHOD_IN_OPTIONS.search(text(arg))
+                if m and m.group(1).upper() in _HTTP_VERBS:
+                    return m.group(1).upper()
+        return None
+    if parent.type == "pair":
+        key = parent.child_by_field_name("key")
+        if key is not None and _unquote(text(key)).lower() in {"url", "endpoint", "uri"}:
+            obj = parent.parent
+            if obj is not None:
+                m = _METHOD_IN_OPTIONS.search(text(obj))
+                if m and m.group(1).upper() in _HTTP_VERBS:
+                    return m.group(1).upper()
+    return None
+
+
+def _clean_route_literal(value: str | None) -> str | None:
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw or any(ch.isspace() for ch in raw) or "*" in raw or raw.startswith("//"):
+        return None
+    if "://" in raw:
+        if not raw.lower().startswith(("http://", "https://", "{")):
+            return None
+    elif not (raw.startswith("/") or (raw.startswith("{") and "/" in raw)):
+        return None
+    raw = _normalize_http_url(raw)
+    if "://" in raw:
+        after = raw.split("://", 1)[1]
+        raw = "/" + after.split("/", 1)[1] if "/" in after else "/"
+    raw = raw.split("?", 1)[0].split("#", 1)[0]
+    parts = [p for p in raw.split("/") if p]
+    while parts and (parts[0].startswith("{") or parts[0].startswith(":")):
+        parts.pop(0)
+    if not parts:
+        return None
+    literal = [p for p in parts if not (p.startswith(":") or p.startswith("{"))]
+    if not literal:
+        return None
+    if any(not _SEGMENT_OK.match(p) for p in parts):
+        return None
+    if _ASSET_EXT.search(parts[-1]) and not parts[-1].startswith(":"):
+        return None
+    return "/" + "/".join(parts)
+
+
+def _collect_route_literals(
+    analysis: JsAnalysis,
+    tree: Node,
+    rel_file: str,
+    module: str,
+    consts: dict[str, str],
+    routers: dict[str, str],
+) -> None:
+    seen_tops: set[tuple[int, int]] = set()
+    seen: set[tuple[str, str, str | None]] = set()
+    for node in walk(tree):
+        if node.type not in {"string", "template_string"}:
+            continue
+        top = _literal_top(node)
+        key = (top.start_byte, top.end_byte)
+        if key in seen_tops:
+            continue
+        seen_tops.add(key)
+        if _literal_is_excluded(top, routers):
+            continue
+        value, _unresolved = _resolve_js_string(top, consts)
+        path = _clean_route_literal(value)
+        if path is None:
+            continue
+        method = _literal_method_hint(top, consts)
+        # Bare `fetch('/x')` is relative to the page origin: same repo only.
+        same_repo = bool(
+            value
+            and value.startswith("/")
+            and top.parent is not None
+            and top.parent.type == "arguments"
+            and top.parent.parent is not None
+            and call_callee_name(top.parent.parent).lower() == "fetch"
+        )
+        symbol = _enclosing_symbol(top, module)
+        dedupe = (symbol, path, method)
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        analysis.route_literals.append(
+            JsRouteLiteral(
+                path=path,
+                method=method,
+                file=rel_file,
+                line=line_of(top),
+                symbol=symbol,
+                same_repo=same_repo,
+            )
+        )

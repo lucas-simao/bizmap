@@ -48,7 +48,7 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 | `type` | `id` pattern | Extra fields |
 | --- | --- | --- |
 | `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:<kind>:<key>` | `kind` (`http` \| `scheduled_job` \| `firestore` \| `celery_task` \| `worker` \| `pubsub` \| `cloud_task` \| `firebase_http` \| `firebase_call`), `method`, `path`, `symbol`, `why`, `evidence`, optional `confidence`, `candidates`, `unresolved` (const path not in the scan), optional `unresolved_calls`, optional `collection` / `event`, optional `dynamic_table` / `dynamic_table_unknown` (flag/count when a reachable origin writes `table:unknown`; never a reach edge) |
-| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http` |
+| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http`, optional `route_literals` (JS/TS API-looking path strings `{path, method?, evidence}` kept for registry rematch) |
 | `table` | `table:<name>` | `name`; optional `external` (system catalogs / `storage.*` / `vault.*` / `auth.*`), `kind` (`external_relation` \| `unresolved_relation`), `dropped` (still referenced after `DROP TABLE`), `candidates` (dynamic/`unknown`), `rls`, `policies` |
 | `view` | `view:<name>` | `name`, `kind` (`view` \| `unresolved_relation`), optional `materialized` |
 | `column` | `column:<table>.<column>` | `table`, `name`, `data_type`, `nullable`, optional `why` |
@@ -104,10 +104,33 @@ Every edge has:
 }
 ```
 
-Optional `via` records that a write was propagated through a database trigger.
+Optional `via` records how an edge was derived: a write propagated through a
+database trigger, or `route_literal` on a `calls_http` edge that was matched
+from an API-looking string literal (see below) rather than a traced client.
 Optional `situation` is a list of const/iota names observed at call sites
 (for example `audit.AppointmentCanceled`) so `bizmap why` can say *when* a
 column is written.
+
+### Route literals (`calls_http` with `via: route_literal`)
+
+Front-end clients are often built through layers static analysis cannot
+follow (DI containers, registries, factories of factories). As a fallback,
+every JS/TS string or template that looks like an API path — `'/orders/' +
+id`, `` `${base}/orders/${id}` `` — is recorded on its enclosing function and
+matched against scanned routes, in the same repo or across a joint scan:
+
+- Navigation and non-API strings are ignored: route registration arguments,
+  `navigate()` / `router.push()` / `redirect()`, `<Link to>` and other JSX
+  attributes, `path:` / `href:` / `to:` object keys, comparisons and
+  `startsWith()`, arrays of paths, imports, and asset files (`/logo.png`).
+- A same-length template match is accepted. A *suffix* match (the client base
+  carried `/api/v1`) needs 2+ literal segments or a method hint from the
+  surrounding call (`.get(...)`, `fetch(url, { method: 'POST' })`,
+  `{ url, method }`).
+- The edge is created only when **exactly one** route matches, and never to
+  a route registered in the same file. Ambiguous literals link to nothing.
+- A bare `fetch('/x')` is page-relative and only links within its own repo.
+- Edges are `inferred`; the matching `unresolved_http` entry is dropped.
 
 ## Confidence
 
