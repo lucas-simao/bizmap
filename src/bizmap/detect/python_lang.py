@@ -678,6 +678,7 @@ class PySqlSite:
     note: str | None = None
     confidence: Confidence | None = None
     via: str | None = None
+    sink_not_scanned: bool = False
 
 
 @dataclass
@@ -760,6 +761,8 @@ class PyAnalysis:
     workers: list[PyFunction] = field(default_factory=list)
     # (caller, callee) -> how a `calls` edge was derived (e.g. "passed_as_arg")
     call_vias: dict[tuple[str, str], str] = field(default_factory=dict)
+    # (caller, callee) -> why the call could not be followed
+    unresolved_reasons: dict[tuple[str, str], str] = field(default_factory=dict)
 
 
 class PythonAnalyzer:
@@ -966,6 +969,7 @@ class PythonAnalyzer:
         _link_field_dispatch(analysis, parsed)
         _link_executor_calls(analysis, parsed)
         _link_module_calls_and_passed_fns(analysis, parsed)
+        _link_unscanned_sinks(analysis, parsed, consts_by_module)
         _link_sql_references(analysis, parsed, consts_by_module, dicts_by_module)
         unique: dict[tuple, PySqlSite] = {}
         for site in analysis.sql_sites:
@@ -3944,3 +3948,143 @@ def _link_module_calls_and_passed_fns(analysis: PyAnalysis, parsed: list) -> Non
                         ):
                             continue
                     add(fn.qualname, ref, ev, Confidence.INFERRED, "passed_as_arg")
+
+
+
+# ---------------------------------------------------------------------------
+# Calls into first-party code that is not in the scan (direct, partial,
+# executors): record them as unresolved (`target_not_scanned`) and keep SQL
+# handed to them as an `inferred` access with `sink_not_scanned: true`.
+# ---------------------------------------------------------------------------
+
+_COMMON_THIRD_PARTY = {
+    "aiohttp", "alembic", "anyio", "asyncpg", "boto3", "botocore", "celery", "click",
+    "django", "dotenv", "fastapi", "firebase_admin", "flask", "google", "httpx", "jwt",
+    "numpy", "pandas", "psycopg", "psycopg2", "pydantic", "pytest", "redis", "requests",
+    "rq", "sqlalchemy", "sqlmodel", "starlette", "structlog", "typing_extensions",
+    "uvicorn", "yaml", "attrs", "orjson", "ujson", "tenacity", "loguru", "sentry_sdk",
+}
+
+
+def _is_first_party(module_path: str, scanned_roots: set[str]) -> bool:
+    import sys
+
+    root = module_path.lstrip(".").split(".", 1)[0]
+    if not root:
+        return True  # relative import
+    if root in scanned_roots:
+        return True
+    stdlib = getattr(sys, "stdlib_module_names", set())
+    return root not in stdlib and root not in _COMMON_THIRD_PARTY
+
+
+def _imported_qualname(expr: Node, imap: ImportMap) -> str | None:
+    if expr.type == "identifier":
+        hit = imap.from_names.get(text(expr))
+        return f"{hit[0]}.{hit[1]}" if hit else None
+    if expr.type == "attribute":
+        obj = expr.child_by_field_name("object")
+        attr = expr.child_by_field_name("attribute")
+        if obj is None or attr is None or obj.type != "identifier":
+            return None
+        mod = imap.modules.get(text(obj))
+        if mod:
+            return f"{mod}.{text(attr)}"
+        hit = imap.from_names.get(text(obj))
+        if hit:
+            return f"{hit[0]}.{hit[1]}.{text(attr)}"
+    return None
+
+
+def _link_unscanned_sinks(
+    analysis: PyAnalysis,
+    parsed: list,
+    consts_by_module: dict[str, dict[str, ResolvedString]],
+) -> None:
+    scanned_modules = {module for _p, _rf, _s, _t, module, _i, _f in parsed}
+    scanned_roots = {m.split(".", 1)[0] for m in scanned_modules}
+    known_unresolved = {(u.caller, u.callee) for u in analysis.unresolved_calls}
+
+    for _path, rel_file, _src, _tree, module, imap, fns in parsed:
+        local_consts = consts_by_module.get(module) or {}
+
+        def sql_of(arg: Node, *, imap=imap, local_consts=local_consts) -> str | None:
+            if arg.type == "string":
+                raw = unquote(text(arg))
+                return raw if looks_like_sql(raw) else None
+            if arg.type == "identifier":
+                name = text(arg)
+                if name in imap.from_names:
+                    mod, orig = imap.from_names[name]
+                    hit = _sql_text((consts_by_module.get(mod) or {}).get(orig))
+                    if hit:
+                        return hit
+                return _sql_text(local_consts.get(name))
+            if arg.type == "attribute":
+                obj = arg.child_by_field_name("object")
+                attr = arg.child_by_field_name("attribute")
+                if obj is not None and attr is not None and obj.type == "identifier":
+                    mod = imap.modules.get(text(obj))
+                    if mod:
+                        return _sql_text((consts_by_module.get(mod) or {}).get(text(attr)))
+            return None
+
+        for fn in fns:
+            fdef = fn.node
+            if fdef.type == "decorated_definition":
+                fdef = fdef.child_by_field_name("definition") or fdef
+            for node in walk(fdef):
+                if node.type != "call":
+                    continue
+                owner = _enclosing_fn_node(node)
+                if owner is None or (owner.start_byte, owner.end_byte) != (fdef.start_byte, fdef.end_byte):
+                    continue
+                name = call_callee_name(node)
+                pos = call_posargs(node)
+                target: Node | None = node.child_by_field_name("function")
+                extra: list[Node] = list(pos)
+                if name in _EXECUTOR_POS:
+                    idx = _EXECUTOR_POS[name]
+                    target = pos[idx] if len(pos) > idx else None
+                    extra = pos[idx + 1 :] if len(pos) > idx else []
+                if target is not None and target.type == "call" and call_callee_name(target) == "partial":
+                    ppos = call_posargs(target)
+                    extra = ppos[1:] + extra
+                    target = ppos[0] if ppos else None
+                if target is None:
+                    continue
+                qual = _imported_qualname(target, imap)
+                if not qual or qual in analysis.functions:
+                    continue
+                src_module = qual.rsplit(".", 1)[0]
+                if src_module in scanned_modules or qual in scanned_modules:
+                    continue  # module scanned: a class / constant, not an unscanned sink
+                if not _is_first_party(src_module, scanned_roots):
+                    continue
+                ev = Evidence(file=rel_file, line=line_of(node), symbol=fn.qualname)
+                if (fn.qualname, qual) not in known_unresolved:
+                    known_unresolved.add((fn.qualname, qual))
+                    analysis.unresolved_calls.append(PyUnresolvedCall(fn.qualname, qual, ev))
+                analysis.unresolved_reasons[(fn.qualname, qual)] = "target_not_scanned"
+                for arg in extra:
+                    sql = sql_of(arg)
+                    if not sql:
+                        continue
+                    norm = _norm_sql(sql)
+                    matched = False
+                    for site in analysis.sql_sites:
+                        if site.function.qualname == fn.qualname and _norm_sql(site.sql) == norm:
+                            site.confidence = Confidence.INFERRED
+                            site.sink_not_scanned = True
+                            matched = True
+                    if not matched:
+                        analysis.sql_sites.append(
+                            PySqlSite(
+                                function=fn,
+                                sql=sql,
+                                dynamic=False,
+                                evidence=ev,
+                                confidence=Confidence.INFERRED,
+                                sink_not_scanned=True,
+                            )
+                        )

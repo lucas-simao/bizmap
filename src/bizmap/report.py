@@ -141,6 +141,12 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
         if e.get("type") in {"reads", "writes"} and e.get("via")
     )
     unresolved_calls = sum(len(n.get("unresolved_calls") or []) for n in nodes.values())
+    call_reasons: Counter[str] = Counter()
+    for n in nodes.values():
+        names = n.get("unresolved_calls") or []
+        reasons = n.get("unresolved_call_reasons") or {}
+        for name in names:
+            call_reasons[str(reasons.get(name) or "no_scanned_implementer")] += 1
     total_entry = len(entrypoints)
     total_reach = sum(reaching.values())
     unknown_only = sum(1 for n in entrypoints if not reach[n["id"]] and n["id"] in unknown_reach)
@@ -173,6 +179,7 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
         "data_links_by_via": dict(sorted(data_via.items())),
         "edges_by_confidence": dict(sorted(confidence.items())),
         "unresolved_calls": unresolved_calls,
+        "unresolved_calls_by_reason": dict(sorted(call_reasons.items())),
     }
 
 
@@ -229,7 +236,9 @@ def format_report(rep: dict[str, Any], *, limit: int = 20) -> str:
         out.append("data links by derivation: " + ", ".join(f"{k} {v}" for k, v in rep["data_links_by_via"].items()))
     out.append("")
     out.append("edges by confidence: " + ", ".join(f"{k} {v}" for k, v in rep["edges_by_confidence"].items()))
-    out.append(f"unresolved calls (interface/injection with no scanned target): {rep['unresolved_calls']}")
+    by_reason = rep.get("unresolved_calls_by_reason") or {}
+    detail = ", ".join(f"{k} {v}" for k, v in by_reason.items())
+    out.append(f"unresolved calls: {rep['unresolved_calls']}" + (f"  ({detail})" if detail else ""))
     out.append("")
     out.append("reach: " + ep.get("definition", REACH_DEFINITION))
     return "\n".join(out) + "\n"
