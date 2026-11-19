@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **SQLAlchemy builders on models outside the scan left no trace**
+  (regression from the phantom-reads fix above): `update(Invoice)...` /
+  `select(Invoice)` where `Invoice` is imported from an unscanned package now
+  record `writes`/`reads` to `table:unknown` (confidence `unknown`) instead of
+  nothing. Builders on scanned models keep their exact edges with no unknown
+  extra. Raw SQL on a table without DDL keeps its `unresolved_relation` edge
+  (now covered by a test).
+
 - **`registry merge` ≠ joint scan (1 edge)**: `bizmap scan web` (one repo)
   did not see the `services:` / `database:` declared in the workspace
   `bizmap.yaml` that lists `repos: [web, api, billing]`, so per-repo graphs
