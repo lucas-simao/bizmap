@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1046,7 +1047,7 @@ class PythonAnalyzer:
         _link_field_dispatch(analysis, parsed)
         _link_executor_calls(analysis, parsed)
         _link_module_calls_and_passed_fns(analysis, parsed)
-        _link_unscanned_sinks(analysis, parsed, consts_by_module)
+        _link_unscanned_sinks(analysis, parsed, consts_by_module, _declared_dependencies(root))
         _link_sql_references(analysis, parsed, consts_by_module, dicts_by_module)
         unique: dict[tuple, PySqlSite] = {}
         for site in analysis.sql_sites:
@@ -4043,7 +4044,9 @@ _COMMON_THIRD_PARTY = {
 }
 
 
-def _is_first_party(module_path: str, scanned_roots: set[str]) -> bool:
+def _is_first_party(
+    module_path: str, scanned_roots: set[str], declared: set[str] | None = None
+) -> bool:
     import sys
 
     root = module_path.lstrip(".").split(".", 1)[0]
@@ -4052,35 +4055,138 @@ def _is_first_party(module_path: str, scanned_roots: set[str]) -> bool:
     if root in scanned_roots:
         return True
     stdlib = getattr(sys, "stdlib_module_names", set())
-    return root not in stdlib and root not in _COMMON_THIRD_PARTY
+    return root not in stdlib and root not in _COMMON_THIRD_PARTY and root not in (declared or set())
+
+
+def _dotted(expr: Node) -> list[str] | None:
+    parts: list[str] = []
+    cur: Node | None = expr
+    while cur is not None and cur.type == "attribute":
+        attr = cur.child_by_field_name("attribute")
+        if attr is None:
+            return None
+        parts.append(text(attr))
+        cur = cur.child_by_field_name("object")
+    if cur is None or cur.type != "identifier":
+        return None
+    parts.append(text(cur))
+    return list(reversed(parts))
 
 
 def _imported_qualname(expr: Node, imap: ImportMap) -> str | None:
-    if expr.type == "identifier":
-        hit = imap.from_names.get(text(expr))
-        return f"{hit[0]}.{hit[1]}" if hit else None
-    if expr.type == "attribute":
-        obj = expr.child_by_field_name("object")
-        attr = expr.child_by_field_name("attribute")
-        if obj is None or attr is None or obj.type != "identifier":
-            return None
-        mod = imap.modules.get(text(obj))
-        if mod:
-            return f"{mod}.{text(attr)}"
-        hit = imap.from_names.get(text(obj))
-        if hit:
-            return f"{hit[0]}.{hit[1]}.{text(attr)}"
+    """`fetch` / `conn.fetch` / `db.conn.fetch` → qualified through imports."""
+    parts = _dotted(expr)
+    if not parts:
+        return None
+    head, rest = parts[0], parts[1:]
+    if head in imap.from_names:
+        src, orig = imap.from_names[head]
+        return ".".join([src, orig, *rest])
+    if rest and head in imap.modules:
+        return ".".join([imap.modules[head], *rest])
     return None
+
+
+_DIST_TO_IMPORT = {
+    "pyyaml": "yaml",
+    "python_dateutil": "dateutil",
+    "beautifulsoup4": "bs4",
+    "pillow": "PIL",
+    "scikit_learn": "sklearn",
+    "opencv_python": "cv2",
+    "opencv_python_headless": "cv2",
+    "psycopg2_binary": "psycopg2",
+    "psycopg_binary": "psycopg",
+    "python_jose": "jose",
+    "pyjwt": "jwt",
+    "python_multipart": "multipart",
+    "python_dotenv": "dotenv",
+    "google_cloud_storage": "google",
+    "google_cloud_firestore": "google",
+    "google_cloud_tasks": "google",
+    "google_cloud_pubsub": "google",
+    "google_auth": "google",
+    "protobuf": "google",
+    "msgpack_python": "msgpack",
+}
+
+
+def _declared_dependencies(root: Path) -> set[str]:
+    """Import names of third-party packages declared anywhere in the scan
+    (pyproject [project] / Poetry, requirements*.txt, setup.cfg)."""
+    import tomllib
+
+    names: set[str] = set()
+
+    def add(spec: str) -> None:
+        raw = re.split(r"[\s<>=!~;\[@(]", spec.strip(), maxsplit=1)[0]
+        if not raw or raw.startswith(("-", "#", ".", "/")):
+            return
+        norm = raw.lower().replace("-", "_").replace(".", "_")
+        names.add(_DIST_TO_IMPORT.get(norm, norm))
+        if norm.startswith("google_"):
+            names.add("google")
+
+    import os
+
+    skip = {"node_modules", ".venv", "venv", ".git", "__pycache__", "dist", "build", ".tox"}
+    candidates: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in skip]
+        for fname in filenames:
+            if fname in {"pyproject.toml", "setup.cfg"} or (
+                fname.startswith("requirements") and fname.endswith((".txt", ".in"))
+            ):
+                candidates.append(Path(dirpath) / fname)
+    for path in sorted(candidates):
+        name = path.name
+        try:
+            if name == "pyproject.toml":
+                data = tomllib.loads(path.read_text(encoding="utf-8"))
+                for dep in (data.get("project") or {}).get("dependencies") or []:
+                    add(str(dep))
+                for group in ((data.get("project") or {}).get("optional-dependencies") or {}).values():
+                    for dep in group or []:
+                        add(str(dep))
+                poetry = (data.get("tool") or {}).get("poetry") or {}
+                for key in (poetry.get("dependencies") or {}):
+                    add(str(key))
+                for grp in (poetry.get("group") or {}).values():
+                    for key in (grp or {}).get("dependencies") or {}:
+                        add(str(key))
+            elif name.startswith("requirements") and name.endswith((".txt", ".in")):
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    add(line)
+            elif name == "setup.cfg":
+                block = False
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if line.strip().startswith("install_requires"):
+                        block = True
+                        tail = line.split("=", 1)[1] if "=" in line else ""
+                        if tail.strip():
+                            add(tail)
+                        continue
+                    if block:
+                        if line and not line[0].isspace():
+                            block = False
+                        elif line.strip():
+                            add(line)
+        except (OSError, ValueError):
+            continue
+    names.discard("python")
+    return names
 
 
 def _link_unscanned_sinks(
     analysis: PyAnalysis,
     parsed: list,
     consts_by_module: dict[str, dict[str, ResolvedString]],
+    declared: set[str] | None = None,
 ) -> None:
     scanned_modules = {module for _p, _rf, _s, _t, module, _i, _f in parsed}
     scanned_roots = {m.split(".", 1)[0] for m in scanned_modules}
     known_unresolved = {(u.caller, u.callee) for u in analysis.unresolved_calls}
+    resolved_pairs = {(c, d) for c, d, _e, _k in analysis.calls}
 
     for _path, rel_file, _src, _tree, module, imap, fns in parsed:
         local_consts = consts_by_module.get(module) or {}
@@ -4110,6 +4216,21 @@ def _link_unscanned_sinks(
             fdef = fn.node
             if fdef.type == "decorated_definition":
                 fdef = fdef.child_by_field_name("definition") or fdef
+            # local `sql = "SELECT ..."` (single static value per name)
+            local_sql: dict[str, str | None] = {}
+            for node in walk(fdef):
+                if node.type != "assignment":
+                    continue
+                left = node.child_by_field_name("left")
+                right = node.child_by_field_name("right")
+                if left is None or right is None or left.type != "identifier":
+                    continue
+                val = sql_of(right)
+                key = text(left)
+                if key in local_sql and local_sql[key] != val:
+                    local_sql[key] = None
+                else:
+                    local_sql[key] = val
             for node in walk(fdef):
                 if node.type != "call":
                     continue
@@ -4131,12 +4252,15 @@ def _link_unscanned_sinks(
                 if target is None:
                     continue
                 qual = _imported_qualname(target, imap)
-                if not qual or qual in analysis.functions:
+                if not qual or qual in analysis.functions or (fn.qualname, qual) in resolved_pairs:
+                    continue
+                # any scanned module along the dotted path means it is our code,
+                # just not a plain function (class, instance, constant)
+                prefixes = [".".join(qual.split(".")[:i]) for i in range(1, qual.count(".") + 1)]
+                if any(p in scanned_modules for p in prefixes) or qual in scanned_modules:
                     continue
                 src_module = qual.rsplit(".", 1)[0]
-                if src_module in scanned_modules or qual in scanned_modules:
-                    continue  # module scanned: a class / constant, not an unscanned sink
-                if not _is_first_party(src_module, scanned_roots):
+                if not _is_first_party(src_module, scanned_roots, declared):
                     continue
                 ev = Evidence(file=rel_file, line=line_of(node), symbol=fn.qualname)
                 if (fn.qualname, qual) not in known_unresolved:
@@ -4145,10 +4269,23 @@ def _link_unscanned_sinks(
                 analysis.unresolved_reasons[(fn.qualname, qual)] = "target_not_scanned"
                 for arg in extra:
                     sql = sql_of(arg)
+                    if not sql and arg.type == "identifier":
+                        sql = local_sql.get(text(arg))
                     if not sql:
                         continue
                     norm = _norm_sql(sql)
                     matched = False
+                    # the generic argument scan may have recorded this call as
+                    # dynamic SQL (`{sql}`) → replace it with the resolved text
+                    analysis.sql_sites = [
+                        site
+                        for site in analysis.sql_sites
+                        if not (
+                            site.function.qualname == fn.qualname
+                            and site.dynamic
+                            and site.evidence.line == ev.line
+                        )
+                    ]
                     for site in analysis.sql_sites:
                         if site.function.qualname == fn.qualname and _norm_sql(site.sql) == norm:
                             site.confidence = Confidence.INFERRED

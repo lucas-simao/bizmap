@@ -605,6 +605,30 @@ def _apply_python(
             reasons = dict(node.attrs.get("unresolved_call_reasons") or {})
             reasons[callee] = reason
             node.attrs["unresolved_call_reasons"] = reasons
+    resolved_by_caller: dict[str, set[str]] = defaultdict(set)
+    for caller, callee, _ev, _conf in analysis.calls:
+        resolved_by_caller[caller].add(callee)
+    for caller, targets in resolved_by_caller.items():
+        node = graph.get(function_id(caller))
+        if node is None or not node.attrs.get("unresolved_calls"):
+            continue
+        # a `target_not_scanned` label naming a callee we did resolve is a
+        # duplicate. (Protocol/interface notes stay: a stub is not an
+        # implementation.)
+        reasons_now = node.attrs.get("unresolved_call_reasons") or {}
+        kept = [
+            name
+            for name in node.attrs["unresolved_calls"]
+            if not (
+                reasons_now.get(name) == "target_not_scanned"
+                and any(t == name or t.endswith("." + name) for t in targets)
+            )
+        ]
+        if len(kept) != len(node.attrs["unresolved_calls"]):
+            node.attrs["unresolved_calls"] = kept
+            reasons = node.attrs.get("unresolved_call_reasons")
+            if isinstance(reasons, dict):
+                node.attrs["unresolved_call_reasons"] = {k: v for k, v in reasons.items() if k in kept}
     for caller, callee, ev, conf in analysis.calls:
         via = (getattr(analysis, "call_vias", None) or {}).get((caller, callee))
         graph.add_edge(

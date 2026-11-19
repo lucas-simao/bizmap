@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`unresolved_calls` noise**: entries whose target also has a resolved
+  `calls` edge from the same function are dropped (dedupe by origin/target);
+  packages declared as dependencies anywhere in the scan (`pyproject`
+  `[project]`/Poetry, `requirements*.txt`, `setup.cfg`) are third-party and
+  never reported as `target_not_scanned`; a dotted path through a scanned
+  module is never reported.
+- **`sink_not_scanned` on real code**: SQL in a local variable
+  (`sql = "..."; await conn.fetch(sql)`) and dotted sinks (`db.conn.fetch`)
+  are resolved; the dynamic `table:unknown` site the generic scan recorded for
+  that call is replaced by the resolved tables.
+
 - **Python `src/` layouts and monorepos**: module names now follow package
   roots — the highest `__init__.py` package, else a declared source root
   (`src/` next to `pyproject.toml`/`setup.*`, setuptools `packages.find.where`,
