@@ -24,6 +24,8 @@ TABLE_FROM_PREFIX = re.compile(
     rf"(?:ONLY\s+)?({QUAL_IDENT})"
 )
 DYNAMIC_PLACEHOLDER = re.compile(r"\{[^{}]+\}")
+# Concat/helper holes (`{helper(o)}`, `{t.o}`) — not JSON `{"a": 1}`.
+SQL_HOLE = re.compile(r"\{(?![\"'])[^{}]+\}")
 # Table-name holes: `"UPDATE "+t+" SET"`, `EXECUTE format('UPDATE %I ...')`.
 # Strip ON CONFLICT / FOR UPDATE OF first so `DO UPDATE SET` / aliases are not holes.
 DYNAMIC_TABLE_HOLE = re.compile(
@@ -391,7 +393,36 @@ def looks_like_sql(text: str | None) -> bool:
     return bool(SQL_START.search(text.strip()))
 
 
+def mask_sql_holes(sql: str) -> str:
+    """Replace concat/helper `{placeholders}` so sqlglot cannot invent columns."""
+    return SQL_HOLE.sub(" TRUE ", sql or "")
+
+
+def hole_column_names(sql: str | None) -> set[str]:
+    """Column-like tokens that only exist inside `{...}` concat holes."""
+    names: set[str] = set()
+    for match in SQL_HOLE.finditer(sql or ""):
+        inner = match.group(0).strip("{}")
+        for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", inner):
+            names.add(tok.lower())
+        if "." in inner:
+            names.add(inner.split(".")[-1].lower().split("(")[0])
+    return names
+
+
+def _column_only_in_holes(sql: str | None, column: str | None) -> bool:
+    """True when ``column`` appears only inside a concat `{placeholder}`."""
+    if not sql or not column:
+        return False
+    name = column.lower()
+    if name not in hole_column_names(sql):
+        return False
+    masked = SQL_HOLE.sub(" ", sql)
+    return re.search(rf"\b{re.escape(name)}\b", masked, re.IGNORECASE) is None
+
+
 def normalize_placeholders(sql: str) -> str:
+    sql = mask_sql_holes(sql)
     sql = PLACEHOLDER_N.sub(r"@p\1", sql)
     sql = PY_PERCENT.sub("?", sql)
     sql = NAMED_PARAM.sub(r"@\1", sql)
@@ -688,6 +719,10 @@ def _add(
             )
         )
         return
+    if column and ("{" in column or "}" in column):
+        column = None
+    if column and _column_only_in_holes(sql, column):
+        column = None
     if not table or is_skipped_table_name(table, skip_names):
         return
     qualified = ident_is_qualified(table)

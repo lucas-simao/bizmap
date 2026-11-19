@@ -77,7 +77,10 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `unresolved: true` — never a truncated path such as `/hidden`.
 - FastAPI `APIRouter(prefix=)` and `app.include_router(router, prefix=)`
   join onto handler paths. Flask `@app.route` / `Blueprint(url_prefix=)`
-  use the same string resolver.
+  use the same string resolver. Factories that return `FastAPI()` /
+  `APIRouter()` / `Flask()` (and apps imported from another module) keep
+  their `@app.get` / `@app.route` / `@app.api_route`. Otherwise a
+  module-level `@name.get("/path")` is accepted; `@patch("x.y")` is not.
 - SQLAlchemy models (`__tablename__`, `mapped_column`, `Table(...)`) and
   Alembic `op.create_table` / `add_column` / `drop_*` feed the schema
   replayer. Alembic `upgrade` functions are tagged `role: schema`.
@@ -94,7 +97,11 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
 - Constructor / annotation dispatch: `Drainer(outbox)` then
   `self.outbox.settle(...)`, or `def run(store: Store): store.save(...)`,
   follows the class method (`inferred`). A single Protocol/ABC
-  implementer is used when the annotation is abstract.
+  implementer is used when the annotation is abstract. Dataclass/attrs
+  `Callable` fields union every construction site; `svc = Svc(fn); svc.go()`
+  on a module-level instance resolves to the class method. Unresolvable
+  typed dispatch is `unresolved_calls`. Non-DB calls inside Firestore
+  `.update({...})` / `.set({...})` dicts are not SQL.
 - Client URLs keep the env/host origin (`os.environ["X_URL"]`,
   `os.getenv`, `settings.x_url`, a constant, or a hostname) through local
   assignments (`base = os.environ["X_URL"]; post(base+"/p")`).
@@ -106,8 +113,13 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
 
 - Function **display names** are the directory relative to the scan root,
   always (`internal/services/appointments.Service.Run`). Packages are still
-  keyed by **import path** for resolution.
+  keyed by **import path** for resolution. With no `go.mod`, a unique
+  scanned-directory suffix of the import path is used and a warning is
+  printed.
 - Calls and Echo handlers resolve through each file's import aliases.
+  Outbound helpers that take `path`/`method` from the caller
+  (`getJSON(ctx, path, out)` with `c.baseURL + path`) emit `calls_http`
+  from the call site.
 - Method values (`h.Create`) use a `(import-path, Type, Method)` key after
   inferring `h` from constructors, composite literals, parameters, and struct
   fields. There is **no** `matches[0]` fallback on name collisions.
@@ -136,17 +148,22 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `--exclude GLOB` (repeatable) merges with YAML `exclude`. `--profile`
   prints parse / resolve / sql / propagate timings to stderr.
 
-## JavaScript / TypeScript resolution (v0.2.4)
+## JavaScript / TypeScript resolution (v0.2.5)
 
 - `.js` / `.mjs` / `.cjs` use tree-sitter-javascript; `.ts` / `.tsx` use
   tree-sitter-typescript (`language_typescript` / `language_tsx`).
 - Express / Fastify / Hono: routes require a known app/router receiver
   (`express()`, `Router()`, `fastify()`, `new Hono()`, chained
   `new Hono().use().get()`, or typed as such) and a string-literal or
-  resolvable const path. `.basePath('/v1')` and `.route('/x', sub)` apply
-  prefixes. `client.get`, `api.post`, `axios.get`, `fetch`, and `Map.get`
-  / `.delete` are outbound `calls_http`, not routes. `axios.create` /
-  `ky.create` / `ofetch.create` `{baseURL}` compose with later `.get('/x')`.
+  resolvable const path. `.basePath('/v1')` and `.route('/x', sub)` /
+  `app.use('/v1/items', importedRouter)` apply prefixes across files
+  (default/named exports, nested mounts). Known HTTP clients (`fetch`,
+  `axios` + instances, `ky`, `ofetch`, `got`, `superagent`) emit outbound
+  `calls_http`; `Map` / `Set` / `Headers` / `URLSearchParams` /
+  `searchParams` / `config.headers` do not. `axios.create` /
+  `ky.create` / `ofetch.create` `{baseURL}` (exported, factory-built, or
+  passed as a parameter) compose with later `.get('/x')`. Relative
+  `fetch('/x')` matches only the same repo or a `services:` mapping.
   Inline-arrow handlers attribute `supabase.from('t')` access to the route.
 - Supabase JS: `supabase.from('t').select|insert|update|delete|upsert`
   emits table reads/writes; `.rpc('fn')` calls `function:sql.fn` when
@@ -158,7 +175,7 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `entrypoint:http:POST:/functions/v1/<name>`, with call edges from the
   handler body into imported helpers.
 
-## Bundled rules (v0.2.4)
+## Bundled rules (v0.2.5)
 
 | File | Status | What it detects |
 | --- | --- | --- |

@@ -125,6 +125,8 @@ def scan_cmd(
     click.echo(
         f"wrote {out_path}  ({len(payload['nodes'])} nodes, {len(payload['edges'])} edges)"
     )
+    for warning in graph.attrs.get("warnings") or []:
+        click.echo(warning)
     unresolved = graph.attrs.get("unresolved_http") or []
     if unresolved:
         keys: list[str] = []

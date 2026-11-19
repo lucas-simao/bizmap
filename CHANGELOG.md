@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.2.5 — 2026-11-19
+
+Factory/imported FastAPI+Flask routes, HTTP-client precision, SQL concat
+holes, cross-file router mounts, and outbound HTTP composition after a
+private evaluation of v0.2.4. Behavior is generic; tests and fixtures are
+synthetic only (`orders`, `users`, `tenants`, `documents`, `jobs`, `items`).
+
+### Fixed
+
+- **FastAPI/Flask factory routes**: `app = create_service()` (factory in
+  another module that returns `FastAPI()` / `APIRouter()` / `Flask()`) and
+  an app/router imported from another module keep `@app.get` / `@app.route`
+  / `@app.api_route`. When the factory return type is not scannable, a
+  decorator `@<name>.get/post/put/patch/delete/api_route/route(...)` with a
+  literal path is accepted if `<name>` is a module-level variable (never a
+  call chain such as `@patch("x.y")`).
+- **Non-HTTP `.get` / `.delete`**: `config.headers.delete`, `headers.get`,
+  `params.delete`, `searchParams.get`, and `Map` / `Set` / `Headers` /
+  `URLSearchParams` methods are not client HTTP. Only known clients
+  (`fetch`, `axios` + instances, `ky`, `ofetch`, `got`, `superagent`) or
+  wrappers emit `calls_http`.
+- **SQL concat holes**: `"... WHERE " + helper(o)` / `{helper(o)}` never
+  becomes column `t.o`. Columns are not derived from SQL holes or concat
+  placeholders.
+- **Cross-file Hono/Express mounts**: `.route('/v1/items', importedChild)`
+  and `app.use('/v1/items', importedRouter)` apply the mount prefix across
+  files (default and named exports, chained and nested child routers).
+- **Outbound HTTP composition**: Go helpers that take `path`/`method` from
+  the caller (`getJSON(ctx, path, out)` building `c.baseURL + path` or
+  `fmt.Sprintf("%s%s", c.baseURL, path)`) emit `calls_http` from the
+  **caller** with base (env/const/config field) + the literal path
+  argument. TS `axios`/`ky` instances exported from another module, built
+  by a factory, or passed as a parameter carry `baseURL` across imports.
+- **Relative client URLs**: `fetch('/projects')` matches routes in the
+  same repo (or a repo mapped via `services:`), never an arbitrary repo.
+- **Injected callables**: dataclass/attrs `Callable` fields set by keyword
+  at construction sites in other modules (union of all sites, inferred);
+  `svc = Svc(run_query); svc.go()` on a module-level instance resolves to
+  the class method. Unresolvable typed dispatch emits `unresolved_calls`.
+- **Silent failures**: Go cross-package calls via import path with no
+  `go.mod` fall back to matching the import-path suffix against a scanned
+  directory and print a warning. Non-DB calls inside a Firestore
+  `.update({...})` / `.set({...})` dict (for example `datetime.now()`) do
+  not add `reads table:unknown`. `table:unknown` stays on the origin
+  function; entrypoints expose it only as `dynamic_table` /
+  `dynamic_table_unknown` (flag/count), never as a reach edge.
+
+### Changed
+
+- Graph format **0.2.5**. Entrypoint nodes may carry `dynamic_table` and
+  `dynamic_table_unknown`. Top-level `warnings` holds Go `go.mod` fallback
+  notes (also printed by `bizmap scan`).
+
 ## 0.2.4 — 2026-11-19
 
 Chained TypeScript routers, Deno/Edge serve call-graphs, outbound HTTP compose,

@@ -39,7 +39,10 @@ from bizmap.sql_analyze import looks_like_sql
 _PY_LANGUAGE = Language(tspy.language())
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
+HTTP_ROUTE_DECO = HTTP_METHODS | {"route", "api_route"}
 APP_CTORS = {"FastAPI", "Flask", "APIRouter", "Blueprint", "Quart", "Sanic", "Starlette"}
+APP_CTOR_ROUTERS = {"FastAPI", "APIRouter", "Quart", "Sanic", "Starlette"}
+APP_CTOR_FLASK = {"Flask", "Blueprint"}
 FIRESTORE_DOC_EVENTS = {
     "on_document_created": "created",
     "on_document_updated": "updated",
@@ -131,6 +134,158 @@ def _list_string_items(node: Node | None) -> list[str]:
         elif child.type == "list":
             out.extend(_list_string_items(child))
     return out
+
+
+def _http_receiver_ok(
+    receiver: str,
+    attr: Node | None,
+    routers: dict[str, str],
+    blueprints: dict[str, str],
+    module_names: set[str],
+) -> bool:
+    """Accept a known app/router, or `@name.get("/p")` on a module-level variable."""
+    if receiver in routers or receiver in blueprints:
+        return True
+    if not receiver or not receiver.isidentifier():
+        return False
+    if attr is None or attr.type != "attribute" or not attr.named_children:
+        return False
+    obj = attr.named_children[0]
+    # Never a call chain such as patch("x.y") / create_app().get(...)
+    if obj.type != "identifier":
+        return False
+    return receiver in module_names
+
+
+def _module_level_names(tree: Node, imap: ImportMap) -> set[str]:
+    names = set(imap.from_names) | set(imap.modules)
+    for child in tree.named_children:
+        stmt = child
+        if child.type == "expression_statement" and child.named_children:
+            stmt = child.named_children[0]
+        if stmt.type == "assignment":
+            left = stmt.child_by_field_name("left")
+            if left is not None and left.type == "identifier":
+                names.add(text(left))
+        if child.type == "function_definition":
+            name_n = child.child_by_field_name("name")
+            if name_n is not None:
+                names.add(text(name_n))
+        if child.type == "decorated_definition":
+            fn_node = next((c for c in child.named_children if c.type == "function_definition"), None)
+            if fn_node is not None:
+                name_n = fn_node.child_by_field_name("name")
+                if name_n is not None:
+                    names.add(text(name_n))
+    return names
+
+
+def _lookup_app_factory(
+    callee: str, imap: ImportMap, factories: dict[str, tuple[str, str]]
+) -> tuple[str, str] | None:
+    if callee in factories:
+        return factories[callee]
+    if callee in imap.from_names:
+        mod, orig = imap.from_names[callee]
+        found = factories.get(f"{mod}.{orig}") or factories.get(orig)
+        if found:
+            return found
+        for key, spec in factories.items():
+            if key.endswith("." + orig) or key == orig:
+                return spec
+    return None
+
+
+def _merge_imported_apps(
+    imap: ImportMap,
+    routers: dict[str, str],
+    blueprints: dict[str, str],
+    routers_by_mod: dict[str, dict[str, str]],
+    blueprints_by_mod: dict[str, dict[str, str]],
+) -> None:
+    for local, (mod, orig) in imap.from_names.items():
+        for m, rmap in routers_by_mod.items():
+            if m == mod or m.endswith("." + mod) or mod.endswith("." + m):
+                if orig in rmap:
+                    routers.setdefault(local, rmap[orig])
+        for m, bmap in blueprints_by_mod.items():
+            if m == mod or m.endswith("." + mod) or mod.endswith("." + m):
+                if orig in bmap:
+                    blueprints.setdefault(local, bmap[orig])
+
+
+def _ctor_prefix(call: Node) -> tuple[str, str] | None:
+    callee = call_callee_name(call)
+    if callee not in APP_CTORS:
+        return None
+    kw = call_kwargs(call)
+    if callee == "APIRouter":
+        prefix = ""
+        if "prefix" in kw:
+            node = kw["prefix"]
+            if node.type == "string":
+                prefix = unquote(text(node))
+        return ("router", prefix)
+    if callee == "Blueprint":
+        prefix = ""
+        if "url_prefix" in kw and kw["url_prefix"].type == "string":
+            prefix = unquote(text(kw["url_prefix"]))
+        return ("blueprint", prefix)
+    if callee in APP_CTOR_FLASK:
+        return ("blueprint" if callee == "Blueprint" else "router", "")
+    return ("router", "")
+
+
+def _collect_app_factories(parsed: list) -> dict[str, tuple[str, str]]:
+    """Functions that return FastAPI()/Flask()/APIRouter()/Blueprint()."""
+    factories: dict[str, tuple[str, str]] = {}
+    for _path, _rf, _src, _tree, module, _imap, fns in parsed:
+        for fn in fns:
+            spec = _function_app_factory(fn.node)
+            if spec is None:
+                continue
+            factories[fn.name] = spec
+            factories[fn.qualname] = spec
+            factories[f"{module}.{fn.name}"] = spec
+    return factories
+
+
+def _function_app_factory(fn_node: Node) -> tuple[str, str] | None:
+    local: dict[str, tuple[str, str]] = {}
+    found: tuple[str, str] | None = None
+    for node in walk(fn_node):
+        if node.type == "assignment":
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
+            if left is None or right is None or left.type != "identifier":
+                continue
+            if right.type == "call":
+                spec = _ctor_prefix(right)
+                if spec is not None:
+                    local[text(left)] = spec
+        if node.type != "return_statement":
+            continue
+        expr = node.named_children[0] if node.named_children else None
+        if expr is None:
+            continue
+        if expr.type == "call":
+            spec = _ctor_prefix(expr)
+            if spec is not None:
+                found = spec
+        elif expr.type == "identifier" and text(expr) in local:
+            found = local[text(expr)]
+    return found
+
+
+def _inside_firestore_write(node: Node) -> bool:
+    cur = node.parent
+    depth = 0
+    while cur is not None and depth < 24:
+        if cur.type == "call" and call_callee_name(cur) in FIRESTORE_WRITE:
+            return True
+        cur = cur.parent
+        depth += 1
+    return False
 
 
 def _ensure_path(path: str) -> str:
@@ -264,13 +419,16 @@ class PythonAnalyzer:
     def analyze(self, files: list[Path], root: Path) -> PyAnalysis:
         analysis = PyAnalysis()
         parsed: list[tuple[Path, str, bytes, Node, str, ImportMap, list[PyFunction]]] = []
+        forest: list[object] = []
         consts_by_module: dict[str, dict[str, ResolvedString]] = {}
         dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]] = {}
         imaps: dict[str, ImportMap] = {}
 
         for path in files:
             source = path.read_bytes()
-            tree = self._parser.parse(source).root_node
+            ts_tree = self._parser.parse(source)
+            forest.append(ts_tree)
+            tree = ts_tree.root_node
             rel_file = rel(path, root)
             module = _module_name(rel_file)
             imap = parse_imports(tree, module)
@@ -322,6 +480,8 @@ class PythonAnalyzer:
                 call_returns[fn.qualname] = ret
         protocols = _collect_protocols(parsed)
         protocol_impls = _protocol_implementers(parsed, protocols)
+        factories = _collect_app_factories(parsed)
+        prepared: list[tuple] = []
         for _path, rel_file, _source, tree, module, imap, fns in parsed:
             local = dict(consts_by_module.get(module) or {})
             local.update(_class_field_env(tree, local, imap, consts_by_module))
@@ -344,10 +504,60 @@ class PythonAnalyzer:
                     call_returns,
                 )
 
-            routers, includes, blueprints = self._collect_prefixes(tree, resolve)
+            routers, includes, blueprints = self._collect_prefixes(
+                tree, resolve, imap, factories
+            )
+            module_names = _module_level_names(tree, imap)
+            prepared.append(
+                (
+                    rel_file,
+                    tree,
+                    module,
+                    imap,
+                    fns,
+                    resolve,
+                    routers,
+                    includes,
+                    blueprints,
+                    module_names,
+                    local_dicts,
+                )
+            )
+
+        routers_by_mod: dict[str, dict[str, str]] = {}
+        blueprints_by_mod: dict[str, dict[str, str]] = {}
+        for _rf, _tree, module, _imap, _fns, _res, routers, _inc, blueprints, _names, _ld in prepared:
+            routers_by_mod[module] = routers
+            blueprints_by_mod[module] = blueprints
+        for _rf, _tree, _module, imap, _fns, _res, routers, _inc, blueprints, _names, _ld in prepared:
+            _merge_imported_apps(imap, routers, blueprints, routers_by_mod, blueprints_by_mod)
+
+        for (
+            rel_file,
+            tree,
+            module,
+            imap,
+            fns,
+            resolve,
+            routers,
+            includes,
+            blueprints,
+            module_names,
+            local_dicts,
+        ) in prepared:
             enclosing = {id(fn.node): fn for fn in fns}
             self._detect_routes(
-                analysis, tree, rel_file, imap, fns, enclosing, resolve, routers, includes, blueprints
+                analysis,
+                tree,
+                rel_file,
+                imap,
+                fns,
+                enclosing,
+                resolve,
+                routers,
+                includes,
+                blueprints,
+                module_names,
             )
             self._detect_calls_and_usage(
                 analysis,
@@ -372,8 +582,10 @@ class PythonAnalyzer:
             key = (site.function.qualname, site.sql, site.evidence.line)
             unique[key] = site
         analysis.sql_sites = list(unique.values())
-        _resolve_callable_injection(analysis)
-        _resolve_object_dispatch(analysis)
+        trees = [(mod, rf, tree) for _p, rf, _s, tree, mod, _i, _f in parsed]
+        _resolve_callable_injection(analysis, trees)
+        _resolve_object_dispatch(analysis, trees)
+        _ = forest
         return analysis
 
     def _collect_functions(
@@ -400,10 +612,18 @@ class PythonAnalyzer:
             )
         return fns
 
-    def _collect_prefixes(self, tree: Node, resolve) -> tuple[dict[str, str], list[tuple[str, str]], dict[str, str]]:
+    def _collect_prefixes(
+        self,
+        tree: Node,
+        resolve,
+        imap: ImportMap | None = None,
+        factories: dict[str, tuple[str, str]] | None = None,
+    ) -> tuple[dict[str, str], list[tuple[str, str]], dict[str, str]]:
         routers: dict[str, str] = {}
         includes: list[tuple[str, str]] = []
         blueprints: dict[str, str] = {}
+        imap = imap or ImportMap()
+        factories = factories or {}
         for node in walk(tree):
             if node.type == "assignment":
                 left = node.child_by_field_name("left")
@@ -429,6 +649,14 @@ class PythonAnalyzer:
                         blueprints[lname] = prefix
                 elif callee in APP_CTORS and lname:
                     routers[lname] = ""
+                elif lname:
+                    spec = _lookup_app_factory(callee, imap, factories)
+                    if spec is not None:
+                        kind, prefix = spec
+                        if kind == "blueprint":
+                            blueprints[lname] = prefix
+                        else:
+                            routers[lname] = prefix
             if node.type == "call" and call_callee_name(node) == "include_router":
                 pos = call_posargs(node)
                 kw = call_kwargs(node)
@@ -453,6 +681,7 @@ class PythonAnalyzer:
         routers: dict[str, str],
         includes: list[tuple[str, str]],
         blueprints: dict[str, str],
+        module_names: set[str] | None = None,
     ) -> None:
         http_deco = set()
         if self._fastapi:
@@ -460,6 +689,7 @@ class PythonAnalyzer:
             http_deco.update(str(x).lower() for x in spec.get("in") or HTTP_METHODS)
         else:
             http_deco.update(HTTP_METHODS)
+        http_deco.add("api_route")
 
         for node in walk(tree):
             if node.type != "decorated_definition":
@@ -487,6 +717,7 @@ class PythonAnalyzer:
                     routers,
                     includes,
                     blueprints,
+                    module_names or set(),
                 )
 
     def _apply_decorator(
@@ -501,6 +732,7 @@ class PythonAnalyzer:
         routers: dict[str, str],
         includes: list[tuple[str, str]],
         blueprints: dict[str, str],
+        module_names: set[str] | None = None,
     ) -> None:
         evidence = Evidence(file=rel_file, line=line_of(target), symbol=fn.qualname)
         call = target if target.type == "call" else None
@@ -636,7 +868,7 @@ class PythonAnalyzer:
 
         # Flask @bp.route / @app.route
         if method_l == "route" and call is not None:
-            if receiver not in routers and receiver not in blueprints:
+            if not _http_receiver_ok(receiver, attr, routers, blueprints, module_names or set()):
                 return
             pos = call_posargs(call)
             kw = call_kwargs(call)
@@ -659,9 +891,10 @@ class PythonAnalyzer:
                 )
             return
 
-        # FastAPI @app.get / @router.post — only on a known app/router/blueprint
+        # FastAPI @app.get / @router.post — known app/router, factory return, or
+        # module-level `@name.get("/path")` (never a call chain like patch("x.y")).
         if method_l in http_deco and call is not None:
-            if receiver not in routers and receiver not in blueprints:
+            if not _http_receiver_ok(receiver, attr, routers, blueprints, module_names or set()):
                 return
             if self._fastapi and not import_matches(imap.raw, self._fastapi.when):
                 # still allow if receiver is a collected app/router
@@ -686,6 +919,11 @@ class PythonAnalyzer:
             router_prefix = routers.get(receiver, "")
             extras = [p for name, p in includes if name == receiver]
             prefixes = extras or [""]
+            kw = call_kwargs(call)
+            if method_l == "api_route":
+                methods = [m.upper() for m in (_list_string_items(kw.get("methods")) or ["GET"])]
+            else:
+                methods = [method.upper()]
             for extra in prefixes:
                 full = join_route_path(extra, router_prefix, path_res.path_text)
                 unresolved = bool(path_res.unresolved or (extra and "{" in extra) or (router_prefix and "{" in router_prefix and not path_res.fully_static))
@@ -696,16 +934,17 @@ class PythonAnalyzer:
                     unresolved = True
                 if not path_res.fully_static:
                     unresolved = True
-                analysis.routes.append(
-                    PyRoute(
-                        method=method.upper(),
-                        path=_ensure_path(full),
-                        handler=fn,
-                        evidence=evidence,
-                        confidence=Confidence.UNKNOWN if unresolved else Confidence.EXACT,
-                        path_unresolved=unresolved,
+                for http_method in methods:
+                    analysis.routes.append(
+                        PyRoute(
+                            method=http_method,
+                            path=_ensure_path(full),
+                            handler=fn,
+                            evidence=evidence,
+                            confidence=Confidence.UNKNOWN if unresolved else Confidence.EXACT,
+                            path_unresolved=unresolved,
+                        )
                     )
-                )
 
     def _detect_calls_and_usage(
         self,
@@ -888,6 +1127,11 @@ class PythonAnalyzer:
         local_dicts: dict[str, dict[str, ResolvedString]] | None = None,
         dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]] | None = None,
     ) -> None:
+        if _inside_firestore_write(node) or (
+            method in FIRESTORE_WRITE | FIRESTORE_READ | {"collection", "document"}
+            and _collections_in_chain(node, resolve)
+        ):
+            return
         for rule in self._sql_rules:
             if not method_matches(method, (rule.detect.get("calls") or {}).get("method")):
                 continue
@@ -1572,42 +1816,48 @@ def _unique_fn(matches: list[PyFunction], exclude: str | None = None) -> PyFunct
     return None
 
 
-def _resolve_callable_injection(analysis: PyAnalysis) -> None:
+def _index_class_fields(
+    trees: list[tuple[str, str, Node]] | None,
+    analysis: PyAnalysis,
+) -> tuple[dict[str, list[str]], dict[str, Node], dict[str, set[str]]]:
+    class_fields: dict[str, list[str]] = {}
+    class_nodes: dict[str, Node] = {}
+    callable_fields: dict[str, set[str]] = {}
+
+    def take(node: Node) -> None:
+        cname = text(node.child_by_field_name("name"))
+        if not cname or cname in class_fields:
+            return
+        class_fields[cname] = _class_field_names(node)
+        class_nodes[cname] = node
+        callable_fields[cname] = _class_callable_fields(node)
+
+    if trees:
+        for _module, _rel_file, root in trees:
+            for node in walk(root):
+                if node.type == "class_definition":
+                    take(node)
+        return class_fields, class_nodes, callable_fields
+    for fn in analysis.functions.values():
+        cur = fn.node.parent
+        while cur is not None:
+            if cur.type == "class_definition":
+                take(cur)
+                break
+            cur = cur.parent
+    return class_fields, class_nodes, callable_fields
+
+
+def _resolve_callable_injection(
+    analysis: PyAnalysis,
+    trees: list[tuple[str, str, Node]] | None = None,
+) -> None:
     """Link calls through injected callables (args, dataclass fields, aliases)."""
     by_name = _fn_by_name(analysis)
     existing = {(c, d) for c, d, _e, _k in analysis.calls}
 
-    param_of: dict[str, list[str]] = {}
-    class_fields: dict[str, list[str]] = {}
-    class_nodes: dict[str, Node] = {}
-    callable_fields: dict[str, set[str]] = {}
-    seen_files: set[str] = set()
-    for fn in analysis.functions.values():
-        param_of[fn.qualname] = _param_names(fn.node)
-        cur = fn.node.parent
-        while cur is not None:
-            if cur.type == "class_definition":
-                cname = text(cur.child_by_field_name("name"))
-                if cname and cname not in class_fields:
-                    class_fields[cname] = _class_field_names(cur)
-                    class_nodes[cname] = cur
-                    callable_fields[cname] = _class_callable_fields(cur)
-                break
-            cur = cur.parent
-        if fn.file in seen_files:
-            continue
-        seen_files.add(fn.file)
-        root = fn.node
-        while root.parent is not None:
-            root = root.parent
-        for node in walk(root):
-            if node.type != "class_definition":
-                continue
-            cname = text(node.child_by_field_name("name"))
-            if cname and cname not in class_fields:
-                class_fields[cname] = _class_field_names(node)
-                class_nodes[cname] = node
-                callable_fields[cname] = _class_callable_fields(node)
+    param_of: dict[str, list[str]] = {fn.qualname: _param_names(fn.node) for fn in analysis.functions.values()}
+    class_fields, class_nodes, callable_fields = _index_class_fields(trees, analysis)
 
     # (caller, callee, param_index_or_name, target_qualname)
     passed: list[tuple[str, str, str, str]] = []
@@ -1625,49 +1875,57 @@ def _resolve_callable_injection(analysis: PyAnalysis) -> None:
                     target = _unique_fn(by_name.get(text(right)) or [], fn.qualname)
                     if target:
                         aliases[(fn.qualname, text(left))] = target.qualname
-                continue
-            if node.type != "call":
-                continue
-            callee = call_callee_name(node)
-            pos = call_posargs(node)
-            kw = call_kwargs(node)
-            # ClassName(field=fn) / ClassName(fn)
-            if callee in class_fields:
-                fields = class_fields[callee]
-                for i, arg in enumerate(pos):
-                    if arg.type != "identifier" or i >= len(fields):
-                        continue
-                    target = _unique_fn(by_name.get(text(arg)) or [], fn.qualname)
-                    if target:
-                        ctor_fields.append((callee, fields[i], target.qualname))
-                        passed.append((fn.qualname, callee, fields[i], target.qualname))
-                for k, arg in kw.items():
-                    if arg.type != "identifier":
-                        continue
-                    target = _unique_fn(by_name.get(text(arg)) or [], fn.qualname)
-                    if target:
-                        ctor_fields.append((callee, k, target.qualname))
-                        passed.append((fn.qualname, callee, k, target.qualname))
-            # func(persist) / func(run=persist)
-            targets_fn = by_name.get(callee) or []
-            uniq = _unique_fn(targets_fn)
-            if uniq is None and len(targets_fn) == 1:
-                uniq = targets_fn[0]
-            if uniq is None:
-                continue
-            params = param_of.get(uniq.qualname) or []
+
+    def _record_ctor(node: Node, caller: str) -> None:
+        callee = call_callee_name(node)
+        pos = call_posargs(node)
+        kw = call_kwargs(node)
+        if callee in class_fields:
+            fields = class_fields[callee]
             for i, arg in enumerate(pos):
-                if arg.type != "identifier" or i >= len(params):
+                if arg.type != "identifier" or i >= len(fields):
                     continue
-                target = _unique_fn(by_name.get(text(arg)) or [], fn.qualname)
+                target = _unique_fn(by_name.get(text(arg)) or [], caller)
                 if target:
-                    passed.append((fn.qualname, uniq.qualname, params[i], target.qualname))
+                    ctor_fields.append((callee, fields[i], target.qualname))
+                    passed.append((caller, callee, fields[i], target.qualname))
             for k, arg in kw.items():
                 if arg.type != "identifier":
                     continue
-                target = _unique_fn(by_name.get(text(arg)) or [], fn.qualname)
+                target = _unique_fn(by_name.get(text(arg)) or [], caller)
                 if target:
-                    passed.append((fn.qualname, uniq.qualname, k, target.qualname))
+                    ctor_fields.append((callee, k, target.qualname))
+                    passed.append((caller, callee, k, target.qualname))
+        targets_fn = by_name.get(callee) or []
+        uniq = _unique_fn(targets_fn)
+        if uniq is None and len(targets_fn) == 1:
+            uniq = targets_fn[0]
+        if uniq is None:
+            return
+        params = param_of.get(uniq.qualname) or []
+        for i, arg in enumerate(pos):
+            if arg.type != "identifier" or i >= len(params):
+                continue
+            target = _unique_fn(by_name.get(text(arg)) or [], caller)
+            if target:
+                passed.append((caller, uniq.qualname, params[i], target.qualname))
+        for k, arg in kw.items():
+            if arg.type != "identifier":
+                continue
+            target = _unique_fn(by_name.get(text(arg)) or [], caller)
+            if target:
+                passed.append((caller, uniq.qualname, k, target.qualname))
+
+    if trees:
+        for module, _rel_file, root in trees:
+            for node in walk(root):
+                if node.type == "call":
+                    _record_ctor(node, module)
+    else:
+        for fn in analysis.functions.values():
+            for node in walk(fn.node):
+                if node.type == "call":
+                    _record_ctor(node, fn.qualname)
 
     param_targets: dict[tuple[str, str], set[str]] = {}
     for _caller, callee, param, target in passed:
@@ -1750,10 +2008,23 @@ def _resolve_callable_injection(analysis: PyAnalysis) -> None:
                         uniq = link_unique(field)
                         if uniq:
                             targets.add(uniq)
+                callable_on_self = (
+                    obj_name == "self"
+                    and fn.class_name
+                    and field in (callable_fields.get(fn.class_name) or set())
+                )
                 for target in targets:
                     if (fn.qualname, target) not in existing:
                         new_calls.append((fn.qualname, target, evidence, Confidence.INFERRED))
                         existing.add((fn.qualname, target))
+                if callable_on_self and not targets:
+                    analysis.unresolved_calls.append(
+                        PyUnresolvedCall(
+                            caller=fn.qualname,
+                            callee=f"{fn.class_name}.{field}",
+                            evidence=evidence,
+                        )
+                    )
     analysis.calls.extend(new_calls)
 
 
@@ -1871,7 +2142,10 @@ def _call_type_name(node: Node | None) -> str | None:
     return None
 
 
-def _resolve_object_dispatch(analysis: PyAnalysis) -> None:
+def _resolve_object_dispatch(
+    analysis: PyAnalysis,
+    trees: list[tuple[str, str, Node]] | None = None,
+) -> None:
     """Follow ``self.outbox.settle()`` / ``store.save()`` to class methods."""
     methods: dict[str, dict[str, PyFunction]] = {}
     class_nodes: dict[str, Node] = {}
@@ -1880,17 +2154,31 @@ def _resolve_object_dispatch(analysis: PyAnalysis) -> None:
         if not fn.class_name:
             continue
         methods.setdefault(fn.class_name, {})[fn.name] = fn
-        cur = fn.node.parent
-        while cur is not None:
-            if cur.type == "class_definition":
-                cname = text(cur.child_by_field_name("name"))
-                if cname:
-                    class_nodes[cname] = cur
-                    bases = _class_bases(cur)
-                    if bases & {"Protocol", "ABC", "ABCMeta"}:
-                        protocol_names.add(cname)
-                break
-            cur = cur.parent
+
+    def take_class(node: Node) -> None:
+        cname = text(node.child_by_field_name("name"))
+        if not cname:
+            return
+        class_nodes[cname] = node
+        bases = _class_bases(node)
+        if bases & {"Protocol", "ABC", "ABCMeta"}:
+            protocol_names.add(cname)
+
+    if trees:
+        for _module, _rel_file, root in trees:
+            for node in walk(root):
+                if node.type == "class_definition":
+                    take_class(node)
+    else:
+        for fn in analysis.functions.values():
+            if not fn.class_name:
+                continue
+            cur = fn.node.parent
+            while cur is not None:
+                if cur.type == "class_definition":
+                    take_class(cur)
+                    break
+                cur = cur.parent
 
     field_types: dict[tuple[str, str], set[str]] = {}
     for cname, node in class_nodes.items():
@@ -1905,6 +2193,20 @@ def _resolve_object_dispatch(analysis: PyAnalysis) -> None:
 
     # Constructor call-sites: Drainer(Outbox()) / Drainer(outbox=box)
     local_types: dict[tuple[str, str], str] = {}
+    module_instances: dict[tuple[str, str], str] = {}
+    if trees:
+        for module, rel_file, root in trees:
+            for node in walk(root):
+                if node.type != "assignment":
+                    continue
+                left = node.child_by_field_name("left")
+                right = node.child_by_field_name("right")
+                if left is None or right is None or left.type != "identifier":
+                    continue
+                tname = _call_type_name(right)
+                if tname and tname in methods:
+                    module_instances[(module, text(left))] = tname
+                    module_instances[(rel_file, text(left))] = tname
     for fn in analysis.functions.values():
         for node in walk(fn.node):
             if node.type == "assignment":
@@ -2011,20 +2313,37 @@ def _resolve_object_dispatch(analysis: PyAnalysis) -> None:
                 loc = local_types.get((fn.qualname, oname))
                 if loc:
                     types.add(loc)
+                inst = module_instances.get((fn.module, oname)) or module_instances.get(
+                    (fn.file, oname)
+                )
+                if inst:
+                    types.add(inst)
             elif obj.type == "attribute" and obj.named_children:
                 head = obj.named_children[0]
                 field = text(obj.named_children[-1]) if len(obj.named_children) >= 2 else ""
                 if text(head) == "self" and fn.class_name and field:
                     types.update(field_types.get((fn.class_name, field), set()))
+            linked = False
             for tname in types:
                 cal = methods.get(tname, {}).get(method)
                 if cal is not None:
                     add_call(fn.qualname, cal.qualname, evidence)
+                    linked = True
                     continue
                 for impl in implementers_of(tname):
                     cal = methods.get(impl, {}).get(method)
                     if cal is not None:
                         add_call(fn.qualname, cal.qualname, evidence)
+                        linked = True
+            if types and not linked:
+                label = next(iter(types))
+                analysis.unresolved_calls.append(
+                    PyUnresolvedCall(
+                        caller=fn.qualname,
+                        callee=f"{label}.{method}",
+                        evidence=evidence,
+                    )
+                )
     analysis.calls.extend(new_calls)
 
 

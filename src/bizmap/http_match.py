@@ -197,11 +197,24 @@ def _is_param(seg: str) -> bool:
     return False
 
 
+def is_relative_client_url(url: str | None) -> bool:
+    """True for same-repo paths like ``/projects`` (no host, env, or service origin)."""
+    raw = (url or "").strip()
+    if not raw or "://" in raw:
+        return False
+    if raw.startswith("{"):
+        return False
+    return raw.startswith("/")
+
+
 def match_http(
     method: str,
     url: str,
     routes: list[tuple[str, str, str]],
     services: dict[str, Any] | None = None,
+    *,
+    caller_repo: str | None = None,
+    route_repos: dict[str, str] | None = None,
 ) -> list[str]:
     """Return entrypoint ids whose method+path match this client call."""
     method_u = (method or "GET").upper()
@@ -215,10 +228,15 @@ def match_http(
         candidates.append(leading)
     if not any(has_meaningful_literal(c) for c in candidates):
         return []
+    relative = is_relative_client_url(url)
     hits: list[str] = []
     for eid, rmethod, rpath in routes:
         if rmethod.upper() != method_u:
             continue
+        if relative and caller_repo and route_repos:
+            rrepo = route_repos.get(eid)
+            if rrepo and rrepo != caller_repo:
+                continue
         for cand in candidates:
             if not has_meaningful_literal(cand):
                 continue

@@ -105,7 +105,7 @@ flowchart LR
   GET_stock -->|reads inferred| inventory
 ```
 
-## How it works (v0.2.4)
+## How it works (v0.2.5)
 
 1. **Schema replayer** — applies `schema.sql` / migration folders in order
    (`CREATE TABLE IF NOT EXISTS`, quoted/schema-qualified pg_dump identifiers,
@@ -127,18 +127,25 @@ flowchart LR
    including range-over-literal-slice SQL and helpers that take a `query`/`q`
    string (tables attributed to the caller). Outbound `net/http`
    `NewRequest` / `NewRequestWithContext`, `client.Do`, and `http.Get`/`Post`
-   (const, env, `fmt.Sprintf`, concat) become `calls_http`. Any `go` statement
+   (const, env, `fmt.Sprintf`, concat) become `calls_http`. Helpers that take
+   `path`/`method` from the caller (`getJSON(ctx, path, out)` concatenating
+   `c.baseURL + path`) compose at the call site. Any `go` statement
    whose target uses `time.NewTicker` / `time.Tick` / `time.After` loops or a
    cron library. Packages are keyed by import path; display names are the
-   directory relative to the scan root.
+   directory relative to the scan root. With no `go.mod`, import paths fall
+   back to a unique scanned-directory suffix and print a warning.
 3. **Python detector** — FastAPI/Flask routes (module/imported consts, `+`,
-   f-strings, `APIRouter` / `include_router` prefixes). Unresolvable path
-   pieces stay `{name}` placeholders (`unresolved`, never truncated).
+   f-strings, `APIRouter` / `include_router` prefixes, factory helpers such as
+   `app = create_service()` and apps imported from another module). Unresolvable
+   path pieces stay `{name}` placeholders (`unresolved`, never truncated).
    SQLAlchemy Core/ORM usage and `text()`/`execute()` SQL, plus SQL strings
    held in module dicts (`QUERIES["a"]`) and callables injected as arguments,
-   `deps.run_query` / `self.run_query`, or dataclass `Callable` fields.
-   HTTP routes require a known FastAPI/Flask app, APIRouter, or Blueprint
-   (so `@patch("x.x.logger")` is not a route). Constructor/annotation dispatch
+   `deps.run_query` / `self.run_query`, dataclass `Callable` fields, and
+   module-level instances (`svc = Svc(run_query); svc.go()`). Unresolvable
+   typed dispatch is `unresolved_calls`. HTTP routes require a known
+   FastAPI/Flask app, APIRouter, or Blueprint, or a module-level
+   `@name.get("/path")` (so `@patch("x.x.logger")` is not a route).
+   Constructor/annotation dispatch
    (`Drainer(outbox)` → `self.outbox.settle`, `store: Store` → `store.save`).
    Firebase Functions + Firestore collections, including
    document refs (`ref.set` after `collection().document()`), transactions,
@@ -150,11 +157,16 @@ flowchart LR
 4. **JavaScript / TypeScript detector** — Express / Fastify / Hono routes
    on a known app/router, including chained factories
    (`new Hono().use('*', mw).get('/a', h)`), `.basePath('/v1')`, and
-   `.route('/x', sub)`. `client.get` / `axios.get` / `fetch` / `Map.get`
-   are outbound `calls_http`, not routes. `axios.create({baseURL})` /
-   `ky` / `ofetch` instances and `request(path)` wrappers compose the
-   outbound URL. Inline handlers attribute `supabase.from('t')` to the
-   route. `.ts`/`.tsx` use tree-sitter-typescript. `pg`/`postgres`
+   `.route('/x', sub)` / `app.use('/v1/items', importedRouter)` with the
+   mount prefix applied across files. Known HTTP clients
+   (`fetch`, `axios` + instances, `ky`, `ofetch`, `got`, `superagent`)
+   emit outbound `calls_http`; `Map` / `Set` / `Headers` / `URLSearchParams`
+   / `searchParams` / `config.headers` do not. `axios.create({baseURL})` /
+   `ky` / `ofetch` instances (exported, factory-built, or passed as a
+   parameter) and `request(path)` wrappers compose the outbound URL.
+   Relative `fetch('/projects')` matches only the same repo or a
+   `services:` mapping. Inline handlers attribute `supabase.from('t')` to
+   the route. `.ts`/`.tsx` use tree-sitter-typescript. `pg`/`postgres`
    `query()` SQL and Supabase Edge Functions
    (`serve` / `Deno.serve` in `supabase/functions/<name>/index.ts` →
    HTTP `/functions/v1/<name>`, with call edges into imported helpers).
@@ -165,15 +177,19 @@ flowchart LR
    implementers / constructor-assigned types, `inferred`, with
    `candidates` when several). Unscanned/unknown receivers stay unresolved.
    Reads/writes propagate to HTTP and job entrypoints as table-level
-   `inferred` edges; `table:unknown` does not. HTTP clients emit
-   `calls_http` when the URL matches a scanned route (optionally via
+   `inferred` edges; `table:unknown` stays attached to the function that
+   does the dynamic write and is exposed on entrypoints only as
+   `dynamic_table` / `dynamic_table_unknown` (flag/count), never as a
+   reach edge. HTTP clients emit
+   `calls_http` when the URL matches a scanned route (same repo, or via
    `services:` base URLs, env var names, or hostnames). Unmatched client
    calls print `N unresolved HTTP calls` with the env/host keys seen.
    Queue produce sites emit `enqueues` and `triggers` the matched consumer.
 6. **SQL** — named columns stay column-level; `SELECT *` and column-less
    INSERT are table-level. FROM-less SELECT (`now()`, `set_config`) touches
    no table. CTE/subquery/LATERAL aliases (`l`, `r`, `l.x`) are never tables.
-   Dynamic table names (`"UPDATE "+t+" SET"`) stay `table:unknown`.
+   Dynamic table names (`"UPDATE "+t+" SET"`) stay `table:unknown` on the
+   origin function. Concat/helper holes (`{helper(o)}`) are not columns.
    Relations named in FROM/JOIN/INSERT/UPDATE that are not in DDL become
    `unresolved_relation` nodes (not dropped). `pg_catalog.*`,
    `information_schema.*`, `pg_*`, `storage.*`, `vault.*`, and `auth.*`
@@ -235,7 +251,13 @@ table and collection names (`orders`, `users`, `tenants`, `notifications`,
 - **v0.2.4** — Chained Hono-style routers, Deno/Edge serve call-graphs,
   Go `http.NewRequest` / TS axios-create compose, Python injected
   Callable fields, registry HTTP rematch, multi-path repo names,
-  persisted `unresolved_http`. **This release.**
+  persisted `unresolved_http`.
+- **v0.2.5** — Factory/imported FastAPI+Flask routes, HTTP-client
+  precision, SQL concat holes, cross-file Hono/Express mounts, Go
+  `getJSON` / TS axios-ky `baseURL` composition, same-repo relative
+  `fetch`, injected callables + `unresolved_calls`, Go import-path
+  suffix without `go.mod`, Firestore non-DB dicts, `table:unknown`
+  entrypoint flag. **This release.**
 - **v0.3** — GitHub Action that warns when a PR changes a writer of a column
   that another in-flight PR also touches (“lineage conflict”).
 - **v0.4** — MCP server so agents can query `why orders.status` without

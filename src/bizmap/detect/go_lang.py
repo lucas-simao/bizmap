@@ -38,6 +38,9 @@ PREFIX_MAX_ITERS = 32
 PREFIX_MAX_LEN = 1024
 _PATH_SELECTOR = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\}$")
 SQL_PARAM_NAMES = {"query", "q", "sql"}
+HTTP_PATH_PARAM_NAMES = {"path", "urlpath", "p"}
+HTTP_METHOD_PARAM_NAMES = {"method", "httpmethod"}
+HTTP_BASE_FIELD_NAMES = {"baseurl", "base", "host", "origin"}
 
 
 def _parser() -> Parser:
@@ -168,6 +171,16 @@ class GoHttpCall:
 
 
 @dataclass
+class GoHttpHelper:
+    function: GoFunction
+    path_index: int
+    method_index: int | None
+    default_method: str
+    base_field: str
+    base: ResolvedString | None = None
+
+
+@dataclass
 class GoAnalysis:
     functions: dict[str, GoFunction]
     sql_sites: list[SqlSite]
@@ -177,6 +190,7 @@ class GoAnalysis:
     situations: dict[str, list[str]] = field(default_factory=dict)
     unresolved_calls: list[UnresolvedCall] = field(default_factory=list)
     http_calls: list[GoHttpCall] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -216,6 +230,9 @@ class _Indexes:
     implementers: dict[tuple[str, str], list[tuple[str, str]]] = field(default_factory=dict)
     iface_fields: dict[tuple[str, str], set[str]] = field(default_factory=dict)
     field_concretes: dict[tuple[str, str, str], list[GoType]] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    missing_gomod: bool = False
+    known_import_paths: set[str] = field(default_factory=set)
 
 
 def _unquote_go_string(raw: str) -> str:
@@ -1007,6 +1024,7 @@ class GoAnalyzer:
         t_resolve = time.perf_counter()
         idx = self._build_indexes(infos)
         self._collect_func_field_bindings(infos, idx)
+        http_helpers = self._collect_http_helpers(infos, idx)
 
         sql_sites: list[SqlSite] = []
         routes: list[RouteHit] = []
@@ -1180,6 +1198,19 @@ class GoAnalyzer:
                         package_consts,
                         req_vars,
                         http_calls,
+                        skip=fn.qualname in http_helpers,
+                    )
+                    self._record_http_helper_call(
+                        node,
+                        args,
+                        fn,
+                        info,
+                        idx,
+                        env,
+                        package_consts,
+                        callees,
+                        http_helpers,
+                        http_calls,
                     )
 
         if ticker_rule:
@@ -1197,6 +1228,7 @@ class GoAnalyzer:
             situations=dict(situations),
             unresolved_calls=unresolved_calls,
             http_calls=http_calls,
+            warnings=list(idx.warnings),
         )
 
     def _build_indexes(self, infos: list[_FileInfo]) -> _Indexes:
@@ -1283,6 +1315,9 @@ class GoAnalyzer:
             implementers=dict(implementers),
             iface_fields=dict(iface_fields),
             field_concretes=defaultdict(list),
+            warnings=[],
+            missing_gomod=any(_module_for(info.path)[0] is None for info in infos),
+            known_import_paths={info.import_path for info in infos if info.import_path},
         )
 
     def _function(
@@ -1400,6 +1435,7 @@ class GoAnalyzer:
         package_consts: dict[str, ResolvedString],
         req_vars: dict[str, tuple[str, str, bool]],
         http_calls: list[GoHttpCall],
+        skip: bool = False,
     ) -> None:
         func = node.child_by_field_name("function")
         operand = None
@@ -1411,7 +1447,7 @@ class GoAnalyzer:
         evidence = Evidence(file=info.rel, line=line_of(node), symbol=fn.qualname)
 
         def emit(http_method: str, url: str, unresolved: bool) -> None:
-            if not url:
+            if skip or not url:
                 return
             if not (
                 url.startswith("/")
@@ -1903,7 +1939,7 @@ class GoAnalyzer:
         if func is None:
             return None
         if func.type == "identifier":
-            found = idx.by_func.get((fn.import_path, name))
+            found = self._lookup_func(idx, fn.import_path, name)
             return found.return_type if found else None
         if func.type == "selector_expression":
             operand = func.child_by_field_name("operand")
@@ -1911,11 +1947,11 @@ class GoAnalyzer:
                 ident = text(operand)
                 if ident in info.import_aliases:
                     ip = info.import_aliases[ident]
-                    found = idx.by_func.get((ip, name))
+                    found = self._lookup_func(idx, ip, name)
                     return found.return_type if found else None
             gtype = self._type_of_expr(operand, fn, info, local_types, idx)
             if gtype and gtype.import_path:
-                found = idx.by_method.get((gtype.import_path, gtype.name, name))
+                found = self._lookup_method(idx, gtype.import_path, gtype.name, name)
                 return found.return_type if found else None
         return None
 
@@ -1973,7 +2009,7 @@ class GoAnalyzer:
         if gtype:
             ip = gtype.import_path
             if ip:
-                found = idx.by_method.get((ip, gtype.name, name))
+                found = self._lookup_method(idx, ip, gtype.name, name)
                 if found:
                     return found
                 return self._resolve_func_field(ip, gtype.name, name, idx)
@@ -1983,8 +2019,51 @@ class GoAnalyzer:
             ident = text(operand)
             if ident in info.import_aliases:
                 ip = info.import_aliases[ident]
-                return idx.by_func.get((ip, name))
+                return self._lookup_func(idx, ip, name)
             return None
+        return None
+
+    def _match_scanned_import(self, idx: _Indexes, ip: str | None) -> str | None:
+        """Exact import path, then directory-suffix fallback when go.mod is missing."""
+        if not ip:
+            return None
+        if ip in idx.known_import_paths:
+            return ip
+        hits = [
+            p
+            for p in idx.known_import_paths
+            if p and (ip.endswith("/" + p) or p.endswith("/" + ip))
+        ]
+        if len(hits) != 1:
+            return None
+        if idx.missing_gomod:
+            msg = (
+                f"warning: no go.mod; resolved import {ip!r} via scanned directory {hits[0]!r}"
+            )
+            if msg not in idx.warnings:
+                idx.warnings.append(msg)
+        return hits[0]
+
+    def _lookup_func(self, idx: _Indexes, ip: str | None, name: str) -> GoFunction | None:
+        if ip:
+            found = idx.by_func.get((ip, name))
+            if found:
+                return found
+            matched = self._match_scanned_import(idx, ip)
+            if matched and matched != ip:
+                return idx.by_func.get((matched, name))
+        return None
+
+    def _lookup_method(
+        self, idx: _Indexes, ip: str | None, typ: str, name: str
+    ) -> GoFunction | None:
+        if ip:
+            found = idx.by_method.get((ip, typ, name))
+            if found:
+                return found
+            matched = self._match_scanned_import(idx, ip)
+            if matched and matched != ip:
+                return idx.by_method.get((matched, typ, name))
         return None
 
     def _resolve_func_field(
@@ -2021,7 +2100,7 @@ class GoAnalyzer:
         if func is None:
             return []
         if func.type == "identifier":
-            found = idx.by_func.get((fn.import_path, name))
+            found = self._lookup_func(idx, fn.import_path, name)
             if found is None:
                 return []
             conf = Confidence.EXACT if found.receiver and fn.receiver else Confidence.INFERRED
@@ -2065,7 +2144,7 @@ class GoAnalyzer:
                     unique = list(dict.fromkeys((c.import_path, c.name) for c in concretes))
                     callees: list[GoFunction] = []
                     for ip, typ in unique:
-                        gf = idx.by_method.get((ip, typ, method))
+                        gf = self._lookup_method(idx, ip, typ, method)
                         if gf is not None:
                             callees.append(gf)
                     if len(callees) == 1:
@@ -2089,7 +2168,7 @@ class GoAnalyzer:
                     impls = [unique[0]]
         callees: list[GoFunction] = []
         for ip, typ in impls:
-            gf = idx.by_method.get((ip, typ, method))
+            gf = self._lookup_method(idx, ip, typ, method)
             if gf is not None:
                 callees.append(gf)
         if not callees:
@@ -2174,6 +2253,216 @@ class GoAnalyzer:
             if gtype is None or gtype.name == "string":
                 return i
         return None
+
+    def _http_method_from_name(self, name: str) -> str:
+        low = name.lower()
+        for meth in ("get", "post", "put", "patch", "delete", "head", "options"):
+            if low.startswith(meth):
+                return meth.upper()
+        return "GET"
+
+    def _collect_http_helpers(
+        self, infos: list[_FileInfo], idx: _Indexes
+    ) -> dict[str, GoHttpHelper]:
+        field_bases = self._struct_http_bases(infos, idx)
+        helpers: dict[str, GoHttpHelper] = {}
+        for info in infos:
+            for fn in info.functions:
+                if not fn.receiver:
+                    continue
+                order = [p for p in fn.params if p != fn.receiver_var]
+                path_index = next(
+                    (i for i, p in enumerate(order) if p.lower() in HTTP_PATH_PARAM_NAMES),
+                    None,
+                )
+                if path_index is None:
+                    continue
+                path_param = order[path_index]
+                method_index = next(
+                    (i for i, p in enumerate(order) if p.lower() in HTTP_METHOD_PARAM_NAMES),
+                    None,
+                )
+                path_names = {path_param}
+                for node in walk(fn.node):
+                    if node.type not in {"short_var_declaration", "assignment_statement"}:
+                        continue
+                    pairs = self._assignment_pairs(node)
+                    for lhs, rhs in pairs:
+                        raw = text(rhs)
+                        if path_param in raw or any(n in raw for n in path_names):
+                            path_names.add(lhs)
+                base_field = ""
+                for node in walk(fn.node):
+                    if node.type != "call_expression":
+                        continue
+                    method = call_callee_name(node)
+                    args = call_args(node)
+                    url_node = None
+                    if method in {"NewRequest", "NewRequestWithContext"}:
+                        url_node = args[1] if method == "NewRequest" and len(args) > 1 else (
+                            args[2] if len(args) > 2 else None
+                        )
+                    elif method in {"Get", "Post", "Head", "PostForm"} and args:
+                        url_node = args[0]
+                    if url_node is None:
+                        continue
+                    raw = text(url_node)
+                    if not any(n == raw or n in raw for n in path_names):
+                        continue
+                    field = self._base_field_in_expr(url_node, fn.receiver_var)
+                    if not field:
+                        for n2 in walk(fn.node):
+                            if n2.type not in {"short_var_declaration", "assignment_statement"}:
+                                continue
+                            for lhs, rhs in self._assignment_pairs(n2):
+                                if lhs == raw or lhs in path_names:
+                                    field = self._base_field_in_expr(rhs, fn.receiver_var)
+                                    if field:
+                                        break
+                            if field:
+                                break
+                    if field:
+                        base_field = field
+                        break
+                if not base_field:
+                    continue
+                key = (fn.import_path, fn.receiver, base_field)
+                helpers[fn.qualname] = GoHttpHelper(
+                    function=fn,
+                    path_index=path_index,
+                    method_index=method_index,
+                    default_method=self._http_method_from_name(fn.name),
+                    base_field=base_field,
+                    base=field_bases.get(key),
+                )
+        return helpers
+
+    def _base_field_in_expr(self, node: Node | None, recv_var: str | None) -> str:
+        if node is None or not recv_var:
+            return ""
+        if node.type == "selector_expression":
+            operand = node.child_by_field_name("operand")
+            field_n = node.child_by_field_name("field")
+            if operand is not None and text(operand) == recv_var and field_n is not None:
+                name = text(field_n)
+                if name.lower() in HTTP_BASE_FIELD_NAMES:
+                    return name
+            return self._base_field_in_expr(operand, recv_var)
+        for child in node.named_children:
+            found = self._base_field_in_expr(child, recv_var)
+            if found:
+                return found
+        return ""
+
+    def _struct_http_bases(
+        self, infos: list[_FileInfo], idx: _Indexes
+    ) -> dict[tuple[str, str, str], ResolvedString]:
+        """Resolve Client.baseURL from composite literals / env / const."""
+        out: dict[tuple[str, str, str], ResolvedString] = {}
+        for info in infos:
+            dummy = self._synthetic_func(info, info.tree, "_http_base")
+            for node in walk(info.tree):
+                if node.type != "composite_literal":
+                    continue
+                gtype = _parse_type(
+                    node.child_by_field_name("type"),
+                    info.package,
+                    info.import_path,
+                    info.import_aliases,
+                )
+                if gtype is None:
+                    continue
+                body = next((c for c in node.named_children if c.type == "literal_value"), None)
+                if body is None:
+                    continue
+                for elem in body.named_children:
+                    key_n = elem.child_by_field_name("key")
+                    val_n = elem.child_by_field_name("value")
+                    if key_n is None or val_n is None:
+                        keyed = [c for c in elem.named_children]
+                        if len(keyed) >= 2 and keyed[0].type in {"field_identifier", "identifier"}:
+                            key_n, val_n = keyed[0], keyed[1]
+                    if key_n is None or val_n is None:
+                        continue
+                    field = text(key_n)
+                    if field.lower() not in HTTP_BASE_FIELD_NAMES:
+                        continue
+                    resolved = _resolve_expr(
+                        val_n, info.consts, info.consts, info.import_aliases, idx.consts_by_import
+                    )
+                    if resolved.usable:
+                        out[(gtype.import_path or info.import_path, gtype.name, field)] = resolved
+            _ = dummy
+        return out
+
+    def _record_http_helper_call(
+        self,
+        node: Node,
+        args: list[Node],
+        fn: GoFunction,
+        info: _FileInfo,
+        idx: _Indexes,
+        env: dict[str, ResolvedString],
+        package_consts: dict[str, ResolvedString],
+        callees: list[tuple[GoFunction, Confidence, list[str]]],
+        helpers: dict[str, GoHttpHelper],
+        http_calls: list[GoHttpCall],
+    ) -> None:
+        for callee, _conf, _cands in callees:
+            helper = helpers.get(callee.qualname)
+            if helper is None or helper.path_index >= len(args):
+                continue
+            path_res = _resolve_expr(
+                args[helper.path_index],
+                env,
+                package_consts,
+                info.import_aliases,
+                idx.consts_by_import,
+            )
+            path = path_res.path_text if path_res.usable else ""
+            if not path:
+                continue
+            http_method = helper.default_method
+            if helper.method_index is not None and helper.method_index < len(args):
+                mres = _resolve_expr(
+                    args[helper.method_index],
+                    env,
+                    package_consts,
+                    info.import_aliases,
+                    idx.consts_by_import,
+                )
+                if mres.fully_static and mres.text:
+                    http_method = mres.text.upper()
+            base = helper.base.path_text if helper.base and helper.base.usable else ""
+            if not base:
+                local_types = self._local_types(fn, info, idx)
+                func = node.child_by_field_name("function")
+                operand = func.child_by_field_name("operand") if func is not None else None
+                gtype = self._type_of_expr(operand, fn, info, local_types, idx) if operand else None
+                if gtype:
+                    key = (gtype.import_path or callee.import_path, gtype.name, helper.base_field)
+                    found = self._struct_http_bases([info], idx).get(key)
+                    if found and found.usable:
+                        base = found.path_text
+            if not base:
+                base = "{" + helper.base_field + "}"
+            if "://" in path or path.startswith("{"):
+                url = path if path.startswith("{") or "://" in path else base.rstrip("/") + path
+            else:
+                if "://" in base or base.startswith("{"):
+                    url = base.rstrip("/") + (path if path.startswith("/") else "/" + path)
+                else:
+                    url = (base.rstrip("/") + path) if path.startswith("/") else (base + path)
+            evidence = Evidence(file=info.rel, line=line_of(node), symbol=fn.qualname)
+            http_calls.append(
+                GoHttpCall(
+                    function=fn,
+                    method=http_method or "GET",
+                    url=url,
+                    evidence=evidence,
+                    unresolved=("{" in url) or not path_res.fully_static,
+                )
+            )
 
     def _sql_from_helper_call(
         self,
