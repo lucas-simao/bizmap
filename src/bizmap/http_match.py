@@ -253,6 +253,12 @@ def service_for_url(url: str, services: dict[str, Any] | None) -> str | None:
     return None
 
 
+def has_explicit_base(url: str) -> bool:
+    """`{anything}/x` or `https://h/x`: the path that follows is complete."""
+    raw = (url or "").strip()
+    return raw.startswith("{") or "://" in raw
+
+
 def base_is_known(url: str) -> bool:
     """True when the client URL carries a concrete origin: an absolute URL or
     an env-var placeholder (``{VITE_API_URL}/x``). Lower-case holes such as
@@ -440,6 +446,8 @@ def route_literal_hits(
     path: str,
     method: str | None,
     routes: list[tuple[str, str, str]],
+    *,
+    allow_suffix: bool = True,
 ) -> list[str]:
     """Routes that an API-looking string literal plausibly targets.
 
@@ -456,7 +464,9 @@ def route_literal_hits(
     method_u = method.upper() if method else None
     full: list[str] = []
     suffix: list[str] = []
-    allow_suffix = literal_segment_count(path) >= 2 or method_u is not None
+    # A URL with an explicit base (placeholder or absolute) is the full path
+    # from that base: it must match whole, never by its tail.
+    allow_suffix = allow_suffix and (literal_segment_count(path) >= 2 or method_u is not None)
     for eid, rmethod, rpath in routes:
         if method_u and rmethod.upper() not in {method_u, "ANY", "ALL"}:
             continue
