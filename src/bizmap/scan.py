@@ -661,12 +661,14 @@ def _apply_python(
             if not target:
                 continue
             conf = getattr(site, "confidence", None) or access.confidence
+            via = getattr(site, "via", None)
             graph.add_edge(
                 _kind_edge(access.kind),
                 fid,
                 target,
                 confidence=conf,
                 evidence=site.evidence,
+                **({"via": via} if via else {}),
             )
             note = getattr(site, "note", None)
             if note:
