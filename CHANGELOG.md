@@ -50,6 +50,15 @@
 
 ### Added
 
+- **Python field dispatch**: functions assigned to a field of a dataclass /
+  NamedTuple / pydantic model (keyword or positional, at module level or in a
+  function) or to a string key of a dict literal are called by
+  `obj.field(...)`, `getattr(obj, "field")(...)`, and `obj["key"](...)`
+  (`inferred`). `PANELS = [PanelDef("sales", build=_build_sales)]` +
+  `for p in PANELS: p.build(conn)` now reaches the builders' tables. Field
+  names that are also method names of a scanned class, and `self`/`cls`
+  receivers, are left alone (ambiguous).
+
 - **TS path helpers**: pure helpers that return a path template or
   concatenation (`const site = (id) => `/sites/${id}``,
   `function seg(id) { return '/teams/' + id }`), in the same file or

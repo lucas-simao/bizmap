@@ -961,6 +961,7 @@ class PythonAnalyzer:
             self._detect_main_worker(analysis, tree, module, fns, enclosing, rel_file)
 
         _link_function_tables(analysis, parsed)
+        _link_field_dispatch(analysis, parsed)
         _link_sql_references(analysis, parsed, consts_by_module, dicts_by_module)
         unique: dict[tuple, PySqlSite] = {}
         for site in analysis.sql_sites:
@@ -3593,3 +3594,122 @@ def _link_function_tables(analysis: PyAnalysis, parsed: list) -> None:
                             continue
                         existing.add((fn.qualname, callee))
                         analysis.calls.append((fn.qualname, callee, ev, Confidence.INFERRED))
+
+
+
+# ---------------------------------------------------------------------------
+# Field dispatch: functions stored in a field of a dataclass / NamedTuple /
+# pydantic model / dict literal, then called through that field:
+#   PANELS = [PanelDef("sales", build=_build_sales), ...]
+#   for p in PANELS: p.build(conn)        # also getattr(p, "build")(), p["build"]()
+# The call site calls every function ever assigned to that field (`inferred`).
+# ---------------------------------------------------------------------------
+
+_DISPATCH_SKIP_RECEIVERS = {"self", "cls", "super"}
+
+
+def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
+    functions = analysis.functions
+    class_fields: dict[str, list[str]] = {}
+    method_names: set[str] = set()
+    for _path, _rf, _src, tree, _module, _imap, _fns in parsed:
+        for node in walk(tree):
+            if node.type != "class_definition":
+                continue
+            cname = text(node.child_by_field_name("name"))
+            if cname and cname not in class_fields:
+                class_fields[cname] = _class_field_names(node)
+            body = node.child_by_field_name("body")
+            for stmt in body.named_children if body is not None else []:
+                fdef = stmt
+                if fdef.type == "decorated_definition":
+                    fdef = fdef.child_by_field_name("definition") or fdef
+                if fdef.type == "function_definition":
+                    mname = text(fdef.child_by_field_name("name"))
+                    if mname:
+                        method_names.add(mname)
+
+    field_targets: dict[str, set[str]] = {}
+    key_targets: dict[str, set[str]] = {}
+    for _path, _rf, _src, tree, module, imap, _fns in parsed:
+        for node in walk(tree):
+            if node.type == "call":
+                cname = call_callee_name(node)
+                fields = class_fields.get(cname)
+                if not fields:
+                    continue
+                for i, arg in enumerate(call_posargs(node)):
+                    if i < len(fields):
+                        ref = _fn_ref(arg, module, imap, functions)
+                        if ref:
+                            field_targets.setdefault(fields[i], set()).add(ref)
+                args = node.child_by_field_name("arguments")
+                for kw in args.named_children if args is not None else []:
+                    if kw.type != "keyword_argument":
+                        continue
+                    name = kw.child_by_field_name("name")
+                    value = kw.child_by_field_name("value")
+                    if name is None or value is None or text(name) not in fields:
+                        continue
+                    ref = _fn_ref(value, module, imap, functions)
+                    if ref:
+                        field_targets.setdefault(text(name), set()).add(ref)
+            elif node.type == "dictionary":
+                for pair in node.named_children:
+                    if pair.type != "pair":
+                        continue
+                    key = pair.child_by_field_name("key")
+                    value = pair.child_by_field_name("value")
+                    if key is None or value is None or key.type != "string":
+                        continue
+                    ref = _fn_ref(value, module, imap, functions)
+                    if ref:
+                        key_targets.setdefault(unquote(text(key)), set()).add(ref)
+
+    if not field_targets and not key_targets:
+        return
+    existing = {(c, d) for c, d, _e, _k in analysis.calls}
+
+    for _path, rel_file, _src, _tree, _module, _imap, fns in parsed:
+        for fn in fns:
+            fdef = fn.node
+            if fdef.type == "decorated_definition":
+                fdef = fdef.child_by_field_name("definition") or fdef
+            for node in walk(fdef):
+                if node.type != "call":
+                    continue
+                owner = _enclosing_fn_node(node)
+                if owner is None or (owner.start_byte, owner.end_byte) != (fdef.start_byte, fdef.end_byte):
+                    continue
+                func = node.child_by_field_name("function")
+                targets: set[str] = set()
+                if func is None:
+                    continue
+                if func.type == "attribute":
+                    obj = func.child_by_field_name("object")
+                    attr = func.child_by_field_name("attribute")
+                    name = text(attr) if attr is not None else ""
+                    if (
+                        name in field_targets
+                        and name not in method_names
+                        and not (obj is not None and text(obj) in _DISPATCH_SKIP_RECEIVERS)
+                    ):
+                        targets = field_targets[name]
+                elif func.type == "call" and call_callee_name(func) == "getattr":
+                    pos = call_posargs(func)
+                    if len(pos) >= 2 and pos[1].type == "string":
+                        name = unquote(text(pos[1]))
+                        if text(pos[0]) not in _DISPATCH_SKIP_RECEIVERS:
+                            targets = field_targets.get(name, set()) | key_targets.get(name, set())
+                elif func.type == "subscript":
+                    sub = func.child_by_field_name("subscript")
+                    if sub is not None and sub.type == "string":
+                        targets = key_targets.get(unquote(text(sub)), set())
+                if not targets:
+                    continue
+                ev = Evidence(file=rel_file, line=line_of(node), symbol=fn.qualname)
+                for callee in sorted(targets):
+                    if callee == fn.qualname or (fn.qualname, callee) in existing:
+                        continue
+                    existing.add((fn.qualname, callee))
+                    analysis.calls.append((fn.qualname, callee, ev, Confidence.INFERRED))
