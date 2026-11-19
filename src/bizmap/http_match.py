@@ -141,17 +141,48 @@ def path_without_placeholders(path: str) -> str:
     return "/" + "/".join(kept)
 
 
+def drop_leading_placeholders(path: str) -> str:
+    """Strip only leading `{ENV}` / `:param` segments; keep later literals."""
+    raw = normalize_path(path)
+    parts = [p for p in raw.split("/") if p]
+    while parts and _is_param(parts[0]):
+        parts.pop(0)
+    if not parts:
+        return "/"
+    return "/" + "/".join(parts)
+
+
+def has_meaningful_literal(path: str) -> bool:
+    """True when the path has a non-parameter segment (a real prefix)."""
+    parts = [p for p in normalize_path(path).split("/") if p]
+    return any(not _is_param(p) for p in parts)
+
+
 def path_template_match(template: str, actual: str) -> bool:
+    """Match a client path against a route template.
+
+    Route params (`{id}`, `:id`) match one concrete client segment. Client
+    placeholders are **not** wildcards. At least one literal segment must
+    agree, so an unresolved client URL never hits every `{param}` route.
+    """
     t_parts = normalize_path(template).split("/")
     a_parts = normalize_path(actual).split("/")
     if len(t_parts) != len(a_parts):
         return False
+    literal_hits = 0
     for ts, actual_seg in zip(t_parts, a_parts, strict=True):
-        if _is_param(ts) or _is_param(actual_seg):
+        if not ts and not actual_seg:
             continue
+        if _is_param(ts):
+            if _is_param(actual_seg):
+                return False
+            continue
+        if _is_param(actual_seg):
+            return False
         if ts != actual_seg:
             return False
-    return True
+        literal_hits += 1
+    return literal_hits >= 1
 
 
 def _is_param(seg: str) -> bool:
@@ -178,23 +209,22 @@ def match_http(
         method_u = "POST"
     stripped = strip_service_base(url, services or {})
     path = normalize_path(stripped)
-    suffix = path_without_placeholders(path)
+    leading = drop_leading_placeholders(path)
+    candidates = [path]
+    if leading != path:
+        candidates.append(leading)
+    if not any(has_meaningful_literal(c) for c in candidates):
+        return []
     hits: list[str] = []
     for eid, rmethod, rpath in routes:
         if rmethod.upper() != method_u:
             continue
-        if (
-            path_template_match(rpath, path)
-            or path_template_match(path, rpath)
-            or path_template_match(rpath, suffix)
-            or path_template_match(suffix, rpath)
-        ):
-            hits.append(eid)
-            continue
-        # last-segment match for `{ENV}/ingest` vs `/ingest`
-        if suffix.rstrip("/").split("/")[-1:] == normalize_path(rpath).rstrip("/").split("/")[-1:]:
-            if suffix.count("/") == normalize_path(rpath).count("/"):
+        for cand in candidates:
+            if not has_meaningful_literal(cand):
+                continue
+            if path_template_match(rpath, cand):
                 hits.append(eid)
+                break
     return hits
 
 

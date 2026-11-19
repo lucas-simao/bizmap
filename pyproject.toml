@@ -1,6 +1,6 @@
 [project]
 name = "bizmap"
-version = "0.2.2"
+version = "0.2.3"
 description = "Deterministic business-rule and data-lineage mapper for codebases. No AI, no tokens, no accounts."
 readme = "README.md"
 license = "MIT"
@@ -46,7 +46,17 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel.force-include]
-"src/bizmap/rules" = "bizmap/rules"
+"src/bizmap/rules/celery.yaml" = "bizmap/rules/celery.yaml"
+"src/bizmap/rules/echo.yaml" = "bizmap/rules/echo.yaml"
+"src/bizmap/rules/express.yaml" = "bizmap/rules/express.yaml"
+"src/bizmap/rules/fastapi.yaml" = "bizmap/rules/fastapi.yaml"
+"src/bizmap/rules/firebase.yaml" = "bizmap/rules/firebase.yaml"
+"src/bizmap/rules/flask.yaml" = "bizmap/rules/flask.yaml"
+"src/bizmap/rules/go_ticker.yaml" = "bizmap/rules/go_ticker.yaml"
+"src/bizmap/rules/httpx.yaml" = "bizmap/rules/httpx.yaml"
+"src/bizmap/rules/pgx.yaml" = "bizmap/rules/pgx.yaml"
+"src/bizmap/rules/sqlalchemy.yaml" = "bizmap/rules/sqlalchemy.yaml"
+"src/bizmap/rules/supabase.yaml" = "bizmap/rules/supabase.yaml"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

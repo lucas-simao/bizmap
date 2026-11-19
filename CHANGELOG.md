@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.2.3 — 2026-11-19
+
+Precision and hang fixes after a private evaluation of v0.2.1/v0.2.2.
+Behavior is generic; tests and fixtures are synthetic only (`orders`,
+`users`, `tenants`, `documents`, `jobs`, `items`).
+
+### Fixed
+
+- **Go Group prefix hang**: `_path_prefixes` is scoped per function (capped
+  iterations) so `g := e.Group("/a")` in one func and `g := e.Group("/b")`
+  in another (including `_test.go`) cannot loop forever. Groups passed as
+  parameters or returned keep their prefix when resolvable; otherwise the
+  prefix is marked unresolved instead of being dropped.
+- **INSERT ON CONFLICT EXCLUDED**: literal
+  `INSERT INTO t (...) VALUES ... ON CONFLICT (...) DO UPDATE SET c = EXCLUDED.c`
+  is not a dynamic table. `has_dynamic_table_hole` (from v0.2.2) still fires
+  for genuine interpolated table names (`"UPDATE "+t+" SET"`,
+  `EXECUTE format('%I')`). `SELECT ... FOR UPDATE OF alias` does not create
+  phantom columns.
+- **TS/JS routes**: on top of v0.2.2's tree-sitter-typescript engine,
+  `client.get`, `api.post`, `axios.get`, `fetch`, and `Map.get` / `.delete`
+  are not Express routes. Routes require a known app/router receiver and a
+  string-literal (or resolvable const) path. Client calls become outbound
+  `calls_http`.
+- **HTTP matching**: an unresolved client path never wildcards onto every
+  `{param}` route. Match only when method and a meaningful literal prefix
+  agree. `PATH = A if cond else B` emits both candidates; `self.base_url + path`
+  resolves `base_url` from env/const.
+- **Handler/table resolution**: TS inline-arrow (and same-module) handlers
+  attribute `supabase.from('t')` access to the route. Firestore dynamic
+  collection names become `collection:unknown`. Go interface / Python
+  Protocol calls with no scanned implementer leave `unresolved_calls`.
+  Module-level SQL dicts via an injected executor still resolve.
+- **Packaging**: non-editable `pip install .` no longer hits a hatch
+  duplicate `bizmap/rules/__init__.py`. CI runs a non-editable install and
+  `bizmap --version`.
+
+### Changed
+
+- Graph format **0.2.3**. Function/entrypoint nodes may carry
+  `unresolved_calls` and unmatched client calls keep an `unresolved_http`
+  marker instead of wildcard edges.
+
 ## 0.2.2 — 2026-11-19
 
 Forward refs, external relations, object dispatch, and TypeScript servers

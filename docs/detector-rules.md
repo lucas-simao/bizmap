@@ -136,13 +136,16 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `--exclude GLOB` (repeatable) merges with YAML `exclude`. `--profile`
   prints parse / resolve / sql / propagate timings to stderr.
 
-## JavaScript / TypeScript resolution (v0.2.2)
+## JavaScript / TypeScript resolution (v0.2.3)
 
 - `.js` / `.mjs` / `.cjs` use tree-sitter-javascript; `.ts` / `.tsx` use
   tree-sitter-typescript (`language_typescript` / `language_tsx`).
-- Express / Fastify / Hono: `app.get('/x', handler)`, `router.post`,
-  `fastify.post`, `hono.get` with a string-like path become HTTP
-  entrypoints. Group prefixes (`app.use('/api', router)`) join when seen.
+- Express / Fastify / Hono: routes require a known app/router receiver
+  (`express()`, `Router()`, `fastify()`, `new Hono()`, or typed as such)
+  and a string-literal or resolvable const path. `client.get`, `api.post`,
+  `axios.get`, `fetch`, and `Map.get` / `.delete` are outbound
+  `calls_http`, not routes. Inline-arrow handlers attribute
+  `supabase.from('t')` access to the route.
 - Supabase JS: `supabase.from('t').select|insert|update|delete|upsert`
   emits table reads/writes; `.rpc('fn')` calls `function:sql.fn` when
   that SQL function exists.
@@ -151,7 +154,7 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `supabase/functions/<name>/index.ts` become HTTP
   `entrypoint:http:POST:/functions/v1/<name>`.
 
-## Bundled rules (v0.2.2)
+## Bundled rules (v0.2.3)
 
 | File | Status | What it detects |
 | --- | --- | --- |

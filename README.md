@@ -105,7 +105,7 @@ flowchart LR
   GET_stock -->|reads inferred| inventory
 ```
 
-## How it works (v0.2.2)
+## How it works (v0.2.3)
 
 1. **Schema replayer** — applies `schema.sql` / migration folders in order
    (`CREATE TABLE IF NOT EXISTS`, quoted/schema-qualified pg_dump identifiers,
@@ -143,12 +143,14 @@ flowchart LR
    `while True` workers. `supabase.rpc("fn")` links to SQL functions.
    Client URLs keep the env/host origin (`os.environ["X_URL"]`), not a
    local variable name.
-4. **JavaScript / TypeScript detector** — Express / Fastify / Hono
-   `app.get("/path", handler)` / `router.post`, `fetch()`, Supabase
-   `.from('t').select|insert|update|delete|upsert` and `.rpc`, `pg`/`postgres`
-   `query()` SQL. `.ts`/`.tsx` use tree-sitter-typescript. Supabase Edge
-   Functions (`serve` / `Deno.serve` in `supabase/functions/<name>/index.ts`)
-   become HTTP `/functions/v1/<name>`.
+4. **JavaScript / TypeScript detector** — Express / Fastify / Hono routes
+   on a known app/router with a string-literal (or resolvable const) path.
+   `client.get` / `axios.get` / `fetch` / `Map.get` are outbound
+   `calls_http`, not routes. Inline handlers attribute `supabase.from('t')`
+   to the route. `.ts`/`.tsx` use tree-sitter-typescript. `pg`/`postgres`
+   `query()` SQL and Supabase Edge Functions
+   (`serve` / `Deno.serve` in `supabase/functions/<name>/index.ts` →
+   HTTP `/functions/v1/<name>`).
 5. **Call graph** — handler → service → repository using typed locals,
    constructors, import aliases, injected func fields
    (`Service{ring: notify.Send}`), **object/interface dispatch**
@@ -215,7 +217,11 @@ table and collection names (`orders`, `users`, `tenants`, `notifications`,
   links, env-based `services:`.
 - **v0.2.2** — Forward-ref SQL functions, dynamic `table:unknown`,
   unresolved/external relations, object dispatch, one-hop Cloud Tasks
-  URLs, HTTP origin keys, TypeScript servers. **This release.**
+  URLs, HTTP origin keys, TypeScript servers.
+- **v0.2.3** — Go Group prefix hang, INSERT ON CONFLICT / FOR UPDATE OF,
+  TS client-call false routes, HTTP matching without `{param}` wildcards,
+  handler table attribution, `collection:unknown`, `unresolved_calls`,
+  non-editable install. **This release.**
 - **v0.3** — GitHub Action that warns when a PR changes a writer of a column
   that another in-flight PR also touches (“lineage conflict”).
 - **v0.4** — MCP server so agents can query `why orders.status` without

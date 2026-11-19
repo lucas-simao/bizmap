@@ -33,6 +33,9 @@ CRON_METHODS = {"AddFunc", "AddJob", "Schedule", "Start", "AddCronJob"}
 TIME_TICKER_METHODS = {"NewTicker", "Tick"}
 TIME_AFTER = "After"
 HTTP_ROUTE_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "Any", "Match"}
+GROUP_TYPE_NAMES = {"Group", "Echo"}
+PREFIX_MAX_ITERS = 32
+PREFIX_MAX_LEN = 1024
 _PATH_SELECTOR = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\}$")
 SQL_PARAM_NAMES = {"query", "q", "sql"}
 
@@ -149,6 +152,13 @@ class CallHit:
 
 
 @dataclass
+class UnresolvedCall:
+    caller: str
+    callee: str
+    evidence: Evidence
+
+
+@dataclass
 class GoAnalysis:
     functions: dict[str, GoFunction]
     sql_sites: list[SqlSite]
@@ -156,6 +166,7 @@ class GoAnalysis:
     jobs: list[JobHit]
     calls: list[CallHit]
     situations: dict[str, list[str]] = field(default_factory=dict)
+    unresolved_calls: list[UnresolvedCall] = field(default_factory=list)
 
 
 @dataclass
@@ -913,22 +924,34 @@ class GoAnalyzer:
         routes: list[RouteHit] = []
         jobs: list[JobHit] = []
         calls: list[CallHit] = []
+        unresolved_calls: list[UnresolvedCall] = []
         situations: dict[str, list[str]] = defaultdict(list)
 
         echo_rule = next((r for r in self.rules if r.produce.get("entrypoint", {}).get("kind") == "http"), None)
         pgx_rule = next((r for r in self.rules if "sql" in r.produce), None)
         ticker_rule = next((r for r in self.rules if r.detect.get("go_call") or r.detect.get("go_statement")), None)
 
+        prefix_by_fn: dict[str, dict[str, str]] = {}
+        consts_by_info: dict[str, dict[str, ResolvedString]] = {}
         for info in infos:
             package_consts: dict[str, ResolvedString] = {}
             for other in infos:
                 if other.import_path == info.import_path:
                     package_consts.update(other.consts)
-            prefix_map = self._path_prefixes(info, echo_rule, package_consts, idx)
+            consts_by_info[info.rel] = package_consts
+            for fn in info.functions:
+                prefixes = self._path_prefixes(fn, info, echo_rule, package_consts, idx)
+                self._seed_echo_params(fn, prefixes)
+                prefix_by_fn[fn.qualname] = prefixes
+        self._propagate_group_prefixes(infos, idx, echo_rule, prefix_by_fn, consts_by_info)
+
+        for info in infos:
+            package_consts = consts_by_info[info.rel]
 
             for fn in info.functions:
                 env = dict(package_consts)
                 self._scan_function_env(fn, env, package_consts, info, idx)
+                prefix_map = prefix_by_fn.get(fn.qualname) or {}
                 for node in walk(fn.node):
                     if node.type != "call_expression":
                         continue
@@ -955,6 +978,12 @@ class GoAnalyzer:
                             for ref in self._const_refs_in_args(args, info, idx):
                                 if ref not in situations[callee.qualname]:
                                     situations[callee.qualname].append(ref)
+                    elif not callees and not is_go:
+                        note = self._unresolved_iface_note(node, fn, info, idx)
+                        if note:
+                            unresolved_calls.append(
+                                UnresolvedCall(caller=fn.qualname, callee=note, evidence=evidence)
+                            )
                     self._sql_from_helper_call(
                         node, args, fn, info, idx, env, package_consts, sql_sites, callees
                     )
@@ -1008,15 +1037,19 @@ class GoAnalyzer:
                             path_res = _resolve_expr(
                                 path_node, env, package_consts, info.import_aliases, idx.consts_by_import
                             )
-                            prefix = self._receiver_prefix(
-                                node, prefix_map, echo_rule, env, package_consts, info, idx
+                            prefix, prefix_unresolved = self._receiver_prefix(
+                                node, prefix_map, echo_rule, env, package_consts, info, idx, fn
                             )
                             if (
                                 handler_node is not None
                                 and _path_is_string_like(path_node, path_res, env, package_consts)
                             ):
                                 full_path = _join_path(prefix, path_res.path_text)
-                                path_unresolved = (not path_res.fully_static) or ("{" in full_path)
+                                path_unresolved = (
+                                    (not path_res.fully_static)
+                                    or prefix_unresolved
+                                    or ("{" in full_path)
+                                )
                                 path_conf = (
                                     Confidence.EXACT if not path_unresolved else Confidence.UNKNOWN
                                 )
@@ -1059,6 +1092,7 @@ class GoAnalyzer:
             jobs=jobs,
             calls=calls,
             situations=dict(situations),
+            unresolved_calls=unresolved_calls,
         )
 
     def _build_indexes(self, infos: list[_FileInfo]) -> _Indexes:
@@ -1250,20 +1284,49 @@ class GoAnalyzer:
                 )
                 env[names[0]] = resolved
 
+    def _group_opts(self, echo_rule: Rule | None) -> tuple[str, int]:
+        group_method = "Group"
+        path_arg = 0
+        if echo_rule:
+            opts = echo_rule.options.get("receiver_path_prefixes") or {}
+            group_method = str(opts.get("group_method", "Group"))
+            path_arg = int(opts.get("path_arg", 0))
+        return group_method, path_arg
+
+    def _seed_echo_params(self, fn: GoFunction, prefixes: dict[str, str]) -> None:
+        for name, gtype in fn.params.items():
+            if gtype and gtype.name == "Echo":
+                prefixes.setdefault(name, "")
+
+    def _is_group_type(self, gtype: GoType | None) -> bool:
+        return bool(gtype and gtype.name in GROUP_TYPE_NAMES)
+
+    def _group_param_names(self, fn: GoFunction) -> list[str]:
+        out: list[str] = []
+        for name, gtype in fn.params.items():
+            if name == fn.receiver_var:
+                continue
+            if self._is_group_type(gtype):
+                out.append(name)
+        return out
+
     def _path_prefixes(
         self,
+        fn: GoFunction,
         info: _FileInfo,
         echo_rule: Rule | None,
         package_consts: dict[str, ResolvedString],
         idx: _Indexes,
     ) -> dict[str, str]:
+        """Resolve Echo Group prefixes for one function.
+
+        Scoped per function so ``g := e.Group("/a")`` in one func and
+        ``g := e.Group("/b")`` in another cannot oscillate. Iteration is
+        capped as a safety net against self-referential Group chains.
+        """
         prefixes: dict[str, str] = {}
-        group_method = "Group"
-        path_arg = 0
-        if echo_rule:
-            opts = echo_rule.options.get("receiver_path_prefixes") or {}
-            group_method = opts.get("group_method", "Group")
-            path_arg = int(opts.get("path_arg", 0))
+        group_method, path_arg = self._group_opts(echo_rule)
+        self._seed_echo_params(fn, prefixes)
 
         def resolve_path(arg: Node | None) -> str:
             if arg is None:
@@ -1293,20 +1356,8 @@ class GoAnalyzer:
                 return prefix_of_receiver(recv.child_by_field_name("operand"))
             return ""
 
-        assignments: list[tuple[str, Node]] = []
-        for node in walk(info.tree):
-            if node.type not in {"short_var_declaration", "assignment_statement"}:
-                continue
-            lists = [c for c in node.named_children if c.type == "expression_list"]
-            if len(lists) < 2:
-                continue
-            names = [c for c in lists[0].named_children if c.type == "identifier"]
-            values = lists[1].named_children
-            if not names or not values:
-                continue
-            assignments.append((text(names[0]), values[0]))
-        changed = True
-        while changed:
+        assignments = self._group_assignments(fn)
+        for _ in range(PREFIX_MAX_ITERS):
             changed = False
             for ident, val in assignments:
                 if val.type == "call_expression" and call_callee_name(val) == group_method:
@@ -1319,12 +1370,186 @@ class GoAnalyzer:
                         else None
                     )
                     new_prefix = _join_path(prefix_of_receiver(operand), path)
+                    if len(new_prefix) > PREFIX_MAX_LEN:
+                        continue
                     if prefixes.get(ident) != new_prefix:
                         prefixes[ident] = new_prefix
                         changed = True
                 elif val.type == "call_expression" and call_callee_name(val) in {"New"}:
                     prefixes.setdefault(ident, "")
+            if not changed:
+                break
         return prefixes
+
+    def _group_assignments(self, fn: GoFunction) -> list[tuple[str, Node]]:
+        assignments: list[tuple[str, Node]] = []
+        for node in walk(fn.node):
+            if node.type not in {"short_var_declaration", "assignment_statement"}:
+                continue
+            lists = [c for c in node.named_children if c.type == "expression_list"]
+            if len(lists) < 2:
+                continue
+            names = [c for c in lists[0].named_children if c.type == "identifier"]
+            values = lists[1].named_children
+            if not names or not values:
+                continue
+            assignments.append((text(names[0]), values[0]))
+        return assignments
+
+    def _group_call_prefix(
+        self,
+        call: Node,
+        prefixes: dict[str, str],
+        echo_rule: Rule | None,
+        package_consts: dict[str, ResolvedString],
+        info: _FileInfo,
+        idx: _Indexes,
+    ) -> str:
+        group_method, path_arg = self._group_opts(echo_rule)
+        if call_callee_name(call) != group_method:
+            return ""
+        args = call_args(call)
+        arg = args[path_arg] if len(args) > path_arg else None
+        literal = _go_string_node(arg) if arg is not None else None
+        if literal is None:
+            path_res = _resolve_expr(arg, package_consts, package_consts, info.import_aliases, idx.consts_by_import)
+            path = path_res.path_text if path_res.usable else ""
+        else:
+            path = literal
+        inner = call.child_by_field_name("function")
+        operand = (
+            inner.child_by_field_name("operand")
+            if inner and inner.type == "selector_expression"
+            else None
+        )
+        base = ""
+        if operand is not None and operand.type == "identifier":
+            base = prefixes.get(text(operand), "")
+        elif operand is not None and operand.type == "call_expression":
+            base = self._group_call_prefix(operand, prefixes, echo_rule, package_consts, info, idx)
+        return _join_path(base, path)
+
+    def _returned_group_prefix(
+        self,
+        fn: GoFunction,
+        prefixes: dict[str, str],
+        echo_rule: Rule | None,
+        package_consts: dict[str, ResolvedString],
+        info: _FileInfo,
+        idx: _Indexes,
+    ) -> str | None:
+        if not (fn.return_type and fn.return_type.name == "Group"):
+            return None
+        found: list[str] = []
+        for node in walk(fn.node):
+            if node.type != "return_statement":
+                continue
+            expr_list = next((c for c in node.named_children if c.type == "expression_list"), None)
+            expr = None
+            if expr_list is not None and expr_list.named_children:
+                expr = expr_list.named_children[0]
+            elif node.named_children:
+                expr = node.named_children[0]
+            if expr is None:
+                continue
+            expr = _unwrap_literal(expr) or expr
+            if expr.type == "identifier":
+                name = text(expr)
+                if name in prefixes:
+                    found.append(prefixes[name])
+            elif expr.type == "call_expression":
+                group_method, _path_arg = self._group_opts(echo_rule)
+                if call_callee_name(expr) == group_method:
+                    found.append(
+                        self._group_call_prefix(expr, prefixes, echo_rule, package_consts, info, idx)
+                    )
+                else:
+                    hits = self._resolve_callees(expr, fn, info, idx)
+                    if len(hits) == 1:
+                        # callee return filled in a later propagate pass
+                        continue
+        if not found:
+            return None
+        # Prefer a concrete prefix over empty.
+        for prefix in found:
+            if prefix:
+                return prefix
+        return found[0]
+
+    def _propagate_group_prefixes(
+        self,
+        infos: list[_FileInfo],
+        idx: _Indexes,
+        echo_rule: Rule | None,
+        prefix_by_fn: dict[str, dict[str, str]],
+        consts_by_info: dict[str, dict[str, ResolvedString]],
+    ) -> None:
+        """Copy Group prefixes across returns and call arguments."""
+        group_method, _path_arg = self._group_opts(echo_rule)
+        for _ in range(PREFIX_MAX_ITERS):
+            changed = False
+            return_prefix: dict[str, str] = {}
+            for info in infos:
+                package_consts = consts_by_info[info.rel]
+                for fn in info.functions:
+                    prefixes = prefix_by_fn[fn.qualname]
+                    ret = self._returned_group_prefix(
+                        fn, prefixes, echo_rule, package_consts, info, idx
+                    )
+                    if ret is not None:
+                        return_prefix[fn.qualname] = ret
+            for info in infos:
+                package_consts = consts_by_info[info.rel]
+                for fn in info.functions:
+                    prefixes = prefix_by_fn[fn.qualname]
+                    for ident, val in self._group_assignments(fn):
+                        if val.type != "call_expression":
+                            continue
+                        if call_callee_name(val) == group_method:
+                            continue
+                        hits = self._resolve_callees(val, fn, info, idx)
+                        if len(hits) != 1:
+                            continue
+                        rp = return_prefix.get(hits[0][0].qualname)
+                        if rp is None:
+                            continue
+                        if prefixes.get(ident) != rp:
+                            prefixes[ident] = rp
+                            changed = True
+                    for node in walk(fn.node):
+                        if node.type != "call_expression":
+                            continue
+                        hits = self._resolve_callees(node, fn, info, idx)
+                        if not hits:
+                            continue
+                        args = call_args(node)
+                        for callee, _conf, _cands in hits:
+                            params = [p for p in callee.params if p != callee.receiver_var]
+                            dest = prefix_by_fn.get(callee.qualname)
+                            if dest is None:
+                                continue
+                            for i, arg in enumerate(args):
+                                if i >= len(params):
+                                    break
+                                pname = params[i]
+                                ptype = callee.params.get(pname)
+                                if not self._is_group_type(ptype):
+                                    continue
+                                arg_u = _unwrap_literal(arg) or arg
+                                src: str | None = None
+                                if arg_u.type == "identifier":
+                                    src = prefixes.get(text(arg_u))
+                                elif arg_u.type == "call_expression" and call_callee_name(arg_u) == group_method:
+                                    src = self._group_call_prefix(
+                                        arg_u, prefixes, echo_rule, package_consts, info, idx
+                                    )
+                                if src is None:
+                                    continue
+                                if dest.get(pname) != src:
+                                    dest[pname] = src
+                                    changed = True
+            if not changed:
+                break
 
     def _receiver_prefix(
         self,
@@ -1335,22 +1560,25 @@ class GoAnalyzer:
         package_consts: dict[str, ResolvedString],
         info: _FileInfo,
         idx: _Indexes,
-    ) -> str:
+        fn: GoFunction | None = None,
+    ) -> tuple[str, bool]:
         func = call.child_by_field_name("function")
         if func is None or func.type != "selector_expression":
-            return ""
+            return "", False
         operand = func.child_by_field_name("operand")
         if operand is None:
-            return ""
+            return "", False
         if operand.type == "identifier":
-            return prefixes.get(text(operand), "")
+            name = text(operand)
+            if name in prefixes:
+                return prefixes[name], False
+            gtype = fn.params.get(name) if fn is not None else None
+            if gtype and gtype.name == "Group":
+                # Group defined elsewhere and not resolvable: keep a marker.
+                return "{" + name + "}", True
+            return "", False
         if operand.type == "call_expression":
-            group_method = "Group"
-            path_arg = 0
-            if echo_rule:
-                opts = echo_rule.options.get("receiver_path_prefixes") or {}
-                group_method = opts.get("group_method", "Group")
-                path_arg = int(opts.get("path_arg", 0))
+            group_method, path_arg = self._group_opts(echo_rule)
             if call_callee_name(operand) == group_method:
                 args = call_args(operand)
                 arg = args[path_arg] if len(args) > path_arg else None
@@ -1359,8 +1587,36 @@ class GoAnalyzer:
                 inner_func = operand.child_by_field_name("function")
                 inner_op = inner_func.child_by_field_name("operand") if inner_func else None
                 base = prefixes.get(text(inner_op), "") if inner_op and inner_op.type == "identifier" else ""
-                return _join_path(base, path)
-        return ""
+                unresolved = bool(path_res and not path_res.fully_static)
+                return _join_path(base, path), unresolved
+        return "", False
+
+    def _unresolved_iface_note(
+        self,
+        call: Node,
+        fn: GoFunction,
+        info: _FileInfo,
+        idx: _Indexes,
+    ) -> str | None:
+        """Interface/protocol call with no scanned implementer."""
+        func = call.child_by_field_name("function")
+        if func is None or func.type != "selector_expression":
+            return None
+        method = call_callee_name(call)
+        if not method:
+            return None
+        operand = func.child_by_field_name("operand")
+        local_types = self._local_types(fn, info, idx)
+        gtype = self._type_of_expr(operand, fn, info, local_types, idx)
+        if gtype is None:
+            return None
+        iface_key = (gtype.import_path or fn.import_path, gtype.name)
+        if iface_key not in idx.interfaces:
+            return None
+        impls = idx.implementers.get(iface_key) or []
+        if impls:
+            return None
+        return f"{gtype.name}.{method}"
 
     def _assignment_pairs(self, node: Node) -> list[tuple[str, Node]]:
         lists = [c for c in node.named_children if c.type == "expression_list"]

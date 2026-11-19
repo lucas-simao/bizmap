@@ -228,6 +228,13 @@ class PyRpcCall:
 
 
 @dataclass
+class PyUnresolvedCall:
+    caller: str
+    callee: str
+    evidence: Evidence
+
+
+@dataclass
 class PyAnalysis:
     functions: dict[str, PyFunction] = field(default_factory=dict)
     routes: list[PyRoute] = field(default_factory=list)
@@ -237,6 +244,7 @@ class PyAnalysis:
     http_calls: list[PyHttpCall] = field(default_factory=list)
     queue_events: list[PyQueueEvent] = field(default_factory=list)
     rpc_calls: list[PyRpcCall] = field(default_factory=list)
+    unresolved_calls: list[PyUnresolvedCall] = field(default_factory=list)
     models: dict[str, ModelInfo] = field(default_factory=dict)
     bindings: dict[str, str] = field(default_factory=dict)
     schema: Schema = field(default_factory=Schema)
@@ -311,9 +319,11 @@ class PythonAnalyzer:
             if ret and ret.usable:
                 call_returns[fn.name] = ret
                 call_returns[fn.qualname] = ret
-
+        protocols = _collect_protocols(parsed)
+        protocol_impls = _protocol_implementers(parsed, protocols)
         for _path, rel_file, _source, tree, module, imap, fns in parsed:
-            local = consts_by_module.get(module) or {}
+            local = dict(consts_by_module.get(module) or {})
+            local.update(_class_field_env(tree, local, imap, consts_by_module))
             local_dicts = dicts_by_module.get(module) or {}
 
             def resolve(
@@ -351,6 +361,8 @@ class PythonAnalyzer:
                 dicts_by_module,
                 consts_by_module,
                 call_returns,
+                protocols,
+                protocol_impls,
             )
             self._detect_main_worker(analysis, tree, module, fns, enclosing, rel_file)
 
@@ -702,6 +714,8 @@ class PythonAnalyzer:
         dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]] | None = None,
         consts_by_module: dict[str, dict[str, ResolvedString]] | None = None,
         call_returns: dict[str, ResolvedString] | None = None,
+        protocols: dict[str, set[str]] | None = None,
+        protocol_impls: dict[str, list[str]] | None = None,
     ) -> None:
         by_local = {fn.name: fn for fn in fns if not fn.class_name}
         by_class_method: dict[tuple[str, str], PyFunction] = {
@@ -713,6 +727,8 @@ class PythonAnalyzer:
         dicts_by_module = dicts_by_module or {}
         consts_by_module = consts_by_module or {}
         call_returns = call_returns or {}
+        protocols = protocols or {}
+        protocol_impls = protocol_impls or {}
         module_consts = consts_by_module.get(fns[0].module if fns else "") or {}
 
         for fn in fns:
@@ -752,7 +768,16 @@ class PythonAnalyzer:
                 evidence = Evidence(file=rel_file, line=line_of(node), symbol=fn.qualname)
 
                 self._record_call_edge(
-                    analysis, fn, node, method, by_local, by_class_method, imported_fns, evidence
+                    analysis,
+                    fn,
+                    node,
+                    method,
+                    by_local,
+                    by_class_method,
+                    imported_fns,
+                    evidence,
+                    protocols,
+                    protocol_impls,
                 )
                 self._record_sql(
                     analysis,
@@ -792,6 +817,8 @@ class PythonAnalyzer:
         by_class_method: dict[tuple[str, str], PyFunction],
         imported_fns: dict[str, PyFunction],
         evidence: Evidence,
+        protocols: dict[str, set[str]] | None = None,
+        protocol_impls: dict[str, list[str]] | None = None,
     ) -> None:
         func = node.child_by_field_name("function")
         # self.method
@@ -808,6 +835,18 @@ class PythonAnalyzer:
                 if cal and cal.qualname != fn.qualname:
                     analysis.calls.append((fn.qualname, cal.qualname, evidence, Confidence.INFERRED))
                     return
+                proto = _param_protocol(fn, text(obj), protocols or {})
+                if proto and method in (protocols or {}).get(proto, set()):
+                    impls = (protocol_impls or {}).get(proto) or []
+                    if not impls:
+                        analysis.unresolved_calls.append(
+                            PyUnresolvedCall(
+                                caller=fn.qualname,
+                                callee=f"{proto}.{method}",
+                                evidence=evidence,
+                            )
+                        )
+                        return
         if method in by_local and by_local[method].qualname != fn.qualname:
             analysis.calls.append((fn.qualname, by_local[method].qualname, evidence, Confidence.INFERRED))
             return
@@ -1081,19 +1120,25 @@ class PythonAnalyzer:
         res = resolve(url_node)
         if not res.usable:
             return
-        url = res.path_text
-        if not (url.startswith("/") or url.startswith("{") or "://" in url or "/" in url):
-            return
-        analysis.http_calls.append(
-            PyHttpCall(
-                function=fn,
-                method=http_method,
-                url=url,
-                evidence=evidence,
-                unresolved=res.unresolved,
-                confidence=Confidence.UNKNOWN if res.unresolved else Confidence.INFERRED,
+        urls = res.all_texts() or ([res.path_text] if res.path_text else [])
+        multi = len(urls) > 1
+        for url in urls:
+            if not (url.startswith("/") or url.startswith("{") or "://" in url or "/" in url):
+                continue
+            unresolved = res.unresolved and not multi
+            conf = Confidence.INFERRED if multi else (
+                Confidence.UNKNOWN if res.unresolved else Confidence.INFERRED
             )
-        )
+            analysis.http_calls.append(
+                PyHttpCall(
+                    function=fn,
+                    method=http_method,
+                    url=url,
+                    evidence=evidence,
+                    unresolved=unresolved,
+                    confidence=conf,
+                )
+            )
 
     def _record_queues(
         self,
@@ -1346,10 +1391,10 @@ def _collections_in_chain(call: Node, resolve) -> list[str]:
                 pos = call_posargs(cur)
                 if pos:
                     res = resolve(pos[0])
-                    if res.usable and res.fully_static:
+                    if res.usable and res.fully_static and res.path_text:
                         names.append(res.path_text)
-                    elif res.usable:
-                        names.append(res.path_text)
+                    else:
+                        names.append("unknown")
             func = cur.child_by_field_name("function")
             if func is not None and func.type == "attribute":
                 cur = func.named_children[0]
@@ -1900,3 +1945,160 @@ def _resolve_object_dispatch(analysis: PyAnalysis) -> None:
                     if cal is not None:
                         add_call(fn.qualname, cal.qualname, evidence)
     analysis.calls.extend(new_calls)
+
+
+def _class_field_env(
+    tree: Node,
+    local: dict[str, ResolvedString],
+    imap: ImportMap,
+    consts_by_module: dict[str, dict[str, ResolvedString]],
+) -> dict[str, ResolvedString]:
+    """Class-level and ``self.x =`` string fields (base_url from env/const)."""
+    out: dict[str, ResolvedString] = {}
+
+    def resolve(node: Node | None) -> ResolvedString:
+        env = {**local, **out}
+        return resolve_expr(node, env, env, imap, consts_by_module)
+
+    for node in walk(tree):
+        if node.type != "class_definition":
+            continue
+        body = node.child_by_field_name("body")
+        if body is None:
+            continue
+        for stmt in body.named_children:
+            assign = None
+            fn_node = None
+            if stmt.type == "expression_statement" and stmt.named_children:
+                inner = stmt.named_children[0]
+                if inner.type == "assignment":
+                    assign = inner
+            elif stmt.type == "function_definition":
+                fn_node = stmt
+            if assign is not None:
+                left = assign.child_by_field_name("left")
+                right = assign.child_by_field_name("right")
+                if left is not None and left.type == "identifier" and right is not None:
+                    res = resolve(right)
+                    if res.usable:
+                        out[text(left)] = res
+                        out[f"self.{text(left)}"] = res
+            if fn_node is not None:
+                for inner in walk(fn_node):
+                    if inner.type != "assignment":
+                        continue
+                    left = inner.child_by_field_name("left")
+                    right = inner.child_by_field_name("right")
+                    if left is None or right is None or left.type != "attribute":
+                        continue
+                    if text(left).startswith("self."):
+                        res = resolve(right)
+                        if res.usable:
+                            field = text(left)
+                            out[field] = res
+                            out[field.split(".", 1)[-1]] = res
+    return out
+
+
+def _collect_protocols(parsed) -> dict[str, set[str]]:
+    """Class name → method names for ``class X(Protocol)``."""
+    out: dict[str, set[str]] = {}
+    for _path, _rf, _src, tree, _module, _imap, _fns in parsed:
+        for node in walk(tree):
+            if node.type != "class_definition":
+                continue
+            supers = node.child_by_field_name("superclasses")
+            if supers is None or "Protocol" not in text(supers):
+                continue
+            cname = text(node.child_by_field_name("name"))
+            if not cname:
+                continue
+            meths: set[str] = set()
+            body = node.child_by_field_name("body")
+            if body is not None:
+                for stmt in body.named_children:
+                    fn_node = stmt
+                    if stmt.type == "decorated_definition":
+                        fn_node = next(
+                            (c for c in stmt.named_children if c.type == "function_definition"),
+                            None,
+                        ) or stmt
+                    if fn_node.type == "function_definition":
+                        name = text(fn_node.child_by_field_name("name"))
+                        if name and name not in {"__init__", "__new__"}:
+                            meths.add(name)
+            out[cname] = meths
+    return out
+
+
+def _protocol_implementers(parsed, protocols: dict[str, set[str]]) -> dict[str, list[str]]:
+    """Protocol name → concrete class names that define its methods."""
+    if not protocols:
+        return {}
+    class_methods: dict[str, set[str]] = {}
+    protocol_names = set(protocols)
+    for _path, _rf, _src, tree, _module, _imap, _fns in parsed:
+        for node in walk(tree):
+            if node.type != "class_definition":
+                continue
+            cname = text(node.child_by_field_name("name"))
+            if not cname or cname in protocol_names:
+                continue
+            supers = node.child_by_field_name("superclasses")
+            if supers is not None and "Protocol" in text(supers):
+                continue
+            meths: set[str] = set()
+            body = node.child_by_field_name("body")
+            if body is None:
+                continue
+            for stmt in body.named_children:
+                fn_node = stmt
+                if stmt.type == "decorated_definition":
+                    fn_node = next(
+                        (c for c in stmt.named_children if c.type == "function_definition"),
+                        None,
+                    ) or stmt
+                if fn_node.type == "function_definition":
+                    name = text(fn_node.child_by_field_name("name"))
+                    if name:
+                        meths.add(name)
+            class_methods[cname] = meths
+    impls: dict[str, list[str]] = {p: [] for p in protocols}
+    for proto, wanted in protocols.items():
+        if not wanted:
+            continue
+        for cname, meths in class_methods.items():
+            if wanted <= meths:
+                impls[proto].append(cname)
+    return impls
+
+
+def _param_protocol(fn: PyFunction, param: str, protocols: dict[str, set[str]]) -> str | None:
+    """Return the Protocol name of a typed parameter, if any."""
+    if not protocols:
+        return None
+    params = fn.node.child_by_field_name("parameters")
+    if params is None:
+        return None
+    for p in params.named_children:
+        name = ""
+        type_txt = ""
+        if p.type == "typed_parameter":
+            name_n = p.child_by_field_name("name") or (
+                p.named_children[0] if p.named_children else None
+            )
+            type_n = p.child_by_field_name("type")
+            name = text(name_n) if name_n is not None else ""
+            type_txt = text(type_n) if type_n is not None else ""
+        elif p.type == "typed_default_parameter":
+            name_n = p.child_by_field_name("name") or (
+                p.named_children[0] if p.named_children else None
+            )
+            type_n = p.child_by_field_name("type")
+            name = text(name_n) if name_n is not None else ""
+            type_txt = text(type_n) if type_n is not None else ""
+        if name == param:
+            leaf = type_txt.split(".")[-1].strip()
+            if leaf in protocols:
+                return leaf
+    return None
