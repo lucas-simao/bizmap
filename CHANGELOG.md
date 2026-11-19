@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **Route-literal origin**: a function that only returns a path
+  (`const site = (id) => `/sites/${id}``) is never the origin of
+  `calls_http`; a call to such a helper at an HTTP call site
+  (`getSite = (id) => api.get(site(id))`) is the literal, so the edge leaves
+  `getSite`.
+- **Route-literal confidence**: when the call's base resolves to a scanned
+  service (`services:`) and exactly one route *of that service* matches, the
+  literal edge is `inferred`; `heuristic` stays for unknown bases.
+
 - **Route-literal uniqueness across services**: a literal that was unique
   inside its own repo kept its `heuristic` edge after merge even when another
   scanned service had the same path. Literal edges are now recomputed on the

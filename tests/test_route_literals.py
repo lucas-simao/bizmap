@@ -439,3 +439,76 @@ def get_item(item_id: str):
     skipped = node.attrs.get("route_literal_skipped") or []
     assert skipped and skipped[0]["reason"] == "ambiguous", skipped
     assert len(skipped[0]["discarded"]) == 2, skipped
+
+
+def test_path_helper_is_never_the_origin(tmp_path: Path) -> None:
+    """`site()` only builds the path; the request (and the edge) is `getSite`."""
+    web, api = _project(
+        tmp_path,
+        {
+            "src/sites.ts": """
+import { container } from './container';
+
+const site = (id: string) => `/delivery/sites/${encodeURIComponent(id)}`;
+
+export const getSite = (id: string) => container.resolve('http').get(site(id));
+""",
+        },
+    )
+    _write(
+        api,
+        "delivery.py",
+        """
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/api/v1/delivery/sites/{site_id}")
+def get_site(site_id: str):
+    return {}
+""",
+    )
+    graph = scan_paths([web, api])
+    assert _calls_http_from(graph, function_id("src.sites.site")) == set()
+    assert _calls_http_from(graph, function_id("src.sites.getSite")) == {
+        "api/entrypoint:http:GET:/api/v1/delivery/sites/{site_id}"
+    }
+
+
+def test_literal_with_base_resolved_to_scanned_service_is_inferred() -> None:
+    """Known base → service `api` scanned → its single matching route, `inferred`."""
+    from bizmap.graph import Graph
+    from bizmap.scan import _link_route_literals
+
+    graph = Graph()
+    graph.repo = "web"
+    graph.attrs["services"] = {"api": {"env": "VITE_API_URL"}}
+    for repo in ("api", "billing"):
+        graph.add_node(
+            f"{repo}/entrypoint:http:GET:/v1/items/:id",
+            "entrypoint",
+            kind="http",
+            method="GET",
+            path="/v1/items/:id",
+            repo=repo,
+            evidence={"file": "app.py", "line": 1, "symbol": "h"},
+        )
+    graph.add_node(
+        "web/function:src.items.load",
+        "function",
+        repo="web",
+        http_calls=[{"method": "GET", "url": "{VITE_API_URL}/v1/items/{id}"}],
+        route_literals=[
+            {
+                "path": "/v1/items/:id",
+                "method": "GET",
+                "evidence": {"file": "src/items.ts", "line": 3, "symbol": "src.items.load"},
+            }
+        ],
+    )
+    _link_route_literals(graph)
+    edges = [e for e in graph.edges.values() if e.type == "calls_http"]
+    assert [(e.to_id, e.confidence.value, e.attrs.get("via")) for e in edges] == [
+        ("api/entrypoint:http:GET:/v1/items/:id", "inferred", "route_literal")
+    ]
