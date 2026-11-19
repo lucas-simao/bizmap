@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from tree_sitter import Node
 
 from bizmap.detect.tsutil import call_args, call_callee_name, text, walk
+from bizmap.overrides import lookup_yaml_constant
 
 _ENV_SUB = re.compile(
     r"""(?:os\.)?environ\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]"""
@@ -21,6 +22,7 @@ class ResolvedString:
     dynamic: bool
     placeholder: str | None = None
     alternatives: list[str] | None = None
+    note: str | None = None
 
     @property
     def usable(self) -> bool:
@@ -301,6 +303,11 @@ def resolve_expr(
             found = (consts_by_module.get(mod) or {}).get(orig)
             if found and found.usable:
                 return found
+            yaml = consts_by_module.get("__yaml__") or {}
+            for key in (f"{mod}.{orig}", orig, name):
+                hit = yaml.get(key)
+                if hit and hit.usable:
+                    return hit
             return _placeholder_for(f"{mod}.{orig}")
         return _placeholder_for(name)
     if node.type == "attribute":
@@ -333,6 +340,18 @@ def resolve_expr(
                 found = (consts_by_module.get(mod) or {}).get(attr_name)
                 if found and found.usable:
                     return found
+                yaml = consts_by_module.get("__yaml__") or {}
+                for key in (f"{mod}.{attr_name}", f"{head}.{attr_name}", attr_name):
+                    hit = yaml.get(key)
+                    if hit and hit.usable:
+                        return hit
+                yaml_val = lookup_yaml_constant(
+                    {k: (v.path_text if v.usable else "") for k, v in yaml.items()},
+                    attr_name,
+                    mod,
+                )
+                if yaml_val:
+                    return ResolvedString(yaml_val, True, False)
                 return _placeholder_for(f"{mod}.{attr_name}")
             if head in imap.from_names:
                 mod, orig = imap.from_names[head]
@@ -543,18 +562,48 @@ def collect_module_dicts(
         elif value.type == "identifier" and text(value) in dicts:
             dicts[name] = dicts[text(value)]
         elif value.type == "dictionary_comprehension":
-            transformed = _dict_from_comprehension(value, dicts)
+            transformed = _dict_from_comprehension(
+                value, dicts, env, imap, consts_by_module, dicts_by_module
+            )
             if transformed:
                 dicts[name] = transformed
     return dicts
 
 
+def _module_fn_nodes(node: Node) -> dict[str, Node]:
+    cur: Node | None = node
+    while cur is not None and cur.parent is not None:
+        cur = cur.parent
+    if cur is None:
+        return {}
+    out: dict[str, Node] = {}
+    for child in cur.named_children:
+        fn = child
+        if child.type == "decorated_definition" and child.named_children:
+            fn = child.named_children[-1]
+        if fn.type != "function_definition":
+            continue
+        name_n = fn.child_by_field_name("name")
+        name = text(name_n) if name_n else ""
+        if name:
+            out[name] = fn
+    return out
+
+
 def _dict_from_comprehension(
     node: Node,
     dicts: dict[str, dict[str, ResolvedString]],
+    env: dict[str, ResolvedString] | None = None,
+    imap: ImportMap | None = None,
+    consts_by_module: dict[str, dict[str, ResolvedString]] | None = None,
+    dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]] | None = None,
 ) -> dict[str, ResolvedString] | None:
-    """``{k: textwrap.dedent(v) for k, v in RAW.items()}`` / ``v.strip()``."""
-    src_name = ""
+    """``{k: transform(v) for k, v in queries.RAW.items()}`` with static transforms."""
+    imap = imap or ImportMap()
+    env = env or {}
+    consts_by_module = consts_by_module or {}
+    dicts_by_module = dicts_by_module or {}
+    src: dict[str, ResolvedString] | None = None
     for cur in walk(node):
         if cur.type != "call":
             continue
@@ -564,15 +613,18 @@ def _dict_from_comprehension(
         if func is None or func.type != "attribute" or not func.named_children:
             continue
         obj = func.named_children[0]
-        if obj.type == "identifier":
-            src_name = text(obj)
+        src = lookup_dict_from_node(obj, imap, dicts, dicts_by_module)
+        if src:
             break
-    if not src_name or src_name not in dicts:
+        if obj.type == "identifier" and text(obj) in dicts:
+            src = dicts[text(obj)]
+            break
+    if not src:
         return None
-    src = dicts[src_name]
     pair = next((c for c in node.named_children if c.type == "pair"), None)
     val_n = pair.child_by_field_name("value") if pair is not None else None
-    transform = _comprehension_transform(val_n)
+    fns = _module_fn_nodes(node)
+    transform, known, note = _eval_sql_transform(val_n, "v", env, fns)
     out: dict[str, ResolvedString] = {}
     for key, val in src.items():
         texts = val.all_texts() or ([val.path_text] if val.path_text else [])
@@ -581,36 +633,188 @@ def _dict_from_comprehension(
             continue
         mapped = [transform(t) for t in texts]
         mapped = [t for t in mapped if t]
-        static = val.fully_static
-        out[key] = ResolvedString(
+        static = val.fully_static and known
+        item = ResolvedString(
             mapped[0] if mapped else val.text,
-            static,
-            not static,
-            placeholder=None if static else (mapped[0] if mapped else val.placeholder),
+            True if mapped else static,
+            not known or not val.fully_static,
+            placeholder=None if (known and val.fully_static) else (mapped[0] if mapped else val.placeholder),
             alternatives=mapped if len(mapped) > 1 else None,
+            note=note,
         )
+        if known and val.fully_static:
+            item = ResolvedString(
+                mapped[0] if mapped else val.text,
+                True,
+                False,
+                alternatives=mapped if len(mapped) > 1 else None,
+                note=note,
+            )
+        out[key] = item
     return out or None
 
 
-def _comprehension_transform(node: Node | None):
-    """Return a string transform for strip/dedent/identity."""
+def _eval_sql_transform(
+    node: Node | None,
+    value_param: str,
+    env: dict[str, ResolvedString],
+    fns: dict[str, Node],
+) -> tuple[Callable[[str], str], bool, str | None]:
+    """Return (transform, known, note) for a dict-comprehension value expr."""
 
     def identity(s: str) -> str:
         return s
 
     if node is None:
-        return identity
-    raw = text(node)
-    leaf = call_callee_name(node) if node.type == "call" else ""
-    if leaf == "dedent" or "dedent" in raw:
-        return lambda s: textwrap.dedent(s)
-    if leaf == "strip" or raw.endswith(".strip()") or ".strip(" in raw:
-        return lambda s: s.strip()
-    if leaf == "lstrip" or ".lstrip(" in raw:
-        return lambda s: s.lstrip()
-    if leaf == "rstrip" or ".rstrip(" in raw:
-        return lambda s: s.rstrip()
-    return identity
+        return identity, True, None
+    if node.type == "identifier" and text(node) == value_param:
+        return identity, True, None
+    built = _static_str_transform(node, value_param, env, fns, depth=0)
+    if built is not None:
+        return built, True, None
+    raw = text(node)[:80]
+    return identity, False, f"unknown SQL transform {raw}; kept raw tables"
+
+
+def _const_text(node: Node | None, env: dict[str, ResolvedString]) -> str | None:
+    if node is None:
+        return None
+    if node.type == "string":
+        return unquote(text(node))
+    if node.type == "identifier":
+        name = text(node)
+        found = env.get(name)
+        if found and found.fully_static and found.text is not None:
+            return found.text
+        return None
+    if node.type == "attribute":
+        raw = text(node)
+        found = env.get(raw)
+        if found and found.fully_static and found.text is not None:
+            return found.text
+        return None
+    return None
+
+
+def _static_str_transform(
+    node: Node | None,
+    value_param: str,
+    env: dict[str, ResolvedString],
+    fns: dict[str, Node],
+    depth: int,
+) -> Callable[[str], str] | None:
+    if node is None or depth > 6:
+        return None
+    if node.type == "identifier" and text(node) == value_param:
+        return lambda s: s
+    if node.type != "call":
+        return None
+    leaf = call_callee_name(node)
+    func = node.child_by_field_name("function")
+    pos = call_posargs(node)
+    kwargs = call_kwargs(node)
+    obj = None
+    if func is not None and func.type == "attribute" and func.named_children:
+        obj = func.named_children[0]
+    inner = _static_str_transform(obj, value_param, env, fns, depth + 1) if obj is not None else None
+    if leaf in {"strip", "lstrip", "rstrip", "dedent"}:
+        base = inner or (
+            (lambda s: s) if obj is not None and obj.type == "identifier" and text(obj) == value_param else None
+        )
+        if leaf == "dedent" and pos:
+            base = inner or (
+                (lambda s: s)
+                if pos[0].type == "identifier" and text(pos[0]) == value_param
+                else None
+            )
+        if base is None:
+            return None
+        if leaf == "strip":
+            return lambda s, b=base: b(s).strip()
+        if leaf == "lstrip":
+            return lambda s, b=base: b(s).lstrip()
+        if leaf == "rstrip":
+            return lambda s, b=base: b(s).rstrip()
+        return lambda s, b=base: textwrap.dedent(b(s))
+    if leaf == "replace":
+        if inner is None and obj is not None and obj.type == "identifier" and text(obj) == value_param:
+            def inner(s: str) -> str:
+                return s
+        if inner is None or len(pos) < 2:
+            return None
+        old = _const_text(pos[0], env)
+        new = _const_text(pos[1], env)
+        if old is None or new is None:
+            return None
+        return lambda s, b=inner, o=old, n=new: b(s).replace(o, n)
+    if leaf == "format":
+        if inner is None and obj is not None and obj.type == "identifier" and text(obj) == value_param:
+            def inner(s: str) -> str:
+                return s
+        if inner is None:
+            return None
+        fmt_kwargs: dict[str, str] = {}
+        for k, vnode in kwargs.items():
+            val = _const_text(vnode, env)
+            if val is None:
+                return None
+            fmt_kwargs[k] = val
+        fmt_args: list[str] = []
+        for arg in pos:
+            val = _const_text(arg, env)
+            if val is None:
+                return None
+            fmt_args.append(val)
+        captured_inner = inner
+        captured_args = tuple(fmt_args)
+        captured_kwargs = dict(fmt_kwargs)
+
+        def apply_fmt(s: str) -> str:
+            try:
+                return captured_inner(s).format(*captured_args, **captured_kwargs)
+            except (KeyError, IndexError, ValueError):
+                return captured_inner(s)
+
+        return apply_fmt
+    if leaf in fns:
+        if not pos or not (pos[0].type == "identifier" and text(pos[0]) == value_param):
+            if inner is None:
+                return None
+        ret = _function_return_expr(fns[leaf])
+        return _static_str_transform(ret, _first_param_name(fns[leaf]) or value_param, env, fns, depth + 1)
+    return None
+
+
+def _first_param_name(fn: Node) -> str | None:
+    params = fn.child_by_field_name("parameters")
+    if params is None:
+        return None
+    for child in params.named_children:
+        if child.type == "identifier":
+            return text(child)
+        ident = child.child_by_field_name("name") or child.child_by_field_name("pattern")
+        if ident is not None and ident.type == "identifier":
+            return text(ident)
+        for inner in child.named_children:
+            if inner.type == "identifier":
+                return text(inner)
+    return None
+
+
+def _function_return_expr(fn: Node) -> Node | None:
+    body = fn.child_by_field_name("body")
+    if body is None:
+        return None
+    expr: Node | None = None
+    for child in body.named_children:
+        if child.type == "return_statement" and child.named_children:
+            expr = child.named_children[0]
+        elif child.type not in {"expression_statement", "pass_statement"}:
+            if child.type != "return_statement":
+                # Non-trivial body (assignments, calls) — not a simple transform.
+                if child.type != "function_definition":
+                    return None
+    return expr
 
 
 def imported_module_name(head: str, imap: ImportMap) -> str | None:

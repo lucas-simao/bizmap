@@ -26,6 +26,7 @@ from bizmap.graph import (
     view_id,
 )
 from bizmap.http_match import (
+    classify_unresolved_http,
     match_http,
     path_without_placeholders,
     strip_service_base,
@@ -654,13 +655,22 @@ def _apply_python(
             target = _ensure_access_target(graph, schema, access)
             if not target:
                 continue
+            conf = getattr(site, "confidence", None) or access.confidence
             graph.add_edge(
                 _kind_edge(access.kind),
                 fid,
                 target,
-                confidence=access.confidence,
+                confidence=conf,
                 evidence=site.evidence,
             )
+            note = getattr(site, "note", None)
+            if note:
+                node = graph.get(fid)
+                if node is not None:
+                    notes = list(node.attrs.get("notes") or [])
+                    if note not in notes:
+                        notes.append(note)
+                    node.attrs["notes"] = notes
         origin_accesses.append((site.function.qualname, accesses))
 
     for access in analysis.accesses:
@@ -1200,6 +1210,7 @@ def _stash_http_call(
     *,
     name: str,
     language: str,
+    client_unknown: bool = False,
 ) -> None:
     node = graph.get(fid)
     if node is None:
@@ -1214,7 +1225,9 @@ def _stash_http_call(
     if node is None:
         return
     bucket = list(node.attrs.get("http_calls") or [])
-    item = {"method": method, "url": url, "evidence": evidence}
+    item: dict = {"method": method, "url": url, "evidence": evidence}
+    if client_unknown:
+        item["client_unknown"] = True
     if item not in bucket:
         bucket.append(item)
     node.attrs["http_calls"] = bucket
@@ -1238,7 +1251,7 @@ def _link_http(
         path = str(node.attrs.get("path") or "")
         if method and path:
             routes.append((node.id, method, path))
-    calls: list[tuple[str, str, str, Evidence, Confidence]] = []
+    calls: list[tuple[str, str, str, Evidence, Confidence, bool]] = []
     if py:
         for c in py.http_calls:
             calls.append(
@@ -1248,12 +1261,22 @@ def _link_http(
                     c.url,
                     c.evidence,
                     c.confidence,
+                    bool(getattr(c, "client_unknown", False)),
                 )
             )
     if js:
         for c in js.http_calls:
             ev = Evidence(file=c.file, line=c.line, symbol=c.symbol)
-            calls.append((function_id(c.symbol), c.method, c.url, ev, Confidence.INFERRED))
+            calls.append(
+                (
+                    function_id(c.symbol),
+                    c.method,
+                    c.url,
+                    ev,
+                    Confidence.INFERRED,
+                    bool(getattr(c, "client_unknown", False)),
+                )
+            )
     if go:
         for c in getattr(go, "http_calls", None) or []:
             calls.append(
@@ -1263,6 +1286,7 @@ def _link_http(
                     c.url,
                     c.evidence,
                     Confidence.INFERRED,
+                    bool(getattr(c, "client_unknown", False)),
                 )
             )
     unmatched: list[dict] = []
@@ -1271,7 +1295,7 @@ def _link_http(
         for n in graph.nodes.values()
         if n.type == "entrypoint"
     }
-    for fid, method, url, ev, conf in calls:
+    for fid, method, url, ev, conf, client_unknown in calls:
         caller_repo = None
         node = graph.get(fid)
         if node is not None:
@@ -1289,15 +1313,18 @@ def _link_http(
                 graph.add_edge("calls_http", fid, eid, confidence=conf, evidence=ev)
             continue
         keys = unresolved_http_keys(url)
+        reason = classify_unresolved_http(url, client_unknown=client_unknown)
         node = graph.get(fid)
         if node is not None:
             notes = list(node.attrs.get("unresolved_http") or [])
-            note = {"url": url, "method": method, "keys": keys}
+            note = {"url": url, "method": method, "keys": keys, "reason": reason}
             if note not in notes:
                 notes.append(note)
             node.attrs["unresolved_http"] = notes
             node.attrs.setdefault("unresolved", True)
-        unmatched.append({"url": url, "method": method, "keys": keys, "from": fid})
+        unmatched.append(
+            {"url": url, "method": method, "keys": keys, "from": fid, "reason": reason}
+        )
     graph.attrs["unresolved_http"] = unmatched
     return unmatched
 
@@ -1529,6 +1556,8 @@ def _config_for_root(
     exclude = list(dict.fromkeys([*cfg.exclude, *local.exclude]))
     raw = dict(cfg.raw or {})
     raw.update(local.raw or {})
+    constants = dict(cfg.constants)
+    constants.update(local.constants)
     return ScanConfig(
         exclude=exclude,
         expand_star=bool(cfg.expand_star or local.expand_star),
@@ -1538,6 +1567,7 @@ def _config_for_root(
         database=local.database or cfg.database,
         services=services,
         repos=local.repos or cfg.repos,
+        constants=constants,
     )
 
 
@@ -1602,10 +1632,15 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
                     )
                 continue
             keys = unresolved_http_keys(url)
-            note = {"url": url, "method": method, "keys": keys}
+            reason = classify_unresolved_http(
+                url, client_unknown=bool(item.get("client_unknown"))
+            )
+            note = {"url": url, "method": method, "keys": keys, "reason": reason}
             if note not in still:
                 still.append(note)
-            unmatched.append({"url": url, "method": method, "keys": keys, "from": node.id})
+            unmatched.append(
+                {"url": url, "method": method, "keys": keys, "from": node.id, "reason": reason}
+            )
         if still:
             node.attrs["unresolved_http"] = still
             node.attrs.setdefault("unresolved", True)
@@ -1686,7 +1721,9 @@ def _scan_one(
     js_files = iter_files(root, [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"], exclude=exclude_pats)
     timings.parse += time.perf_counter() - t0
 
-    go_analysis = GoAnalyzer(rules).analyze(go_files, root, profile=timings)
+    go_analysis = GoAnalyzer(rules).analyze(
+        go_files, root, profile=timings, constants=cfg.constants
+    )
     warnings = list(getattr(go_analysis, "warnings", None) or [])
     if warnings:
         existing = list(graph.attrs.get("warnings") or [])
@@ -1695,9 +1732,9 @@ def _scan_one(
                 existing.append(item)
         graph.attrs["warnings"] = existing
     t_py = time.perf_counter()
-    py_analysis = PythonAnalyzer(rules).analyze(py_files, root)
+    py_analysis = PythonAnalyzer(rules).analyze(py_files, root, constants=cfg.constants)
     timings.resolve += time.perf_counter() - t_py
-    js_analysis = JsAnalyzer(rules).analyze(js_files, root)
+    js_analysis = JsAnalyzer(rules).analyze(js_files, root, constants=cfg.constants)
 
     _merge_schema(schema, py_analysis.schema)
     _add_schema_nodes(graph, schema)
@@ -1721,6 +1758,7 @@ def _scan_one(
             call.evidence.to_dict(),
             name=call.function.qualname,
             language="python",
+            client_unknown=bool(getattr(call, "client_unknown", False)),
         )
     for call in js_analysis.http_calls:
         _stash_http_call(
@@ -1731,6 +1769,7 @@ def _scan_one(
             {"file": call.file, "line": call.line, "symbol": call.symbol},
             name=call.symbol,
             language="javascript",
+            client_unknown=bool(getattr(call, "client_unknown", False)),
         )
     for call in getattr(go_analysis, "http_calls", None) or []:
         _stash_http_call(
@@ -1741,6 +1780,7 @@ def _scan_one(
             call.evidence.to_dict(),
             name=call.function.qualname,
             language="go",
+            client_unknown=bool(getattr(call, "client_unknown", False)),
         )
     for ev in py_analysis.queue_events:
         fid = function_id(ev.function.qualname)

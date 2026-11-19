@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.8 — 2026-11-19
+
+TypeScript factory-returned axios/ky instances and local path wrappers,
+Python SQL dicts derived in another module, unscanned transport HTTP,
+`constants:` in `bizmap.yaml`, and `reason` on every `unresolved_http`
+entry after a private evaluation of v0.2.7. Behavior is generic; tests
+and fixtures are synthetic only (`orders`, `users`, `tenants`,
+`documents`, `jobs`, `items`).
+
+### Fixed
+
+- **TS factory-returned clients**: `export function createClient(token?) { return axios.create({ baseURL: \`${import.meta.env.VITE_API_URL}/api/v1\` }) }` and `const makeHttp = () => { const inst = axios.create({...}); inst.interceptors.request.use(...); return inst }` then `export const api = createClient()`. Direct calls `api.get('/orders')` in another module, `api.get<Order[]>('/orders')`, `(await api.get(...)).data`, and the instance passed into `makeOrders(api)` / `new OrdersApi(api)` compose `{VITE_API_URL}/api/v1/orders`. Never `:client` / `:http` placeholders.
+- **TS local path wrappers**: `const get = <T>(url: string) => api.get<T>(BASE + url)` and `async function request(method, url, body) { return api.request({ method, url: \`${BASE}${url}\`, data: body }) }`. Callers `get('/orders/' + id)` / `request('POST', '/orders', b)` emit `calls_http` with the literal call-site path (dynamic parts → `:param`), not `base:url`.
+- **Python SQL dicts in another module**: `from . import queries; Q = {k: _transform(v) for k, v in queries.RAW.items()}` evaluates identity, `dedent`/`strip`, `.replace('old_schema.', 'new_schema.')`, and `.format(schema=CONST)` with constant args, then resolves tables (including renames). Unknown transforms keep the raw SQL tables with confidence `inferred` and a note.
+- **Unscanned transports**: `x.request('POST', path)` / `x.post(path)` on a transport whose class is not scanned emit `unresolved_http` on the caller with method + composed path (never silent).
+- **`constants:` in bizmap.yaml**: `constants: { PathPrefix: /api/v1 }` keyed by name or `pkg.Name` resolves Go/TS/Python consts that alias unscanned packages.
+- **`unresolved_http.reason`**: every unmatched call has one of `target_not_scanned` (URL fully composed but no matching route), `base_unknown` (path known, base not resolvable), `path_dynamic` (path not composable), `client_unknown`. CLI prints per-reason counts.
+
+### Changed
+
+- Graph format **0.2.8**.
+
 ## 0.2.7 — 2026-11-19
 
 TypeScript axios/ky instance parameters and class clients, Hono long chains

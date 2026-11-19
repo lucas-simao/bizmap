@@ -41,11 +41,41 @@ def line_of(node: Node) -> int:
     return node.start_point[0] + 1
 
 
+def unwrap_callee_expr(node: Node | None) -> Node | None:
+    """Strip await / parens / TS instantiation so ``(await api.get<T>)`` is ``api.get``."""
+    cur = node
+    for _ in range(8):
+        if cur is None:
+            return None
+        if cur.type in {
+            "await_expression",
+            "parenthesized_expression",
+            "as_expression",
+            "type_assertion",
+            "non_null_expression",
+            "instantiation_expression",
+            "generic_type",
+        }:
+            nxt = (
+                cur.child_by_field_name("function")
+                or cur.child_by_field_name("expression")
+                or cur.child_by_field_name("value")
+                or (cur.named_children[0] if cur.named_children else None)
+            )
+            if nxt is None or nxt is cur:
+                break
+            cur = nxt
+            continue
+        break
+    return cur
+
+
 def call_callee_name(call: Node) -> str:
     """Last identifier of a call_expression function (Exec, POST, Run, ...)."""
     func = call.child_by_field_name("function")
     if func is None and call.named_children:
         func = call.named_children[0]
+    func = unwrap_callee_expr(func) or func
     if func is None:
         return ""
     if func.type == "identifier":

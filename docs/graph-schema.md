@@ -1,4 +1,4 @@
-# BizMap graph schema (v0.2.7)
+# BizMap graph schema (v0.2.8)
 
 `bizmap scan` writes `bizmap.graph.json`. The graph is fully deterministic: every
 node and edge is produced from source text (SQL, tree-sitter ASTs, comments, or
@@ -11,7 +11,7 @@ values except `generated_at`.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | string | Graph format version (`"0.2.7"`). |
+| `version` | string | Graph format version (`"0.2.8"`). |
 | `generated_at` | string | UTC timestamp. |
 | `schema` | object | Reconstructed database schema (`schema.tables`). |
 | `nodes` | array | Graph nodes (see below). |
@@ -21,7 +21,7 @@ values except `generated_at`.
 | `repos` | array? | Repo names included in a merged registry graph. |
 | `services` | object? | Service name → base URL, used to match HTTP client calls. |
 | `queues` | object? | Queue name → consumer hint, copied from `bizmap.yaml` for rematch. |
-| `unresolved_http` | array? | Unmatched outbound HTTP calls (`url`, `method`, `keys`, `from`). Stderr counts this list. |
+| `unresolved_http` | array? | Unmatched outbound HTTP calls (`url`, `method`, `keys`, `from`, `reason`). `reason` is one of `target_not_scanned` (URL fully composed but no matching route in scanned repos), `base_unknown` (path known, base not resolvable), `path_dynamic` (path not composable), `client_unknown`. Stderr counts this list and prints per-reason totals. |
 | `warnings` | array? | Non-fatal scan notes (for example Go import-path suffix fallback when `go.mod` is missing). Printed by `bizmap scan`. |
 
 ### `schema.tables.<name>`
@@ -182,6 +182,9 @@ queues:
 repos:
   - catalog
   - worker
+constants:
+  PathPrefix: /api/v1
+  shared.Base: /items
 exclude:
   - cmd/seed
   - demo/
@@ -201,9 +204,11 @@ overrides:
 large graphs). `--mermaid-focus TABLE` shows functions, columns, views, and
 entrypoints around one table or view. `--mermaid-limit N` caps node count.
 
-`bizmap scan` prints `N unresolved HTTP calls (ENV, host, …)` after the
-graph write when client URLs did not match a scanned route or `services:`
-entry. The same list is stored as top-level `unresolved_http` (and on each
-caller) so the count matches the graph. Declare the missing env/host in
-`services:` to resolve them. `bizmap registry merge` re-runs HTTP/queue
-matching from stored `http_calls`.
+`bizmap scan` prints `HTTP unmatched by reason: …` then
+`N unresolved HTTP calls (ENV, host, …)` after the graph write when client
+URLs did not match a scanned route or `services:` entry. Each entry has a
+`reason`: `target_not_scanned`, `base_unknown`, `path_dynamic`, or
+`client_unknown`. The same list is stored as top-level `unresolved_http`
+(and on each caller) so the count matches the graph. Declare the missing
+env/host in `services:` to resolve them. `bizmap registry merge` re-runs
+HTTP/queue matching from stored `http_calls`.

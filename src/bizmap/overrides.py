@@ -26,6 +26,7 @@ class ScanConfig:
     database: str | None = None
     services: dict[str, Any] = field(default_factory=dict)
     repos: list[str] = field(default_factory=list)
+    constants: dict[str, str] = field(default_factory=dict)
 
 
 def git_toplevel(start: Path) -> Path | None:
@@ -92,6 +93,7 @@ def load_scan_config(root: Path, config: Path | None = None) -> ScanConfig:
     database = data.get("database")
     if isinstance(database, dict):
         database = database.get("name") or database.get("id")
+    constants = parse_yaml_constants(data.get("constants"))
     return ScanConfig(
         exclude=[str(x) for x in exclude],
         expand_star=bool(expand),
@@ -101,7 +103,45 @@ def load_scan_config(root: Path, config: Path | None = None) -> ScanConfig:
         database=str(database) if database else None,
         services={str(k): v for k, v in services.items() if v is not None},
         repos=[str(x) for x in repos],
+        constants=constants,
     )
+
+
+def parse_yaml_constants(raw: Any) -> dict[str, str]:
+    """``constants: { PathPrefix: /api/v1, pkg.Name: /x }`` → name → value."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        if value is None:
+            continue
+        out[str(key)] = str(value)
+    return out
+
+
+def lookup_yaml_constant(
+    constants: dict[str, str] | None,
+    name: str,
+    pkg: str | None = None,
+) -> str | None:
+    """Resolve a const by bare name, ``pkg.Name``, or import-path suffix."""
+    if not constants or not name:
+        return None
+    keys: list[str] = []
+    if pkg:
+        keys.append(f"{pkg}.{name}")
+        last = str(pkg).rstrip("/").split("/")[-1].split(".")[-1]
+        if last and last != pkg:
+            keys.append(f"{last}.{name}")
+    keys.append(name)
+    seen: set[str] = set()
+    for key in keys:
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if key in constants:
+            return constants[key]
+    return None
 
 
 def apply_overrides(graph: Graph, path: Path) -> None:

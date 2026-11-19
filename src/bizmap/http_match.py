@@ -269,6 +269,59 @@ def match_http(
     return hits
 
 
+UNRESOLVED_HTTP_REASONS = (
+    "target_not_scanned",
+    "base_unknown",
+    "path_dynamic",
+    "client_unknown",
+)
+_BASE_PLACEHOLDERS = {
+    "base",
+    "baseurl",
+    "base_url",
+    "prefixurl",
+    "prefix",
+    "origin",
+    "host",
+    "client",
+    "http",
+    "api",
+    "transport",
+    "session",
+    "instance",
+}
+_ENV_LIKE_NAME = re.compile(r"^[A-Z][A-Z0-9_]+$")
+
+
+def classify_unresolved_http(
+    url: str,
+    *,
+    client_unknown: bool = False,
+) -> str:
+    """Pick a ``reason`` for an unmatched outbound HTTP call."""
+    if client_unknown:
+        return "client_unknown"
+    raw = url or ""
+    placeholders = [m.group(1).strip() for m in _PLACEHOLDER.finditer(raw)]
+    base_holes = [
+        p
+        for p in placeholders
+        if p.lower() in _BASE_PLACEHOLDERS
+        or p.lower().split(".")[-1] in _BASE_PLACEHOLDERS
+    ]
+    env_holes = [p for p in placeholders if _ENV_LIKE_NAME.match(p.split(".")[-1] or p)]
+    other_holes = [p for p in placeholders if p not in base_holes and p not in env_holes]
+    leading = drop_leading_placeholders(raw)
+    literal = has_meaningful_literal(leading)
+    if other_holes and not literal:
+        return "path_dynamic"
+    if base_holes and not env_holes and "://" not in raw:
+        return "base_unknown"
+    if not literal:
+        return "path_dynamic"
+    return "target_not_scanned"
+
+
 def unresolved_http_keys(url: str) -> list[str]:
     """Env var / settings / hostname keys visible in an unmatched client URL."""
     keys: list[str] = []

@@ -343,6 +343,63 @@ def _placeholder_is_local_base(res: ResolvedString) -> bool:
     return leaf in HTTP_BASE_FIELDS
 
 
+_NON_HTTP_RECV = {
+    "payload",
+    "headers",
+    "params",
+    "data",
+    "body",
+    "query",
+    "form",
+    "cookies",
+    "mapping",
+    "dict",
+    "items",
+    "values",
+    "keys",
+}
+
+
+def _looks_like_unscanned_http(
+    method_l: str,
+    recv: str,
+    qual: str,
+    pos: list[Node],
+    resolve,
+) -> bool:
+    """True for ``x.request('POST', path)`` / ``x.post(path)`` on an unknown transport."""
+    if method_l not in HTTP_CLIENT_FUNCS:
+        return False
+    recv_leaf = (recv or "").rsplit(".", 1)[-1].lower()
+    if recv_leaf in _NON_HTTP_RECV or recv_leaf in {"self", "cls"}:
+        return False
+    qlow = (qual or "").lower()
+    if any(tok in qlow for tok in ("headers", "params", "cookies", "mapping", "searchparams")):
+        return False
+    if not recv and "." not in (qual or ""):
+        return False
+    if method_l == "request":
+        if len(pos) >= 2:
+            mres = resolve(pos[0])
+            token = (mres.path_text if mres and mres.usable else "").upper()
+            if token in {m.upper() for m in HTTP_METHODS}:
+                return True
+            path_res = resolve(pos[1])
+            path = path_res.path_text if path_res and path_res.usable else ""
+            return bool(path.startswith("/") or path.startswith("{") or "://" in path)
+        return bool(pos)
+    if not pos:
+        return False
+    path_res = resolve(pos[0])
+    path = path_res.path_text if path_res and path_res.usable else ""
+    if path.startswith("/") or "://" in path or (path.startswith("{") and "/" in path):
+        return True
+    if pos[0].type == "string":
+        raw = unquote(text(pos[0]))
+        return raw.startswith("/") or "://" in raw
+    return False
+
+
 def _collect_py_http_clients(tree: Node, imap: ImportMap) -> set[str]:
     """Module names, constructors, and instances of requests/httpx/aiohttp/urllib."""
     clients: set[str] = set()
@@ -602,6 +659,8 @@ class PySqlSite:
     sql: str
     dynamic: bool
     evidence: Evidence
+    note: str | None = None
+    confidence: Confidence | None = None
 
 
 @dataclass
@@ -623,6 +682,7 @@ class PyHttpCall:
     evidence: Evidence
     unresolved: bool = False
     confidence: Confidence = Confidence.INFERRED
+    client_unknown: bool = False
 
 
 @dataclass
@@ -692,7 +752,12 @@ class PythonAnalyzer:
         self._firebase = next((r for r in self.rules if r.framework == "firebase"), None)
         self._sql_rules = [r for r in self.rules if "sql" in r.produce]
 
-    def analyze(self, files: list[Path], root: Path) -> PyAnalysis:
+    def analyze(
+        self,
+        files: list[Path],
+        root: Path,
+        constants: dict[str, str] | None = None,
+    ) -> PyAnalysis:
         analysis = PyAnalysis()
         parsed: list[tuple[Path, str, bytes, Node, str, ImportMap, list[PyFunction]]] = []
         forest: list[object] = []
@@ -714,16 +779,35 @@ class PythonAnalyzer:
                 analysis.functions[fn.qualname] = fn
             parsed.append((path, rel_file, source, tree, module, imap, fns))
 
+        yaml_consts = {
+            str(k): ResolvedString(str(v), True, False) for k, v in (constants or {}).items()
+        }
+        consts_by_module["__yaml__"] = yaml_consts
         for _path, _rf, _src, tree, module, imap, _fns in parsed:
             assigns = collect_module_assignments(tree)
             consts_by_module[module] = resolve_module_consts(assigns, imap, consts_by_module)
+            for key, val in yaml_consts.items():
+                consts_by_module[module].setdefault(key, val)
+                if "." in key:
+                    consts_by_module[module].setdefault(key.rsplit(".", 1)[-1], val)
             dicts_by_module[module] = collect_module_dicts(
                 assigns, imap, consts_by_module, dicts_by_module
             )
+        for module, cmap in list(consts_by_module.items()):
+            if module == "__yaml__":
+                continue
+            for key, val in yaml_consts.items():
+                cmap.setdefault(key, val)
+                if "." in key:
+                    cmap.setdefault(key.rsplit(".", 1)[-1], val)
         # second pass so imported constants resolve
         for _path, _rf, _src, tree, module, imap, _fns in parsed:
             assigns = collect_module_assignments(tree)
             consts_by_module[module] = resolve_module_consts(assigns, imap, consts_by_module)
+            for key, val in yaml_consts.items():
+                consts_by_module[module].setdefault(key, val)
+                if "." in key:
+                    consts_by_module[module].setdefault(key.rsplit(".", 1)[-1], val)
             dicts_by_module[module] = collect_module_dicts(
                 assigns, imap, consts_by_module, dicts_by_module
             )
@@ -1461,8 +1545,10 @@ class PythonAnalyzer:
                         PySqlSite(
                             function=fn,
                             sql=sql_val,
-                            dynamic=res.unresolved,
+                            dynamic=res.unresolved and not res.note,
                             evidence=evidence,
+                            note=res.note,
+                            confidence=Confidence.INFERRED if res.note else None,
                         )
                     )
                 elif res.unresolved and sql_node.type in {
@@ -1483,7 +1569,14 @@ class PythonAnalyzer:
                 sql_val = res.path_text if res.usable else ""
                 if res.fully_static and res.text and looks_like_sql(res.text):
                     analysis.sql_sites.append(
-                        PySqlSite(function=fn, sql=res.text, dynamic=False, evidence=evidence)
+                        PySqlSite(
+                            function=fn,
+                            sql=res.text,
+                            dynamic=False,
+                            evidence=evidence,
+                            note=res.note,
+                            confidence=Confidence.INFERRED if res.note else None,
+                        )
                     )
                 elif res.unresolved and sql_val and (
                     looks_like_sql(sql_val)
@@ -1679,8 +1772,12 @@ class PythonAnalyzer:
             and text(func) in http_clients
             and method_l in HTTP_CLIENT_FUNCS
         )
+        client_unknown = False
         if not (lib_call or instance_call or module_call or ident_client or wrapper):
-            return
+            if _looks_like_unscanned_http(method_l, recv, qual, pos, resolve):
+                client_unknown = True
+            else:
+                return
         url_node = None
         kw = call_kwargs(node)
         if method_l in {"request", "_request"}:
@@ -1697,6 +1794,17 @@ class PythonAnalyzer:
             return
         res = resolve(url_node)
         if not res.usable:
+            if client_unknown:
+                analysis.http_calls.append(
+                    PyHttpCall(
+                        function=fn,
+                        method=http_method,
+                        url="{path}",
+                        evidence=evidence,
+                        unresolved=True,
+                        client_unknown=True,
+                    )
+                )
             return
         urls = res.all_texts() or ([res.path_text] if res.path_text else [])
         multi = len(urls) > 1
@@ -1713,8 +1821,9 @@ class PythonAnalyzer:
                     method=http_method,
                     url=_normalize_http_base(url),
                     evidence=evidence,
-                    unresolved=unresolved,
+                    unresolved=unresolved or client_unknown,
                     confidence=conf,
+                    client_unknown=client_unknown,
                 )
             )
 
@@ -1810,8 +1919,10 @@ class PythonAnalyzer:
                 PySqlSite(
                     function=fn,
                     sql=sql_val,
-                    dynamic=sql_res.unresolved,
+                    dynamic=sql_res.unresolved and not sql_res.note,
                     evidence=evidence,
+                    note=sql_res.note,
+                    confidence=Confidence.INFERRED if sql_res.note else None,
                 )
             )
 

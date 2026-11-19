@@ -563,21 +563,40 @@ def _lookup_const(
     consts_by_import: dict[tuple[str, str], ResolvedString],
 ) -> ResolvedString | None:
     """Resolve ``pkg.Const`` across scanned packages (exact import, then suffix)."""
-    if not ip:
-        named = [v for (_p, n), v in consts_by_import.items() if n == name and v.usable]
-        return named[0] if len(named) == 1 else None
-    found = consts_by_import.get((ip, name))
-    if found and found.usable:
-        return found
-    suffix_hits = [
+    if ip:
+        found = consts_by_import.get((ip, name))
+        if found and found.usable:
+            return found
+        suffix_hits = [
+            v
+            for (p, n), v in consts_by_import.items()
+            if n == name
+            and v.usable
+            and p not in {"*", ""}
+            and (p.endswith("/" + ip) or ip.endswith("/" + p) or p == ip)
+        ]
+        if len(suffix_hits) == 1:
+            return suffix_hits[0]
+        last = ip.rstrip("/").split("/")[-1]
+        for key in ((last, name), ("*", f"{last}.{name}"), ("*", name), ("", name)):
+            hit = consts_by_import.get(key)
+            if hit and hit.usable:
+                return hit
+        dotted = consts_by_import.get(("*", f"{ip}.{name}"))
+        if dotted and dotted.usable:
+            return dotted
+        return None
+    named = [
         v
         for (p, n), v in consts_by_import.items()
-        if n == name
-        and v.usable
-        and (p.endswith("/" + ip) or ip.endswith("/" + p))
+        if n == name and v.usable and p not in {"*", ""}
     ]
-    if len(suffix_hits) == 1:
-        return suffix_hits[0]
+    if len(named) == 1:
+        return named[0]
+    for key in (("*", name), ("", name)):
+        hit = consts_by_import.get(key)
+        if hit and hit.usable:
+            return hit
     return None
 
 
@@ -853,10 +872,37 @@ def _collect_package_strings(
     return out, names
 
 
-def _resolve_cross_package_consts(infos: list[_FileInfo]) -> None:
+def _merge_yaml_go_consts(
+    consts_by_import: dict[tuple[str, str], ResolvedString],
+    constants: dict[str, str] | None,
+) -> None:
+    for key, val in (constants or {}).items():
+        resolved = ResolvedString(str(val), True, False)
+        key_s = str(key)
+        consts_by_import[("*", key_s)] = resolved
+        if "." in key_s:
+            pkg, name = key_s.rsplit(".", 1)
+            consts_by_import[(pkg, name)] = resolved
+            consts_by_import[("*", name)] = resolved
+            consts_by_import[("", name)] = resolved
+        else:
+            consts_by_import[("*", key_s)] = resolved
+            consts_by_import[("", key_s)] = resolved
+
+
+def _resolve_cross_package_consts(
+    infos: list[_FileInfo],
+    constants: dict[str, str] | None = None,
+) -> None:
     """Re-resolve ``const X = shared.Y`` / ``var Base = shared.Base + "/v1"``."""
     consts_by_import: dict[tuple[str, str], ResolvedString] = {}
+    _merge_yaml_go_consts(consts_by_import, constants)
     for info in infos:
+        for key, val in (constants or {}).items():
+            name = str(key).rsplit(".", 1)[-1]
+            existing = info.consts.get(name)
+            if existing is None or not existing.usable:
+                info.consts[name] = ResolvedString(str(val), True, False)
         for cname, resolved in info.consts.items():
             consts_by_import[(info.import_path, cname)] = resolved
     for _ in range(8):
@@ -1005,10 +1051,15 @@ class GoAnalyzer:
         self._file_types_cache: dict[str, dict[str, GoType]] = {}
 
     def analyze(
-        self, files: list[Path], root: Path, profile: object | None = None
+        self,
+        files: list[Path],
+        root: Path,
+        profile: object | None = None,
+        constants: dict[str, str] | None = None,
     ) -> GoAnalysis:
         self._local_types_cache.clear()
         self._file_types_cache.clear()
+        self._yaml_constants = constants or {}
         infos: list[_FileInfo] = []
         t_parse = time.perf_counter()
         for path in files:
@@ -1068,7 +1119,7 @@ class GoAnalyzer:
             profile.parse += time.perf_counter() - t_parse
 
         t_resolve = time.perf_counter()
-        _resolve_cross_package_consts(infos)
+        _resolve_cross_package_consts(infos, getattr(self, "_yaml_constants", None))
         idx = self._build_indexes(infos)
         self._collect_func_field_bindings(infos, idx)
         http_helpers = self._collect_http_helpers(infos, idx)
@@ -1285,6 +1336,7 @@ class GoAnalyzer:
         by_name: dict[str, list[GoFunction]] = {}
         all_structs: dict[tuple[str, str], dict[str, GoType]] = {}
         consts_by_import: dict[tuple[str, str], ResolvedString] = {}
+        _merge_yaml_go_consts(consts_by_import, getattr(self, "_yaml_constants", None))
         const_names_by_import: dict[str, set[str]] = defaultdict(set)
         func_aliases: set[tuple[str, str]] = set()
         func_fields: dict[tuple[str, str], set[str]] = defaultdict(set)
