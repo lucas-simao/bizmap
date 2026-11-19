@@ -1,0 +1,23 @@
+id: fastapi.routes
+language: python
+framework: fastapi
+description: FastAPI HTTP routes registered with @app.get("/path") / @router.post(...).
+status: active
+when:
+  imports:
+    contains: fastapi
+    optional: true
+detect:
+  decorators:
+    method:
+      in: [get, post, put, patch, delete, options, head]
+    arguments:
+      path:
+        index: 0
+        capture: string
+produce:
+  entrypoint:
+    kind: http
+    method: "{decorator.method}"
+    path: "{path}"
+    handler: "{function}"

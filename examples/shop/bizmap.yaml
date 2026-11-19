@@ -1,0 +1,6 @@
+# Manual completions for bits static analysis cannot see.
+# Business "why" is otherwise taken only from comments/docstrings in code.
+overrides:
+  columns:
+    inventory.qty:
+      why: "On-hand units; decremented by trg_order_items_inventory when a line item is inserted."

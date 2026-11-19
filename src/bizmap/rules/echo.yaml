@@ -1,0 +1,29 @@
+id: echo.v4.routes
+language: go
+framework: echo
+description: Echo v4 HTTP route registration (group.POST("/path", handler) and e.GET).
+status: active
+when:
+  imports:
+    contains: github.com/labstack/echo
+detect:
+  calls:
+    method:
+      in: [GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS]
+    arguments:
+      path:
+        index: 0
+        capture: string
+      handler:
+        index: 1
+        capture: ident_or_selector
+options:
+  receiver_path_prefixes:
+    group_method: Group
+    path_arg: 0
+produce:
+  entrypoint:
+    kind: http
+    method: "{method}"
+    path: "{path}"
+    handler: "{handler}"

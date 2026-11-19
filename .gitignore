@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Scan output (generated locally)
+/bizmap.graph.json
+/bizmap.graph.mmd
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
