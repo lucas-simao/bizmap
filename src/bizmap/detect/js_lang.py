@@ -238,6 +238,16 @@ def _resolve_js_string(node: Node | None, consts: dict[str, str]) -> tuple[str |
         helper = _apply_path_helper(node, consts)
         if helper is not None:
             return helper, True
+        unwrapped = _transparent_arg(node)
+        if unwrapped is not None:
+            if unwrapped.type == "identifier" and text(unwrapped) not in consts:
+                return "{" + text(unwrapped) + "}", True
+            if unwrapped.type == "member_expression":
+                val, _u = _resolve_js_string(unwrapped, consts)
+                if val is None:
+                    return "{" + text(unwrapped).rsplit(".", 1)[-1] + "}", True
+                return val, _u
+            return _resolve_js_string(unwrapped, consts)
         callee = call_callee_name(node)
         recv = _receiver_ident(node)
         args = call_args(node)
@@ -271,6 +281,9 @@ def _resolve_substitution(inner: Node | None, consts: dict[str, str]) -> tuple[s
         helper = _apply_path_helper(inner, consts)
         if helper is not None:
             return helper, True
+        unwrapped = _transparent_arg(inner)
+        if unwrapped is not None:
+            return _resolve_substitution(unwrapped, consts)
         callee = call_callee_name(inner)
         args = call_args(inner)
         val, unresolved = _resolve_js_string(inner, consts)
@@ -2749,18 +2762,60 @@ def _helper_body_expr(fn: Node) -> Node | None:
     return None
 
 
-def _collect_path_helpers(tree: Node, consts: dict[str, str]) -> dict[str, str]:
-    out: dict[str, str] = {}
+_TRANSPARENT_FUNCS = {"encodeURIComponent", "encodeURI", "String", "Number", "escape"}
+_TRANSPARENT_METHODS = {"toString", "trim", "toLowerCase", "toUpperCase", "valueOf"}
+
+
+def _transparent_arg(call: Node) -> Node | None:
+    """`encodeURIComponent(x)` / `String(x)` / `x.toString()` → the node for `x`."""
+    func = call.child_by_field_name("function")
+    if func is None:
+        return None
+    args = call_args(call)
+    if func.type == "identifier" and text(func) in _TRANSPARENT_FUNCS and len(args) == 1:
+        return args[0]
+    if func.type == "member_expression" and not args:
+        prop = func.child_by_field_name("property")
+        obj = func.child_by_field_name("object")
+        if prop is not None and obj is not None and text(prop) in _TRANSPARENT_METHODS:
+            return obj
+    return None
+
+
+def _helper_candidates(tree: Node):
+    """Yield (helper name, function node), including object members (`paths.site`)."""
     for node in walk(tree):
-        name = ""
-        fn: Node | None = None
         if node.type == "variable_declarator":
+            name = _declarator_name(node)
             value = node.child_by_field_name("value")
-            if value is not None and value.type in {"arrow_function", "function", "function_expression"}:
-                name, fn = _declarator_name(node), value
+            if not name or value is None:
+                continue
+            if value.type in {"arrow_function", "function", "function_expression"}:
+                yield name, value
+            elif value.type == "object":
+                for member in value.named_children:
+                    if member.type == "pair":
+                        key = member.child_by_field_name("key")
+                        val = member.child_by_field_name("value")
+                        if key is not None and val is not None and val.type in {
+                            "arrow_function",
+                            "function",
+                            "function_expression",
+                        }:
+                            yield f"{name}.{_unquote(text(key))}", val
+                    elif member.type == "method_definition":
+                        key = member.child_by_field_name("name")
+                        if key is not None:
+                            yield f"{name}.{text(key)}", member
         elif node.type == "function_declaration":
             ident = node.child_by_field_name("name")
-            name, fn = (text(ident) if ident is not None else ""), node
+            if ident is not None:
+                yield text(ident), node
+
+
+def _collect_path_helpers(tree: Node, consts: dict[str, str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for name, fn in _helper_candidates(tree):
         if not name or fn is None:
             continue
         expr = _helper_body_expr(fn)
@@ -2768,6 +2823,7 @@ def _collect_path_helpers(tree: Node, consts: dict[str, str]) -> dict[str, str]:
             continue
         params = _fn_param_names(fn)
         scope = {k: v for k, v in consts.items() if k not in params}
+        scope.update(out)  # helpers defined earlier in the file may compose
         value, _unresolved = _resolve_js_string(expr, scope)
         if not value or not value.startswith("/") or any(ch.isspace() for ch in value):
             continue
@@ -2791,13 +2847,27 @@ def _import_path_helpers(
             if key in src and f"{local}()" not in consts:
                 consts[f"{local}()"] = src[key]
                 consts[f"{local}()#params"] = src.get(f"{key}#params", "")
+            # object helpers: `import { paths } from '@/paths'` → paths.site()
+            prefix = f"{orig}."
+            for skey, sval in src.items():
+                if skey.startswith(prefix) and (skey.endswith("()") or skey.endswith("()#params")):
+                    consts.setdefault(f"{local}.{skey[len(prefix):]}", sval)
 
 
 def _apply_path_helper(call: Node, consts: dict[str, str]) -> str | None:
     func = call.child_by_field_name("function")
-    if func is None or func.type != "identifier":
+    if func is None:
         return None
-    key = f"{text(func)}()"
+    if func.type == "identifier":
+        key = f"{text(func)}()"
+    elif func.type == "member_expression":
+        obj = func.child_by_field_name("object")
+        prop = func.child_by_field_name("property")
+        if obj is None or prop is None or obj.type != "identifier":
+            return None
+        key = f"{text(obj)}.{text(prop)}()"
+    else:
+        return None
     template = consts.get(key)
     if template is None:
         return None
@@ -2807,6 +2877,9 @@ def _apply_path_helper(call: Node, consts: dict[str, str]) -> str | None:
         rep = "{" + param + "}"
         if i < len(args):
             arg = args[i]
+            inner_arg = _transparent_arg(arg) if arg.type == "call_expression" else None
+            if inner_arg is not None:
+                arg = inner_arg
             if arg.type == "identifier":
                 rep = "{" + text(arg) + "}"
             elif arg.type == "member_expression":
