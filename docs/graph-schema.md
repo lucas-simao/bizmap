@@ -136,7 +136,11 @@ matched against scanned routes, in the same repo or across a joint scan:
 - The edge is created only when **exactly one** route matches, and never to
   a route registered in the same file. Ambiguous literals link to nothing.
 - A bare `fetch('/x')` is page-relative and only links within its own repo.
-- Edges are `heuristic` with `match: full|suffix`; the matching
+- A function that only returns the path (a path helper) is never the origin;
+  a call to it at an HTTP call site is the literal of the calling function.
+- If the call's base resolves to a scanned service and exactly one route of
+  that service matches, the edge is `inferred`.
+- Otherwise edges are `heuristic` with `match: full|suffix`; the matching
   `unresolved_http` entry is dropped.
 
 ### SQL by reference (`via: sql_reference` / `sql_key`, Python)

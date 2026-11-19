@@ -1348,20 +1348,29 @@ def _link_route_literals(graph: Graph) -> None:
             if not hits:
                 continue
             # A traced client call for this path with a concrete base (env var
-            # or absolute URL) already says where it goes: matched, or
-            # `target_not_scanned`. The literal must not reroute it.
+            # or absolute URL) already says where it goes. If that base names a
+            # scanned service and exactly one of *its* routes matches, link it
+            # as `inferred` (same evidence level as a traced call); otherwise the
+            # literal must not reroute the call.
+            confidence = Confidence.HEURISTIC
             known = sorted({u for u in traced if base_is_known(u) and _literal_covers(u, path)})
             if known:
-                skipped.append(
-                    {
-                        "path": path,
-                        "reason": "base_known",
-                        "base": known[0],
-                        "service": service_for_url(known[0], graph.attrs.get("services") or {}),
-                        "discarded": sorted(hits),
-                    }
-                )
-                continue
+                service = service_for_url(known[0], graph.attrs.get("services") or {})
+                own = [eid for eid in hits if service and route_home.get(eid, ("", ""))[0] == service]
+                if len(own) == 1:
+                    hits = own
+                    confidence = Confidence.INFERRED
+                else:
+                    skipped.append(
+                        {
+                            "path": path,
+                            "reason": "base_known",
+                            "base": known[0],
+                            "service": service,
+                            "discarded": sorted(hits),
+                        }
+                    )
+                    continue
             if len(hits) != 1:
                 skipped.append({"path": path, "reason": "ambiguous", "discarded": sorted(hits)})
                 continue
@@ -1374,7 +1383,7 @@ def _link_route_literals(graph: Graph) -> None:
                 "calls_http",
                 node.id,
                 target,
-                confidence=Confidence.HEURISTIC,
+                confidence=confidence,
                 evidence=Evidence.from_dict(ev_raw),
                 via="route_literal",
                 match="full" if path_template_match(rpath, path) else "suffix",

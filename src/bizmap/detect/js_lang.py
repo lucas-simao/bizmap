@@ -2687,6 +2687,24 @@ def _clean_route_literal(value: str | None) -> str | None:
     return "/" + "/".join(parts)
 
 
+def _is_helper_return(top: Node) -> bool:
+    """True when ``top`` is the whole returned value of a function whose only
+    job is to return it (`(id) => `/sites/${id}``, `function p() { return '/x' }`)."""
+    cur = top.parent
+    while cur is not None and cur.type in {"parenthesized_expression", "return_statement", "statement_block"}:
+        cur = cur.parent
+    if cur is None or cur.type not in {
+        "arrow_function",
+        "function",
+        "function_expression",
+        "function_declaration",
+        "method_definition",
+    }:
+        return False
+    expr = _helper_body_expr(cur)
+    return expr is not None and (expr.start_byte, expr.end_byte) == (top.start_byte, top.end_byte)
+
+
 def _collect_route_literals(
     analysis: JsAnalysis,
     tree: Node,
@@ -2698,7 +2716,12 @@ def _collect_route_literals(
     seen_tops: set[tuple[int, int]] = set()
     seen: set[tuple[str, str, str | None]] = set()
     for node in walk(tree):
-        if node.type not in {"string", "template_string"}:
+        if node.type in {"string", "template_string"}:
+            pass
+        elif node.type == "call_expression" and _apply_path_helper(node, consts) is not None:
+            # `api.get(site(id))`: the helper call is the path at this call site
+            pass
+        else:
             continue
         top = _literal_top(node)
         key = (top.start_byte, top.end_byte)
@@ -2706,6 +2729,10 @@ def _collect_route_literals(
             continue
         seen_tops.add(key)
         if _literal_is_excluded(top, routers):
+            continue
+        if _is_helper_return(top):
+            # A function that only returns a path never sends a request: the
+            # origin is whoever calls the client with it.
             continue
         value, _unresolved = _resolve_js_string(top, consts)
         path = _clean_route_literal(value)
