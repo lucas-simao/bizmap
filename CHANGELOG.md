@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **Cross-service false positives (route literals and traced clients)**: a
+  call whose base resolves to a `services:` entry now matches only that
+  service's routes; if the service was not scanned it stays
+  `target_not_scanned` (`service:` on the note) instead of linking to a
+  same-path route in another repo. The route-literal fallback only runs when
+  the base is unknown, its edges are the new `heuristic` confidence with
+  `match: full|suffix`, and skipped literals are recorded in
+  `route_literal_skipped` with the discarded candidates. `services:` entries
+  accept `repo:` when the service key differs from the repo name.
+  **Behavior change:** in multi-repo graphs a service whose key (or `repo:`)
+  is not a scanned repo is treated as not scanned; `bizmap scan` prints a
+  warning naming it.
+
 - **Python phantom unknown reads**: `execute(text("..."), params)` no longer
   adds a `reads <table> [unknown]` next to the exact edges (the `text()` call
   was also read as unresolved SQL), and SQLAlchemy builders

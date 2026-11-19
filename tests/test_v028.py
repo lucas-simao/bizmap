@@ -65,7 +65,7 @@ def test_ts_factory_returned_axios_instance(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "bizmap.yaml",
-        "services:\n  catalog:\n    env: VITE_API_URL\n",
+        "services:\n  catalog:\n    env: VITE_API_URL\n    repo: api\n",
     )
     _write(web, "bizmap.yaml", "name: web\ndatabase: platform\n")
     _write(api, "bizmap.yaml", "name: api\ndatabase: platform\n")
@@ -180,7 +180,7 @@ def test_ts_local_wrapper_call_site_path(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "bizmap.yaml",
-        "services:\n  catalog:\n    env: VITE_API_URL\n",
+        "services:\n  catalog:\n    env: VITE_API_URL\n    repo: api\n",
     )
     _write(
         tmp_path,

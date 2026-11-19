@@ -10,12 +10,16 @@ from typing import Any
 class Confidence(StrEnum):
     EXACT = "exact"
     INFERRED = "inferred"
+    # Matched by a weaker signal than a traced call (e.g. a path literal whose
+    # client/base could not be followed). Below inferred, above unknown.
+    HEURISTIC = "heuristic"
     UNKNOWN = "unknown"
 
 
 CONFIDENCE_RANK = {
-    Confidence.EXACT: 3,
-    Confidence.INFERRED: 2,
+    Confidence.EXACT: 4,
+    Confidence.INFERRED: 3,
+    Confidence.HEURISTIC: 2,
     Confidence.UNKNOWN: 1,
 }
 

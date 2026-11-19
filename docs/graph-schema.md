@@ -123,6 +123,12 @@ matched against scanned routes, in the same repo or across a joint scan:
   `navigate()` / `router.push()` / `redirect()`, `<Link to>` and other JSX
   attributes, `path:` / `href:` / `to:` object keys, comparisons and
   `startsWith()`, arrays of paths, imports, and asset files (`/logo.png`).
+- Only when the call's **base is unknown**. If a traced client call for the
+  same path has a concrete base (env var placeholder or absolute URL), the
+  literal is ignored: that call is either matched to its service or stays
+  `unresolved_http` (`target_not_scanned`). The discarded candidates are kept
+  on the function as `route_literal_skipped` (`reason: base_known` with the
+  base and service, or `reason: ambiguous`).
 - A same-length template match is accepted. A *suffix* match (the client base
   carried `/api/v1`) needs 2+ literal segments or a method hint from the
   surrounding call (`.get(...)`, `fetch(url, { method: 'POST' })`,
@@ -130,7 +136,8 @@ matched against scanned routes, in the same repo or across a joint scan:
 - The edge is created only when **exactly one** route matches, and never to
   a route registered in the same file. Ambiguous literals link to nothing.
 - A bare `fetch('/x')` is page-relative and only links within its own repo.
-- Edges are `inferred`; the matching `unresolved_http` entry is dropped.
+- Edges are `heuristic` with `match: full|suffix`; the matching
+  `unresolved_http` entry is dropped.
 
 ### SQL by reference (`via: sql_reference` / `sql_key`, Python)
 
@@ -151,10 +158,20 @@ function that does through the call graph, so exact edges stay exact.
 | --- | --- |
 | `exact` | Fully static SQL (string literals / const concatenation, including cross-package `pkg.Const`) parsed by sqlglot, or a route/job registration whose handler resolved via type. |
 | `inferred` | Call-graph propagation (table-level), `SELECT *` (table-level, or columns with `--expand-star`), INSERT without a column list, interface/object dispatch to a structural implementer or constructor-assigned type, or a writer of table T also writing what a trigger on T writes. |
+| `heuristic` | A weaker signal than a traced call: a JS/TS path literal matched to a single route while its client/base could not be followed (`via: route_literal`). |
 | `unknown` | Dynamically built SQL (`"UPDATE t SET " + col` or `"UPDATE "+table+" SET"`), unparsed SQL, an unresolvable route path (`{otherpkg.PendingPath}/setup`, with `unresolved: true`), or an ambiguous handler (candidates listed, no arbitrary pick). FROM-less SELECT is not unknown: it emits no table edge. |
 
 When the same edge is observed twice, the **highest** confidence is kept
-(`exact` > `inferred` > `unknown`).
+(`exact` > `inferred` > `heuristic` > `unknown`).
+
+### Services and cross-repo HTTP
+
+When a client URL's base resolves to a `services:` entry (by env var
+placeholder, host, or URL prefix) and the graph spans several repos, it only
+matches routes of **that** service's repo (the entry's `repo:`, else its key).
+If that service was not scanned, nothing matches and the call stays
+`unresolved_http` with `reason: target_not_scanned` and `service: <name>`; it
+never falls through to a same-path route in another repo.
 
 ## Schema replay
 
