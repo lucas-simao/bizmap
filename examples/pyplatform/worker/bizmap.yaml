@@ -1,0 +1,5 @@
+name: worker
+database: platform
+services:
+  catalog: http://catalog.internal
+  worker: http://worker.internal

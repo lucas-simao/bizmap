@@ -1,0 +1,4 @@
+name: web
+database: platform
+services:
+  catalog: http://catalog.internal

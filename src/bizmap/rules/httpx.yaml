@@ -1,0 +1,21 @@
+id: python.http_client
+language: python
+framework: httpx
+description: httpx / requests client calls used for cross-repo HTTP linking.
+status: active
+when:
+  imports:
+    contains_any: [httpx, requests]
+    optional: true
+detect:
+  calls:
+    method:
+      in: [get, post, put, patch, delete, request, head, options]
+    arguments:
+      url:
+        index: 0
+        capture: string
+produce:
+  http_client:
+    method: "{method}"
+    url: "{url}"

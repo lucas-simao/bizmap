@@ -22,6 +22,10 @@ class ScanConfig:
     expand_star: bool = False
     path: Path | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    name: str | None = None
+    database: str | None = None
+    services: dict[str, str] = field(default_factory=dict)
+    repos: list[str] = field(default_factory=list)
 
 
 def git_toplevel(start: Path) -> Path | None:
@@ -78,11 +82,25 @@ def load_scan_config(root: Path, config: Path | None = None) -> ScanConfig:
     expand = data.get("expand_star")
     if expand is None:
         expand = (data.get("scan") or {}).get("expand_star")
+    services = data.get("services") or {}
+    if not isinstance(services, dict):
+        services = {}
+    repos = data.get("repos") or []
+    if isinstance(repos, str):
+        repos = [repos]
+    name = data.get("name") or data.get("repo")
+    database = data.get("database")
+    if isinstance(database, dict):
+        database = database.get("name") or database.get("id")
     return ScanConfig(
         exclude=[str(x) for x in exclude],
         expand_star=bool(expand),
         path=path,
         raw=data,
+        name=str(name) if name else None,
+        database=str(database) if database else None,
+        services={str(k): str(v) for k, v in services.items()},
+        repos=[str(x) for x in repos],
     )
 
 

@@ -11,7 +11,11 @@ def test_bundled_rules_include_echo_pgx_and_stubs() -> None:
     assert "fastapi.routes" in rules
     assert "sqlalchemy.sql" in rules
     assert "express.routes" in rules
-    assert rules["express.routes"].is_stub
+    assert not rules["express.routes"].is_stub
+    assert "firebase.functions" in rules
+    assert "flask.routes" in rules
+    assert "python.queues" in rules
     assert not rules["echo.v4.routes"].is_stub
     assert rules["echo.v4.routes"].language == "go"
     assert rules["fastapi.routes"].language == "python"
+    assert rules["express.routes"].language == "javascript"

@@ -1,0 +1,29 @@
+id: flask.routes
+language: python
+framework: flask
+description: Flask @app.route / Blueprint(url_prefix=) HTTP routes.
+status: active
+when:
+  imports:
+    contains: flask
+    optional: true
+detect:
+  decorators:
+    method:
+      in: [route]
+    arguments:
+      path:
+        index: 0
+        capture: string
+  calls:
+    method:
+      in: [Blueprint]
+    arguments:
+      url_prefix:
+        capture: keyword
+produce:
+  entrypoint:
+    kind: http
+    method: "{method}"
+    path: "{path}"
+    handler: "{function}"

@@ -1,7 +1,8 @@
 # YAML detector rules
 
-BizMap ships language engines (Go + Python in v0.1) that interpret **declarative
-YAML rules**. Adding a framework should mean adding a YAML file, not a parser.
+BizMap ships language engines (Go, Python, and a JavaScript/TypeScript
+pass in v0.2) that interpret **declarative YAML rules**. Adding a framework
+should mean adding a YAML file, not a parser.
 
 Bundled rules live in `src/bizmap/rules/`. Pass extra files or directories with
 `bizmap scan --rules path`.
@@ -10,7 +11,7 @@ Bundled rules live in `src/bizmap/rules/`. Pass extra files or directories with
 
 ```yaml
 id: echo.v4.routes          # unique
-language: go                # go | python | javascript (js/ts engine is v0.2)
+language: go                # go | python | javascript
 framework: echo
 description: human text
 status: active              # active | stub  (stubs are documented but not run)
@@ -44,7 +45,7 @@ options:
     path_arg: 0
 produce:
   entrypoint:
-    kind: http              # http | scheduled_job
+    kind: http              # http | scheduled_job | firestore | celery_task | worker | ...
     method: "{method}"
     path: "{path}"
     handler: "{handler}"
@@ -65,6 +66,29 @@ String arguments are resolved from:
 
 Anything involving a non-literal identifier is marked `unknown`. Truncated
 paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
+
+## Python resolution (v0.2)
+
+- Function display names are the module path relative to the scan root
+  (`catalog.db.create_order`, `python.worker.low_stock`).
+- Route strings resolve from literals, same-module assignments, imported
+  names (`from .paths import PREFIX`), `+` concatenation, and f-strings.
+  Unresolvable pieces become `{module.NAME}` placeholders with
+  `unresolved: true` — never a truncated path such as `/hidden`.
+- FastAPI `APIRouter(prefix=)` and `app.include_router(router, prefix=)`
+  join onto handler paths. Flask `@app.route` / `Blueprint(url_prefix=)`
+  use the same string resolver.
+- SQLAlchemy models (`__tablename__`, `mapped_column`, `Table(...)`) and
+  Alembic `op.create_table` / `add_column` / `drop_*` feed the schema
+  replayer. Alembic `upgrade` functions are tagged `role: schema`.
+- Firestore `collection(name).document(...).set/get/...` walks the chain;
+  the last `collection()` name is the `collection:` node. Nested
+  subcollections are not joined into a single path.
+- Queue produce sites (`delay`, `enqueue`, `create_task`, `publish`) emit
+  `enqueues`. Cloud Tasks HTTP URLs also become `calls_http` when they
+  match a scanned route.
+- `supabase.rpc("name")` becomes a `calls` edge to `function:sql.name`
+  when that SQL function exists.
 
 ## Go resolution (v0.1.3)
 
@@ -98,17 +122,23 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `--exclude GLOB` (repeatable) merges with YAML `exclude`. `--profile`
   prints parse / resolve / sql / propagate timings to stderr.
 
-## Bundled rules (v0.1.3)
+## Bundled rules (v0.2.0)
 
 | File | Status | What it detects |
 | --- | --- | --- |
 | `echo.yaml` | active | Echo v4 `group.POST("/path", handler)` (literals, consts, factories, wrappers; `Any`/`Match`) |
 | `pgx.yaml` | active | pgx v5 `Exec` / `Query` / `QueryRow` SQL |
 | `go_ticker.yaml` | active | Any `go` statement whose target uses ticker/cron patterns |
-| `fastapi.yaml` | active | FastAPI `@app.get("/path")` |
-| `sqlalchemy.yaml` | active (partial) | `text()` / `execute()` SQL strings; no ORM models yet |
-| `express.yaml` | stub | Documents the v0.2 JS shape |
+| `fastapi.yaml` | active | FastAPI `@app.get` / `APIRouter` / `include_router` |
+| `flask.yaml` | active | Flask `@app.route` / `Blueprint(url_prefix=)` |
+| `sqlalchemy.yaml` | active | `text()` / `execute()` SQL; ORM/Core usage is in the Python engine |
+| `firebase.yaml` | active | Firebase Functions entrypoints + Firestore `collection()` |
+| `celery.yaml` | active | Celery / RQ / Cloud Tasks / Pub/Sub produce + consume |
+| `httpx.yaml` | active | httpx / requests client calls (`calls_http`) |
+| `supabase.yaml` | active | `supabase.rpc("fn")` |
+| `express.yaml` | active | Express routes, `fetch()`, `supabase.rpc` (JS/TS) |
 
 The engine still walks a simple intra-project call graph in code (not YAML) so
 handler → service → repository reads/writes propagate to HTTP/job entrypoints
-as table-level `inferred` edges.
+as table-level `inferred` edges. HTTP clients and queue producers add
+`calls_http` / `enqueues` the same way.

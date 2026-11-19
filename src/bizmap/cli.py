@@ -9,7 +9,8 @@ import click
 from bizmap import __version__
 from bizmap.graph import Graph
 from bizmap.mermaid import DEFAULT_LIMIT, render_mermaid
-from bizmap.scan import scan_path
+from bizmap.registry import graph_from_json, merge_graphs
+from bizmap.scan import scan_path, scan_paths
 from bizmap.why import format_why
 
 
@@ -23,7 +24,7 @@ def main() -> None:
 
 
 @main.command("scan")
-@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("path", nargs=-1, type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
     "--out",
     "out_path",
@@ -96,15 +97,28 @@ def scan_cmd(
     exclude_globs: tuple[str, ...],
     profile_flag: bool,
 ) -> None:
-    """Scan a codebase and write bizmap.graph.json."""
-    graph = scan_path(
-        path,
-        extra_rules=list(rules_dirs) or None,
-        expand_star=True if expand_star else None,
-        config=config_path,
-        exclude=list(exclude_globs) or None,
-        profile=profile_flag,
-    )
+    """Scan one or more codebases and write bizmap.graph.json."""
+    if not path:
+        raise click.UsageError("missing scan path")
+    roots = [Path(p) for p in path]
+    if len(roots) == 1:
+        graph = scan_path(
+            roots[0],
+            extra_rules=list(rules_dirs) or None,
+            expand_star=True if expand_star else None,
+            config=config_path,
+            exclude=list(exclude_globs) or None,
+            profile=profile_flag,
+        )
+    else:
+        graph = scan_paths(
+            roots,
+            extra_rules=list(rules_dirs) or None,
+            expand_star=True if expand_star else None,
+            config=config_path,
+            exclude=list(exclude_globs) or None,
+            profile=profile_flag,
+        )
     payload = graph.to_dict()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -144,3 +158,38 @@ def why_cmd(column: str, graph_path: Path) -> None:
     click.echo(text, nl=False)
     if text.startswith("unknown column"):
         sys.exit(1)
+
+
+@main.group("registry")
+def registry_grp() -> None:
+    """Merge and query cross-repo lineage graphs."""
+
+
+@registry_grp.command("merge")
+@click.argument("graphs", nargs=-1, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=Path("bizmap.graph.json"),
+    show_default=True,
+    help="Write the merged graph JSON here.",
+)
+def registry_merge_cmd(graphs: tuple[Path, ...], out_path: Path) -> None:
+    """Merge graph JSON files into one registry graph with repo-qualified ids."""
+    if not graphs:
+        raise click.UsageError("missing graph JSON paths")
+    loaded = []
+    for path in graphs:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise click.ClickException(f"{path}: invalid graph JSON: {exc}") from exc
+        loaded.append(graph_from_json(data))
+    merged = merge_graphs(loaded)
+    payload = merged.to_dict()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    click.echo(
+        f"wrote {out_path}  ({len(payload['nodes'])} nodes, {len(payload['edges'])} edges)"
+    )

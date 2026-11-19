@@ -21,10 +21,20 @@ def _label(node: Node) -> str:
     t = node.type
     a = node.attrs
     if t == "entrypoint":
-        if a.get("kind") == "http":
-            return f"{a.get('method', '')} {a.get('path', '')}".strip()
+        if a.get("kind") in {"http", "firebase_http", "firebase_call", "cloud_task"}:
+            method = a.get("method") or ""
+            path = a.get("path") or ""
+            return f"{method} {path}".strip() or str(a.get("symbol") or node.id)
         if a.get("kind") == "scheduled_job":
             return f"job {a.get('symbol') or a.get('handler') or node.id}"
+        if a.get("kind") == "firestore":
+            return f"firestore {a.get('collection') or a.get('path') or a.get('symbol') or node.id}"
+        if a.get("kind") == "worker":
+            return f"worker {a.get('symbol') or a.get('handler') or node.id}"
+        if a.get("kind") == "celery_task":
+            return f"celery {a.get('symbol') or a.get('path') or node.id}"
+        if a.get("kind") == "pubsub":
+            return f"pubsub {a.get('topic') or a.get('path') or node.id}"
         return str(a.get("symbol") or node.id)
     if t == "function":
         return str(a.get("name") or node.id.removeprefix("function:"))
@@ -34,6 +44,10 @@ def _label(node: Node) -> str:
         return str(a.get("name") or node.id.removeprefix("table:"))
     if t == "db_trigger":
         return str(a.get("name") or node.id.removeprefix("db_trigger:"))
+    if t == "collection":
+        return f"coll {a.get('name') or node.id.removeprefix('collection:')}"
+    if t == "queue":
+        return f"{a.get('kind') or 'queue'} {a.get('name') or node.id}"
     return node.id
 
 
@@ -42,11 +56,16 @@ def _escape(label: str) -> str:
 
 
 def _table_id_of(node_id: str) -> str | None:
-    if node_id.startswith("table:"):
+    # repo-qualified ids: catalog/table:orders
+    leaf = node_id.split("/")[-1] if "/" in node_id else node_id
+    prefix = node_id[: -len(leaf)] if leaf != node_id else ""
+    if leaf.startswith("table:"):
         return node_id
-    if node_id.startswith("column:"):
-        table = node_id.split(":", 1)[1].split(".", 1)[0]
-        return table_id(table)
+    if leaf.startswith("collection:"):
+        return node_id
+    if leaf.startswith("column:"):
+        table = leaf.split(":", 1)[1].split(".", 1)[0]
+        return prefix + table_id(table)
     return None
 
 
@@ -63,7 +82,7 @@ def _entrypoints_reaching(graph: Graph, node_id: str) -> set[str]:
         if node and node.type == "entrypoint":
             found.add(cur)
         for edge in graph.incoming(cur):
-            if edge.type in {"calls", "triggers"}:
+            if edge.type in {"calls", "triggers", "enqueues", "calls_http"}:
                 q.append(edge.from_id)
     return found
 
@@ -104,7 +123,7 @@ def _emit(
     extra_note: str | None = None,
 ) -> None:
     entrypoints = [n for n in nodes if n.type == "entrypoint"]
-    data = [n for n in nodes if n.type in {"table", "column"}]
+    data = [n for n in nodes if n.type in {"table", "column", "collection", "queue"}]
     functions = [n for n in nodes if n.type == "function"]
     triggers = [n for n in nodes if n.type == "db_trigger"]
 
@@ -216,7 +235,7 @@ def _render_focus(graph: Graph, focus: str, lines: list[str], limit: int) -> Non
     edges: list[tuple[str, str, str, str]] = []
     for edge in graph.edges.values():
         if edge.from_id in keep and edge.to_id in keep:
-            if edge.type in {"reads", "writes", "triggers", "calls"}:
+            if edge.type in {"reads", "writes", "triggers", "calls", "calls_http", "enqueues"}:
                 edges.append((edge.from_id, edge.type, edge.to_id, edge.confidence.value))
     _emit(
         lines,

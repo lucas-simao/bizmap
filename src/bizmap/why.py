@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 
-from bizmap.graph import Graph, column_id, table_id
+from bizmap.graph import Graph, collection_id, column_id, table_id
 
 
 def _label(graph: Graph, node_id: str) -> str:
@@ -10,16 +10,40 @@ def _label(graph: Graph, node_id: str) -> str:
     if not node:
         return node_id
     a = node.attrs
+    repo = a.get("repo")
+    prefix = f"{repo}/" if repo and repo not in node_id.split(":")[0:1] else ""
     if node.type == "entrypoint":
-        if a.get("kind") == "http":
-            return f"HTTP {a.get('method')} {a.get('path')}"
-        if a.get("kind") == "scheduled_job":
-            return f"scheduled job {a.get('symbol') or a.get('handler')}"
-        return str(a.get("kind") or node_id)
+        kind = a.get("kind")
+        if kind == "http":
+            text = f"HTTP {a.get('method')} {a.get('path')}"
+        elif kind == "scheduled_job":
+            text = f"scheduled job {a.get('symbol') or a.get('handler')}"
+        elif kind == "firestore":
+            text = f"firestore {a.get('event') or a.get('method')} {a.get('collection') or a.get('path')}"
+        elif kind == "celery_task":
+            text = f"celery task {a.get('symbol') or a.get('path')}"
+        elif kind == "worker":
+            text = f"worker {a.get('symbol') or a.get('handler')}"
+        elif kind == "pubsub":
+            text = f"pubsub {a.get('topic') or a.get('path')}"
+        elif kind == "cloud_task":
+            text = f"cloud task {a.get('symbol') or a.get('path')}"
+        elif kind == "firebase_http":
+            text = f"firebase HTTP {a.get('path')}"
+        elif kind == "firebase_call":
+            text = f"firebase call {a.get('path')}"
+        else:
+            text = str(kind or node_id)
+        return f"{prefix}{text}" if repo else text
     if node.type == "function":
-        return str(a.get("name") or node_id.removeprefix("function:"))
+        name = str(a.get("name") or node_id.removeprefix("function:"))
+        return f"{repo}/{name}" if repo and not name.startswith(str(repo)) else name
     if node.type == "db_trigger":
         return f"db trigger {a.get('name')} on {a.get('table')}"
+    if node.type == "collection":
+        return f"collection {a.get('name') or node_id.removeprefix('collection:')}"
+    if node.type == "queue":
+        return f"queue {a.get('kind')} {a.get('name')}"
     return node_id
 
 
@@ -28,6 +52,18 @@ def _evidence_str(edge) -> str:
         return ""
     ev = edge.evidence
     return f"  ({ev.file}:{ev.line} {ev.symbol})"
+
+
+def _is_schema_fn(graph: Graph, node_id: str) -> bool:
+    node = graph.get(node_id)
+    if not node:
+        return False
+    if node.attrs.get("role") == "schema":
+        return True
+    ev = node.attrs.get("evidence") or {}
+    file = str(ev.get("file") or "")
+    parts = file.replace("\\", "/").lower().split("/")
+    return "alembic" in parts or "migrations" in parts or "migrate" in parts
 
 
 def _entrypoints_for(graph: Graph, node_id: str) -> list[str]:
@@ -44,54 +80,111 @@ def _entrypoints_for(graph: Graph, node_id: str) -> list[str]:
         if node and node.type == "entrypoint":
             found.append(cur)
         for edge in graph.incoming(cur):
-            if edge.type in {"calls", "triggers"}:
+            if edge.type in {"calls", "triggers", "enqueues"}:
                 q.append(edge.from_id)
     return found
 
 
+def _resolve_target(graph: Graph, spec: str) -> tuple[str, str, str]:
+    """Return (node_id, heading, lookup_kind)."""
+    table, _, column = spec.partition(".")
+    candidates: list[str] = []
+    if column:
+        candidates.extend(
+            [
+                column_id(table, column),
+                f"{table}/{column_id(table.split('/')[-1], column)}" if "/" in table else "",
+            ]
+        )
+        # repo-qualified column ids
+        for nid in graph.nodes:
+            if nid.endswith(f"/column:{table.lower()}.{column.lower()}") or nid == column_id(table, column):
+                candidates.append(nid)
+    candidates.extend(
+        [
+            table_id(table),
+            collection_id(table),
+        ]
+    )
+    for nid in graph.nodes:
+        if nid.endswith(f"/table:{table.lower()}") or nid.endswith(f"/collection:{table.lower()}"):
+            candidates.append(nid)
+    seen: set[str] = set()
+    for cid in candidates:
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        node = graph.get(cid)
+        if node is None:
+            continue
+        if node.type == "column":
+            dtype = node.attrs.get("data_type") or ""
+            extra = f" ({dtype})" if dtype else ""
+            heading = f"column: {node.attrs.get('table')}.{node.attrs.get('name')}{extra}"
+            return cid, heading, "column"
+        if node.type == "table":
+            heading = f"table: {node.attrs.get('name') or table}"
+            if column:
+                heading += f"  (no column node for {column}; showing table-level lineage)"
+            return cid, heading, "table"
+        if node.type == "collection":
+            heading = f"collection: {node.attrs.get('name') or table}"
+            return cid, heading, "collection"
+    return "", "", ""
+
+
 def format_why(graph: Graph, table_dot_column: str) -> str:
-    table, _, column = table_dot_column.partition(".")
-    if not column:
-        raise ValueError("expected TABLE.COLUMN")
-    cid = column_id(table, column)
+    spec = table_dot_column.strip()
+    cid, heading, kind = _resolve_target(graph, spec)
+    if not cid:
+        if "." not in spec:
+            raise ValueError("expected TABLE.COLUMN (or a table/collection name)")
+        return f"unknown column: {table_dot_column}\n"
     node = graph.get(cid)
-    lines: list[str] = []
-    if node is None:
-        tid = table_id(table)
-        if graph.get(tid) is None:
-            return f"unknown column: {table_dot_column}\n"
-        cid = tid
-        node = graph.get(tid)
-        lines.append(f"table: {table}  (no column node for {column}; showing table-level lineage)")
-    else:
-        dtype = node.attrs.get("data_type") or ""
-        extra = f" ({dtype})" if dtype else ""
-        lines.append(f"column: {table}.{column}{extra}")
-        if node.attrs.get("why"):
-            lines.append(f"why: {node.attrs['why']}")
+    lines: list[str] = [heading]
+    if node and node.attrs.get("why"):
+        lines.append(f"why: {node.attrs['why']}")
+    if node and node.type == "table" and node.attrs.get("policies"):
+        lines.append(f"policies: {', '.join(str(p) for p in node.attrs['policies'])}")
 
     writers = list(graph.incoming(cid, "writes"))
     readers = list(graph.incoming(cid, "reads"))
-    # Table-level edges (SELECT *, column-less INSERT) also apply to every column.
-    if cid.startswith("column:"):
-        tid = table_id(table)
+    if kind == "column":
+        table = node.attrs.get("table") if node else spec.split(".", 1)[0]
+        tid = table_id(str(table))
+        if graph.get(tid) is None:
+            for nid in graph.nodes:
+                if nid.endswith(f"/table:{str(table).lower()}"):
+                    tid = nid
+                    break
         for edge in graph.incoming(tid, "writes"):
             writers.append(edge)
         for edge in graph.incoming(tid, "reads"):
             readers.append(edge)
 
-    def dump(title: str, edges) -> None:
+    def split_schema(edges):
+        runtime = []
+        schema_e = []
+        for edge in edges:
+            if _is_schema_fn(graph, edge.from_id):
+                schema_e.append(edge)
+            else:
+                runtime.append(edge)
+        return runtime, schema_e
+
+    def dump(title: str, edges, *, skip_entrypoints: bool = True) -> None:
         lines.append("")
         lines.append(f"{title}:")
         if not edges:
             lines.append("  (none)")
             return
-        # prefer exact, then inferred, then unknown; de-dupe functions vs entrypoints
-        edges = sorted(edges, key=lambda e: ({"exact": 0, "inferred": 1, "unknown": 2}[e.confidence.value], e.from_id))
+        edges = sorted(
+            edges,
+            key=lambda e: ({"exact": 0, "inferred": 1, "unknown": 2}[e.confidence.value], e.from_id),
+        )
         for edge in edges:
             src = graph.get(edge.from_id)
-            if src and src.type == "entrypoint":
-                # shown under triggered-by of the function writers
+            if skip_entrypoints and src and src.type == "entrypoint":
                 continue
             why = ""
             if src and src.attrs.get("why"):
@@ -114,8 +207,14 @@ def format_why(graph: Graph, table_dot_column: str) -> str:
                 if ep_node and ep_node.attrs.get("why"):
                     ep_why = f" — {ep_node.attrs['why']}"
                 lines.append(f"      triggered by {_label(graph, ep)}{ep_why}")
+                for http_edge in graph.incoming(ep, "calls_http"):
+                    lines.append(f"      invoked via HTTP from {_label(graph, http_edge.from_id)}")
 
-    dump("writers", writers)
-    dump("readers", readers)
+    runtime_w, schema_w = split_schema(writers)
+    runtime_r, schema_r = split_schema(readers)
+    dump("writers", runtime_w)
+    dump("readers", runtime_r)
+    if schema_w or schema_r:
+        dump("defined/altered by", schema_w + schema_r)
     lines.append("")
     return "\n".join(lines)
