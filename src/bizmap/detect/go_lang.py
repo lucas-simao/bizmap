@@ -38,6 +38,22 @@ PREFIX_MAX_ITERS = 32
 PREFIX_MAX_LEN = 1024
 _PATH_SELECTOR = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\}$")
 SQL_PARAM_NAMES = {"query", "q", "sql"}
+SQL_DB_METHODS = {
+    "Exec",
+    "Query",
+    "QueryRow",
+    "ExecContext",
+    "QueryContext",
+    "QueryRowContext",
+    "Get",
+    "Select",
+    "NamedExec",
+    "NamedQuery",
+    "MustExec",
+    "Queryx",
+    "QueryRowx",
+}
+_SQL_VERB = re.compile(r"(?i)\b(WITH|SELECT|INSERT|UPDATE|DELETE|MERGE|EXECUTE)\b")
 HTTP_PATH_PARAM_NAMES = {"path", "urlpath", "p"}
 HTTP_METHOD_PARAM_NAMES = {"method", "httpmethod"}
 HTTP_BASE_FIELD_NAMES = {"baseurl", "base_url", "base", "host", "origin"}
@@ -1194,36 +1210,36 @@ class GoAnalyzer:
                         node, args, fn, info, idx, env, package_consts, sql_sites, callees
                     )
 
-                    if pgx_rule and method_matches(method, (pgx_rule.detect.get("calls") or {}).get("method")):
-                        if import_matches(info.imports, pgx_rule.when):
-                            spec = (pgx_rule.detect.get("calls") or {}).get("arguments", {}).get("sql", {})
-                            arg_i = int(spec.get("index", 1))
-                            sql_node = args[arg_i] if len(args) > arg_i else None
-                            if self._is_sql_param_ident(fn, sql_node):
-                                continue
-                            resolved = _resolve_expr(
-                                sql_node, env, package_consts, info.import_aliases, idx.consts_by_import
+                    yaml_sql = bool(
+                        pgx_rule
+                        and method_matches(method, (pgx_rule.detect.get("calls") or {}).get("method"))
+                    )
+                    if method in SQL_DB_METHODS or yaml_sql:
+                        if not pgx_rule or import_matches(info.imports, pgx_rule.when):
+                            resolved, texts = self._pick_sql_arg(
+                                args, fn, env, package_consts, info, idx
                             )
-                            texts = resolved.all_texts() if resolved.usable else []
-                            if not texts and sql_node is not None and not resolved.fully_static:
-                                guess = resolved.path_text
-                                if looks_like_sql(guess) or (
-                                    guess and re.search(r"(?i)\b(UPDATE|INSERT|DELETE|SELECT)\b", guess)
-                                ):
-                                    texts = [guess]
                             for sql_text in texts:
                                 if not sql_text or _is_placeholder_token(sql_text):
                                     continue
-                                if looks_like_sql(sql_text) or resolved.dynamic:
+                                if looks_like_sql(sql_text) or (resolved and resolved.dynamic):
                                     sql_sites.append(
                                         SqlSite(
                                             function=fn,
                                             sql=sql_text,
-                                            dynamic=resolved.dynamic or not resolved.fully_static or len(texts) > 1,
+                                            dynamic=(
+                                                (resolved.dynamic or not resolved.fully_static or len(texts) > 1)
+                                                if resolved
+                                                else True
+                                            ),
                                             evidence=Evidence(
                                                 file=info.rel, line=line_of(node), symbol=fn.qualname
                                             ),
-                                            fully_static=resolved.fully_static and len(texts) == 1,
+                                            fully_static=bool(
+                                                resolved
+                                                and resolved.fully_static
+                                                and len(texts) == 1
+                                            ),
                                         )
                                     )
 
@@ -1394,6 +1410,8 @@ class GoAnalyzer:
                     continue
                 if iface_meths <= type_meths:
                     implementers[iface_key].append(type_key)
+        for key in implementers:
+            implementers[key] = sorted(implementers[key])
         iface_fields: dict[tuple[str, str], set[str]] = defaultdict(set)
         for (ip, sname), fields in all_structs.items():
             for fname, gtype in fields.items():
@@ -2249,6 +2267,7 @@ class GoAnalyzer:
                     if len(callees) == 1:
                         return [(callees[0], Confidence.INFERRED, [])]
                     if callees:
+                        callees = sorted(callees, key=lambda c: c.qualname)
                         cands = [c.qualname for c in callees]
                         return [(c, Confidence.INFERRED, list(cands)) for c in callees]
             return []
@@ -2272,6 +2291,7 @@ class GoAnalyzer:
                 callees.append(gf)
         if not callees:
             return []
+        callees = sorted(callees, key=lambda c: c.qualname)
         cands = [c.qualname for c in callees] if len(callees) > 1 else []
         return [(c, Confidence.INFERRED, list(cands)) for c in callees]
 
@@ -2342,6 +2362,46 @@ class GoAnalyzer:
             return False
         name = text(node)
         return name in SQL_PARAM_NAMES and name in fn.params
+
+    def _arg_sql_texts(
+        self,
+        arg: Node | None,
+        fn: GoFunction,
+        env: dict[str, ResolvedString],
+        package_consts: dict[str, ResolvedString],
+        info: _FileInfo,
+        idx: _Indexes,
+    ) -> tuple[ResolvedString | None, list[str]]:
+        if arg is None or self._is_sql_param_ident(fn, arg):
+            return None, []
+        resolved = _resolve_expr(arg, env, package_consts, info.import_aliases, idx.consts_by_import)
+        texts = resolved.all_texts() if resolved.usable else []
+        if not texts and not resolved.fully_static:
+            guess = resolved.path_text
+            if looks_like_sql(guess) or (guess and _SQL_VERB.search(guess)):
+                texts = [guess]
+        sql_texts = [
+            t
+            for t in texts
+            if t and not _is_placeholder_token(t) and (looks_like_sql(t) or _SQL_VERB.search(t))
+        ]
+        return resolved, sql_texts
+
+    def _pick_sql_arg(
+        self,
+        args: list[Node],
+        fn: GoFunction,
+        env: dict[str, ResolvedString],
+        package_consts: dict[str, ResolvedString],
+        info: _FileInfo,
+        idx: _Indexes,
+    ) -> tuple[ResolvedString | None, list[str]]:
+        """Pick the first argument that is a SQL literal or const (pgx or database/sql)."""
+        for arg in args:
+            resolved, texts = self._arg_sql_texts(arg, fn, env, package_consts, info, idx)
+            if texts:
+                return resolved, texts
+        return None, []
 
     def _sql_param_index(self, callee: GoFunction) -> int | None:
         order = [p for p in callee.params if p != callee.receiver_var]

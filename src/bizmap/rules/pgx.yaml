@@ -2,8 +2,9 @@ id: pgx.v5.sql
 language: go
 framework: pgx
 description: >
-  pgx v5 raw SQL via tx.Exec/Query/QueryRow(ctx, sql, args).
-  SQL argument is captured from literals and same-package const concatenation.
+  pgx v5, database/sql, and sqlx raw SQL. The engine picks the argument
+  that is a SQL literal or const (database/sql Exec(sql), pgx Exec(ctx, sql),
+  ExecContext/QueryContext/QueryRowContext, sqlx Get/Select/NamedExec).
 status: active
 when:
   imports:
@@ -12,7 +13,7 @@ when:
 detect:
   calls:
     method:
-      regex: "^(Exec|Query|QueryRow)$"
+      regex: "^(Exec|Query|QueryRow|ExecContext|QueryContext|QueryRowContext|Get|Select|NamedExec|NamedQuery|MustExec|Queryx|QueryRowx)$"
     arguments:
       sql:
         index: 1

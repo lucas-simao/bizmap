@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.2.9 — 2026-11-19
+
+Route-registration HTTP false positives, stable `unresolved_calls` labels,
+TypeScript `tsconfig` path + factory-arg client URLs, Go `database/sql` /
+sqlx argument picking, and joint-scan mermaid `calls_http` after a private
+evaluation of v0.2.8. Behavior is generic; tests and fixtures are synthetic
+only (`shop`, `orders`, `items`, `billing`, `invoices`, `sites`).
+
+### Fixed
+
+- **Route registration is not outbound HTTP**: a function that builds an
+  `APIRouter` and registers `@router.get` / `@router.post` is not a
+  `calls_http` caller of those same routes. Route decorators and app/router
+  registrations never emit client HTTP (v0.2.7 gave 0 edges; v0.2.8 did not).
+- **Stable `unresolved_calls`**: when several classes share a method name
+  (`A.model_dump` vs `B.model_dump`) the label is the sorted candidate set,
+  not an arbitrary `set` iteration. Identical trees scan to byte-identical
+  JSON except `generated_at`.
+- **TS `tsconfig` / `jsconfig` paths**: `compilerOptions.paths` (with
+  `baseUrl` and `extends`) resolve imports such as `@/*` → `src/*`. Without
+  a config, `@/` still maps to `src/` (inferred).
+- **TS factory call-site bases**: `createApi(API_URL)` with
+  `baseURL: \`${baseUrl}/api/v1/shop\`` substitutes the caller's argument
+  (`import.meta.env.X` / `process.env.X` → `{X}`), so the composed URL is
+  `{VITE_API_URL}/api/v1/shop/...` rather than `{baseUrl}/...`.
+- **TS typed HTTP params**: parameters typed `AxiosInstance`,
+  `Pick<AxiosInstance, …>`, `Partial<AxiosInstance>`, `typeof someInstance`,
+  or `KyInstance` are HTTP clients and inherit the call-site instance base
+  (`makeOrdersClient(shopApi)`).
+- **Go `database/sql` / sqlx**: SQL is taken from the argument that is a
+  string/SQL literal or const, so `db.Exec(sql)`, `Query`/`QueryRow`,
+  `ExecContext`/`QueryContext`/`QueryRowContext(ctx, sql)`, and sqlx
+  `Get`/`Select`/`NamedExec` match alongside pgx `Exec(ctx, sql)` without
+  duplicates.
+
+### Changed
+
+- **Mermaid joint scans**: `--mermaid` on a multi-repo scan draws
+  `calls_http` between services (function or entrypoint in repo A →
+  entrypoint in repo B), one subgraph per repo, so
+  `web.checkout → api POST /orders → billing POST /invoices → invoices`
+  is visible.
+- Graph format **0.2.9**.
+
 ## 0.2.8 — 2026-11-19
 
 TypeScript factory-returned axios/ky instances and local path wrappers,

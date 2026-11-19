@@ -360,6 +360,20 @@ _NON_HTTP_RECV = {
 }
 
 
+def _call_is_decorator(node: Node | None) -> bool:
+    """True when ``node`` is (or sits under) a ``@decorator`` expression."""
+    cur = node
+    for _ in range(8):
+        if cur is None:
+            return False
+        if cur.type == "decorator":
+            return True
+        if cur.type in {"function_definition", "class_definition", "module"}:
+            return False
+        cur = cur.parent
+    return False
+
+
 def _looks_like_unscanned_http(
     method_l: str,
     recv: str,
@@ -372,6 +386,8 @@ def _looks_like_unscanned_http(
         return False
     recv_leaf = (recv or "").rsplit(".", 1)[-1].lower()
     if recv_leaf in _NON_HTTP_RECV or recv_leaf in {"self", "cls"}:
+        return False
+    if recv_leaf in {"router", "app", "bp", "blueprint"}:
         return False
     qlow = (qual or "").lower()
     if any(tok in qlow for tok in ("headers", "params", "cookies", "mapping", "searchparams")):
@@ -938,6 +954,8 @@ class PythonAnalyzer:
                 protocol_impls,
                 http_helpers,
                 sql_helpers,
+                routers,
+                blueprints,
             )
             self._detect_main_worker(analysis, tree, module, fns, enclosing, rel_file)
 
@@ -1328,6 +1346,8 @@ class PythonAnalyzer:
         protocol_impls: dict[str, list[str]] | None = None,
         http_helpers: dict[str, PyHttpHelper] | None = None,
         sql_helpers: dict[str, PySqlDictHelper] | None = None,
+        routers: dict[str, str] | None = None,
+        blueprints: dict[str, str] | None = None,
     ) -> None:
         by_local = {fn.name: fn for fn in fns if not fn.class_name}
         by_class_method: dict[tuple[str, str], PyFunction] = {
@@ -1343,6 +1363,8 @@ class PythonAnalyzer:
         protocol_impls = protocol_impls or {}
         http_helpers = http_helpers or {}
         sql_helpers = sql_helpers or {}
+        routers = routers or {}
+        blueprints = blueprints or {}
         module_consts = consts_by_module.get(fns[0].module if fns else "") or {}
 
         for fn in fns:
@@ -1419,6 +1441,8 @@ class PythonAnalyzer:
                     resolve_fn,
                     evidence,
                     http_helpers,
+                    routers,
+                    blueprints,
                 )
                 self._record_sql_dict_helper(
                     analysis,
@@ -1749,12 +1773,18 @@ class PythonAnalyzer:
         resolve,
         evidence: Evidence,
         http_helpers: dict[str, PyHttpHelper] | None = None,
+        routers: dict[str, str] | None = None,
+        blueprints: dict[str, str] | None = None,
     ) -> None:
+        if _call_is_decorator(node):
+            return
         method_l = method.lower()
         func = node.child_by_field_name("function")
         recv = ""
         if func is not None and func.type == "attribute" and func.named_children:
             recv = text(func.named_children[0])
+        if recv in (routers or {}) or recv in (blueprints or {}):
+            return
         helper = _lookup_py_http_helper(fn, method, qual, http_helpers or {})
         if helper is not None:
             self._record_http_helper_call(
@@ -2579,7 +2609,7 @@ def _resolve_callable_injection(
                     and fn.class_name
                     and field in (callable_fields.get(fn.class_name) or set())
                 )
-                for target in targets:
+                for target in sorted(targets):
                     if (fn.qualname, target) not in existing:
                         new_calls.append((fn.qualname, target, evidence, Confidence.INFERRED))
                         existing.add((fn.qualname, target))
@@ -2854,7 +2884,7 @@ def _resolve_object_dispatch(
             return [type_name]
         proto_meths = set(methods.get(type_name, {})) - {"__init__", "__new__"}
         if not proto_meths:
-            hits = [c for c in methods if type_name in methods[c] or c == type_name]
+            hits = sorted(c for c in methods if type_name in methods[c] or c == type_name)
             return hits[:1] if len(hits) == 1 else []
         impls: list[str] = []
         for cname, meths in methods.items():
@@ -2862,7 +2892,7 @@ def _resolve_object_dispatch(
                 continue
             if proto_meths <= set(meths):
                 impls.append(cname)
-        return impls
+        return sorted(impls)
 
     existing = {(c, d) for c, d, _e, _k in analysis.calls}
     new_calls: list[tuple[str, str, Evidence, Confidence]] = []
@@ -2908,7 +2938,7 @@ def _resolve_object_dispatch(
                 if text(head) == "self" and fn.class_name and field:
                     types.update(field_types.get((fn.class_name, field), set()))
             linked = False
-            for tname in types:
+            for tname in sorted(types):
                 cal = methods.get(tname, {}).get(method)
                 if cal is not None:
                     add_call(fn.qualname, cal.qualname, evidence)
@@ -2920,14 +2950,19 @@ def _resolve_object_dispatch(
                         add_call(fn.qualname, cal.qualname, evidence)
                         linked = True
             if types and not linked:
-                label = next(iter(types))
-                analysis.unresolved_calls.append(
-                    PyUnresolvedCall(
-                        caller=fn.qualname,
-                        callee=f"{label}.{method}",
-                        evidence=evidence,
+                labels = [f"{tname}.{method}" for tname in sorted(types)]
+                seen_labels = {u.callee for u in analysis.unresolved_calls if u.caller == fn.qualname}
+                for label in labels:
+                    if label in seen_labels:
+                        continue
+                    analysis.unresolved_calls.append(
+                        PyUnresolvedCall(
+                            caller=fn.qualname,
+                            callee=label,
+                            evidence=evidence,
+                        )
                     )
-                )
+                    seen_labels.add(label)
     analysis.calls.extend(new_calls)
 
 
@@ -3059,6 +3094,8 @@ def _protocol_implementers(parsed, protocols: dict[str, set[str]]) -> dict[str, 
         for cname, meths in class_methods.items():
             if wanted <= meths:
                 impls[proto].append(cname)
+    for proto in impls:
+        impls[proto] = sorted(impls[proto])
     return impls
 
 
