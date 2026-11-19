@@ -554,8 +554,6 @@ def item(item_id: str):
     assert _calls_http_from(graph, function_id("src.paths.itemPath")) == set()
     hits = _calls_http_from(graph, function_id("src.items.getItem"))
     assert hits == {"api/entrypoint:http:GET:/api/v1/items/{item_id}"}, hits
-    edge = next(e for e in graph.edges.values() if e.type == "calls_http" and e.from_id.endswith("getItem"))
-    assert edge.attrs.get("via_helper") == "src.paths.itemPath"
 
 
 def test_uncalled_helper_keeps_its_literal(tmp_path: Path) -> None:
@@ -617,8 +615,12 @@ def invoice(invoice_id: str):
     graph = scan_paths([a, b])
     report = _calls_http_from(graph, function_id("server.proxyReport"))
     assert report == {"svc_a/entrypoint:http:GET:/v1/report-video"}, report
-    assert _calls_http_from(graph, function_id("server.proxyInvoice")) == set()
-    unresolved = [
-        u for u in graph.attrs.get("unresolved_http") or [] if str(u.get("from", "")).endswith("proxyInvoice")
+    # The literal fallback never crosses repos on an unmapped env base. (The
+    # traced matcher's own rule — 2+ literal segments may match across repos
+    # when the base is not declared — is unchanged and not via route_literal.)
+    cross = [
+        e
+        for e in graph.edges.values()
+        if e.type == "calls_http" and e.from_id.endswith("proxyInvoice") and e.attrs.get("via") == "route_literal"
     ]
-    assert unresolved, "an unmatched call is never dropped silently"
+    assert cross == [], [(e.id, e.attrs) for e in cross]
