@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **TS path helpers on real code**: helpers that wrap the parameter
+  (`` `/sites/${encodeURIComponent(id)}` ``) were rejected as impure, so no
+  link appeared. `encodeURIComponent`, `encodeURI`, `String`, `Number`,
+  `.toString()`, `.trim()`, `.toLowerCase()` are now transparent — in helpers
+  and directly in client URLs, including concatenations
+  (`'/items/' + encodeURIComponent(id)`, which used to drop the segment).
+  Object helpers (`routes.team(id)`, imported or local) and `@/` alias
+  imports are covered by a test with a real `tsconfig.json`.
+
 - **SQLAlchemy builders on models outside the scan left no trace**
   (regression from the phantom-reads fix above): `update(Invoice)...` /
   `select(Invoice)` where `Invoice` is imported from an unscanned package now

@@ -106,3 +106,83 @@ def test_call_hole_is_path_dynamic_not_base_unknown() -> None:
     assert classify_unresolved_http("{baseUrl}/api/v1/client{site(siteId)}/orders") == "path_dynamic"
     assert classify_unresolved_http("{baseUrl}/settings/{seg(id)}/members") == "path_dynamic"
     assert classify_unresolved_http("{baseUrl}/api/v1/orders") == "base_unknown"
+
+
+def test_real_world_helpers_with_encoding_alias_and_objects(tmp_path: Path) -> None:
+    """The evaluation's pattern: encodeURIComponent inside helpers, `@/` imports,
+    object helpers, and an Express API with `:id` params."""
+    web, api = tmp_path / "web", tmp_path / "api"
+    _write(tmp_path, "bizmap.yaml", "services:\n  api:\n    env: VITE_API_URL\n")
+    _write(
+        api,
+        "server.ts",
+        """
+import express from 'express';
+
+const app = express();
+
+export function siteOrders(req: any, res: any) { res.json([]); }
+export function orgMembers(req: any, res: any) { res.json([]); }
+export function teamBoard(req: any, res: any) { res.json([]); }
+export function itemById(req: any, res: any) { res.json({}); }
+
+app.get('/api/v1/client/sites/:id/orders', siteOrders);
+app.get('/settings/:org/members', orgMembers);
+app.get('/api/v1/teams/:team/board', teamBoard);
+app.get('/api/v1/items/:id', itemById);
+""",
+    )
+    _write(web, "tsconfig.json", '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }\n')
+    _write(
+        web,
+        "src/lib/paths.ts",
+        """
+export const site = (id: string) => `/sites/${encodeURIComponent(id)}`;
+export const seg = (s: string) => `/${encodeURIComponent(s)}`;
+export const routes = {
+  team: (t: string) => `/teams/${String(t)}`,
+};
+""",
+    )
+    _write(
+        web,
+        "src/lib/http.ts",
+        """
+import axios from 'axios';
+export const api = axios.create({ baseURL: import.meta.env.VITE_API_URL });
+""",
+    )
+    _write(
+        web,
+        "src/features/screens.ts",
+        """
+import { api } from '@/lib/http';
+import { site, seg, routes } from '@/lib/paths';
+
+export async function loadSiteOrders(siteId: string) {
+  return api.get(`/api/v1/client${site(siteId)}/orders`);
+}
+
+export async function loadMembers(orgId: string) {
+  return api.get(`/settings${seg(orgId)}/members`);
+}
+
+export async function loadBoard(teamId: string) {
+  return api.get(`/api/v1${routes.team(teamId)}/board`);
+}
+
+export async function loadItem(item: { id: number }) {
+  return api.get('/api/v1/items/' + encodeURIComponent(item.id.toString()));
+}
+""",
+    )
+    graph = scan_paths([web, api], config=tmp_path / "bizmap.yaml")
+    expected = {
+        "src.features.screens.loadSiteOrders": "api/entrypoint:http:GET:/api/v1/client/sites/:id/orders",
+        "src.features.screens.loadMembers": "api/entrypoint:http:GET:/settings/:org/members",
+        "src.features.screens.loadBoard": "api/entrypoint:http:GET:/api/v1/teams/:team/board",
+        "src.features.screens.loadItem": "api/entrypoint:http:GET:/api/v1/items/:id",
+    }
+    for fn, ep in expected.items():
+        assert _calls(graph, fn) == {ep}, (fn, _calls(graph, fn), _unresolved(graph, fn))
+        assert _unresolved(graph, fn) == [], (fn, _unresolved(graph, fn))
