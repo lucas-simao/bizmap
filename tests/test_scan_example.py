@@ -6,7 +6,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from bizmap.cli import main
-from bizmap.graph import Graph, column_id, function_id
+from bizmap.graph import Graph, column_id, function_id, table_id
 from bizmap.scan import scan_path
 
 
@@ -45,10 +45,10 @@ def test_scan_shop_example_graph(example_root: Path) -> None:
     assert _edge(graph, "calls", handler, service) is not None
     assert _edge(graph, "calls", service, insert) is not None
 
-    # inferred write on handler / HTTP entrypoint
+    # inferred write on handler / HTTP entrypoint is table-level (no column explosion)
     ep = "entrypoint:http:POST:/api/orders"
-    assert _edge(graph, "writes", handler, column_id("orders", "status")) is not None
-    inferred_ep = _edge(graph, "writes", ep, column_id("orders", "status"))
+    assert _edge(graph, "writes", handler, table_id("orders")) is not None
+    inferred_ep = _edge(graph, "writes", ep, table_id("orders"))
     assert inferred_ep is not None
     assert inferred_ep.confidence.value == "inferred"
 
@@ -60,7 +60,7 @@ def test_scan_shop_example_graph(example_root: Path) -> None:
     # job writes orders.status
     expire_fn = function_id("repository.Repo.ExpirePendingOrders")
     assert _edge(graph, "writes", expire_fn, column_id("orders", "status")) is not None
-    assert _edge(graph, "writes", job_id, column_id("orders", "status")) is not None
+    assert _edge(graph, "writes", job_id, table_id("orders")) is not None
 
     # const concatenation SELECT
     list_users = function_id("repository.Repo.ListActiveUsers")
@@ -118,7 +118,7 @@ def test_cli_scan_and_why(example_root: Path, tmp_path: Path) -> None:
     mmd = out.with_suffix(".mmd").read_text(encoding="utf-8")
     assert "flowchart LR" in mmd
     data = json.loads(out.read_text(encoding="utf-8"))
-    assert data["version"] == "0.1"
+    assert data["version"] == "0.1.1"
     assert data["nodes"]
     assert data["schema"]["tables"]["orders"]
 

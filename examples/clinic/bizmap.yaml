@@ -1,0 +1,9 @@
+# Seed/demo trees are not runtime entrypoints.
+exclude:
+  - cmd/seed
+  - demo/
+
+overrides:
+  columns:
+    appointments.status:
+      why: "Lifecycle of a booked visit (pending, confirmed, canceled)."

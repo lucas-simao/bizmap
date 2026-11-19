@@ -27,10 +27,13 @@ detect:
       path: { index: 0, capture: string }
       handler: { index: 1, capture: ident_or_selector }
       sql: { index: 1, capture: string_or_ident }
-  go_call:                  # `go x.Run(ctx)`
+  go_statement: true        # any `go` statement (v0.1.1)
+  go_call:                  # still accepted; engine no longer requires method==Run
     method: Run
   requires_inside_callee:
-    calls: { method: NewTicker, receiver: time }
+    calls: { method: { in: [NewTicker, Tick, After] }, receiver: time }
+    cron_imports: { contains: [github.com/robfig/cron, github.com/go-co-op/gocron] }
+    cron_methods: { in: [AddFunc, AddJob, Schedule, Start] }
   decorators:               # Python @app.get("/path")
     method: { in: [get, post, put, patch, delete] }
     arguments:
@@ -55,21 +58,42 @@ String arguments are resolved from:
 
 1. interpreted / raw string literals
 2. same-package `const` (and `var`) string values
-3. `+` concatenation of the above
-4. local `q := constA + constB` then `Query(ctx, q)`
+3. **cross-package** `pkg.Const` via the file's import map (including aliases)
+4. `+` concatenation of the above (unresolved pieces become `{pkg.Const}` placeholders)
+5. local `q := constA + constB` then `Query(ctx, q)`
+6. Echo `Group` prefixes, including const prefixes
 
-Anything involving a non-literal identifier is marked `unknown`.
+Anything involving a non-literal identifier is marked `unknown`. Truncated
+paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
 
-## Bundled rules (v0.1)
+## Go resolution (v0.1.1)
+
+- Packages are keyed by **import path** (`module` from `go.mod` + directory),
+  not the `package` clause. `repositories/foo` and `services/foo` can both
+  define `Create` without colliding.
+- Calls and Echo handlers resolve through each file's import aliases.
+- Method values (`h.Create`) use a `(import-path, Type, Method)` key after
+  inferring `h` from constructors, composite literals, parameters, and struct
+  fields. There is **no** `matches[0]` fallback on name collisions.
+- Import-alias or unknown-receiver calls (`middleware.Current(c)`, `s.Now()`)
+  stay unresolved when the package is unscanned or the type is unknown.
+  Unique method names in unrelated packages are not used as a fallback.
+- A handler argument that is a **call** (`profile.StaffPhoto(cfg)`) resolves
+  to the factory function; SQL in the returned closure is attributed to it.
+- `func main` is not a writer entrypoint unless it is a detected job or route.
+  `exclude` globs in `bizmap.yaml` skip seed/demo trees.
+
+## Bundled rules (v0.1.1)
 
 | File | Status | What it detects |
 | --- | --- | --- |
-| `echo.yaml` | active | Echo v4 `group.POST("/path", handler)` |
+| `echo.yaml` | active | Echo v4 `group.POST("/path", handler)` (literals, consts, factories) |
 | `pgx.yaml` | active | pgx v5 `Exec` / `Query` / `QueryRow` SQL |
-| `go_ticker.yaml` | active | `go x.Run(ctx)` jobs that use `time.NewTicker` |
+| `go_ticker.yaml` | active | Any `go` statement whose target uses ticker/cron patterns |
 | `fastapi.yaml` | active | FastAPI `@app.get("/path")` |
 | `sqlalchemy.yaml` | active (partial) | `text()` / `execute()` SQL strings; no ORM models yet |
 | `express.yaml` | stub | Documents the v0.2 JS shape |
 
-v0.1 still walks a simple intra-project call graph in code (not YAML) so
-handler → service → repository reads/writes propagate to HTTP/job entrypoints.
+The engine still walks a simple intra-project call graph in code (not YAML) so
+handler → service → repository reads/writes propagate to HTTP/job entrypoints
+as table-level `inferred` edges.

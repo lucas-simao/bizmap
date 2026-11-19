@@ -1,4 +1,4 @@
-# BizMap graph schema (v0.1)
+# BizMap graph schema (v0.1.1)
 
 `bizmap scan` writes `bizmap.graph.json`. The graph is fully deterministic: every
 node and edge is produced from source text (SQL, tree-sitter ASTs, comments, or
@@ -8,7 +8,7 @@ an explicit `bizmap.yaml` override). There is no LLM in the loop.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | string | Graph format version (`"0.1"`). |
+| `version` | string | Graph format version (`"0.1.1"`). |
 | `generated_at` | string | UTC timestamp. |
 | `schema` | object | Reconstructed database schema (`schema.tables`). |
 | `nodes` | array | Graph nodes (see below). |
@@ -33,14 +33,23 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 
 | `type` | `id` pattern | Extra fields |
 | --- | --- | --- |
-| `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:job:<symbol>` | `kind` (`http` \| `scheduled_job`), `method`, `path`, `symbol`, `why`, `evidence` |
-| `function` | `function:<qualname>` | `name`, `package`, `language`, `why`, `evidence` |
-| `table` | `table:<name>` | `name` |
+| `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:job:<symbol>` | `kind` (`http` \| `scheduled_job`), `method`, `path`, `symbol`, `why`, `evidence`, optional `confidence`, `candidates` |
+| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence` |
+| `table` | `table:<name>` | `name`; optional `external` (system catalogs), `candidates` (dynamic/`unknown`) |
 | `column` | `column:<table>.<column>` | `table`, `name`, `data_type`, `nullable`, optional `why` |
 | `db_trigger` | `db_trigger:<name>` | `name`, `table`, `timing`, `events`, `function`, `evidence` |
 
+Go `qualname` uses a unique short package name: the `package` clause when it is
+unique in the scan, otherwise the module-relative directory
+(`controllers/orders.Handler.Create` vs `repositories/orders.Repo.Create`).
+Functions also store the full Go import path.
+
 `why` is copied only from a comment or docstring immediately above the function,
 or from `bizmap.yaml`. BizMap never invents business intent.
+
+HTTP entrypoints that cannot be bound to a single handler (name collision, no
+type information) keep `confidence: unknown` and list `candidates` instead of
+picking an arbitrary match.
 
 ## Edges
 
@@ -50,6 +59,12 @@ or from `bizmap.yaml`. BizMap never invents business intent.
 | `reads` | `function` / `entrypoint` / `db_trigger` | `column` or `table` | SQL (or trigger function) reads this data. |
 | `writes` | `function` / `entrypoint` / `db_trigger` | `column` or `table` | SQL (or trigger function) writes this data. |
 | `triggers` | `entrypoint` or `db_trigger` | `function` | HTTP route / ticker job / DB trigger invokes a function. |
+
+Column-level `reads`/`writes` are emitted only when the SQL names columns.
+`SELECT *` and INSERT without a column list are **table-level** (unless
+`bizmap scan --expand-star`, which expands `SELECT *` at the SQL origin only).
+Call-graph propagation to callers and HTTP/job entrypoints is always
+table-level, so a star query is not copied as every column to every caller.
 
 Every edge has:
 
@@ -65,14 +80,17 @@ Every edge has:
 ```
 
 Optional `via` records that a write was propagated through a database trigger.
+Optional `situation` is a list of const/iota names observed at call sites
+(for example `audit.AppointmentCanceled`) so `bizmap why` can say *when* a
+column is written.
 
 ## Confidence
 
 | Value | When |
 | --- | --- |
-| `exact` | Fully static SQL (string literals / same-package const concatenation) parsed by sqlglot, or a route/job registration seen in the AST. |
-| `inferred` | Call-graph propagation (a caller of the SQL site), `SELECT *` expanded from the reconstructed schema, INSERT without a column list, or a writer of table T also writing what a trigger on T writes. |
-| `unknown` | Dynamically built SQL (`"UPDATE t SET " + col`), unparsed SQL, or a table-level access when the column list could not be determined. |
+| `exact` | Fully static SQL (string literals / const concatenation, including cross-package `pkg.Const`) parsed by sqlglot, or a route/job registration whose handler resolved via type. |
+| `inferred` | Call-graph propagation (table-level), `SELECT *` (table-level, or columns with `--expand-star`), INSERT without a column list, or a writer of table T also writing what a trigger on T writes. |
+| `unknown` | Dynamically built SQL (`"UPDATE t SET " + col` or `"UPDATE "+table+" SET"`), unparsed SQL, an unresolvable route path (`{otherpkg.PendingPath}/setup`), or an ambiguous handler (candidates listed, no arbitrary pick). |
 
 When the same edge is observed twice, the **highest** confidence is kept
 (`exact` > `inferred` > `unknown`).
@@ -88,11 +106,23 @@ applied in order. Supported PostgreSQL constructs:
 - `DO $$ ... $$` blocks (inner `ALTER`/`CREATE` is applied)
 - `CREATE TRIGGER` + `CREATE FUNCTION` (plpgsql body scanned for `INSERT`/`UPDATE`/`DELETE`/`SELECT`)
 
+Table nodes are created for reconstructed DDL tables, for static SQL that
+names a real identifier, and for system catalogs (`pg_roles`, …) marked
+`external`. CTE / subquery / LATERAL aliases and SQL keywords are never
+tables. Dynamic table names become `table:unknown` with `candidates` when
+determinable.
+
 ## Overrides (`bizmap.yaml`)
 
-Uncertain bits can be completed manually next to the scanned tree:
+Uncertain bits can be completed manually next to the scanned tree. Top-level
+`exclude` globs skip files (seed/demo trees). `expand_star: true` expands
+`SELECT *` the same way as the CLI flag.
 
 ```yaml
+exclude:
+  - cmd/seed
+  - demo/
+expand_star: false
 overrides:
   columns:
     inventory.qty:
@@ -101,3 +131,9 @@ overrides:
         - symbol: repository.Repo.InsertOrder
           confidence: inferred
 ```
+
+## Mermaid
+
+`bizmap scan --mermaid` writes an **entrypoint → table** rollup (readable on
+large graphs). `--mermaid-focus TABLE` shows functions, columns, and
+entrypoints around one table. `--mermaid-limit N` caps node count.

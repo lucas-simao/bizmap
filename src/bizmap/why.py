@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 
-from bizmap.graph import Graph, column_id
+from bizmap.graph import Graph, column_id, table_id
 
 
 def _label(graph: Graph, node_id: str) -> str:
@@ -57,9 +57,6 @@ def format_why(graph: Graph, table_dot_column: str) -> str:
     node = graph.get(cid)
     lines: list[str] = []
     if node is None:
-        # table-level?
-        from bizmap.graph import table_id
-
         tid = table_id(table)
         if graph.get(tid) is None:
             return f"unknown column: {table_dot_column}\n"
@@ -73,8 +70,15 @@ def format_why(graph: Graph, table_dot_column: str) -> str:
         if node.attrs.get("why"):
             lines.append(f"why: {node.attrs['why']}")
 
-    writers = graph.incoming(cid, "writes")
-    readers = graph.incoming(cid, "reads")
+    writers = list(graph.incoming(cid, "writes"))
+    readers = list(graph.incoming(cid, "reads"))
+    # Table-level edges (SELECT *, column-less INSERT) also apply to every column.
+    if cid.startswith("column:"):
+        tid = table_id(table)
+        for edge in graph.incoming(tid, "writes"):
+            writers.append(edge)
+        for edge in graph.incoming(tid, "reads"):
+            readers.append(edge)
 
     def dump(title: str, edges) -> None:
         lines.append("")
@@ -97,6 +101,13 @@ def format_why(graph: Graph, table_dot_column: str) -> str:
             lines.append(
                 f"  [{edge.confidence.value}] {_label(graph, edge.from_id)}{_evidence_str(edge)}{via_s}{why}"
             )
+            situation = edge.attrs.get("situation")
+            if situation:
+                if isinstance(situation, list):
+                    sit = ", ".join(str(s) for s in situation)
+                else:
+                    sit = str(situation)
+                lines.append(f"      situation: {sit}")
             for ep in _entrypoints_for(graph, edge.from_id):
                 ep_node = graph.get(ep)
                 ep_why = ""
