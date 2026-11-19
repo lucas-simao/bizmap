@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
+import time
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from pathlib import Path
 
 from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
@@ -20,6 +23,24 @@ from bizmap.graph import (
 from bizmap.overrides import apply_overrides, load_scan_config
 from bizmap.schema_replay import Schema, replay_files
 from bizmap.sql_analyze import SqlAccess, analyze_sql, is_external_table, is_skipped_table_name
+
+
+@dataclass
+class ScanProfile:
+    parse: float = 0.0
+    resolve: float = 0.0
+    sql: float = 0.0
+    propagate: float = 0.0
+
+    @property
+    def total(self) -> float:
+        return self.parse + self.resolve + self.sql + self.propagate
+
+    def format_line(self) -> str:
+        return (
+            f"bizmap profile: parse={self.parse:.3f}s resolve={self.resolve:.3f}s "
+            f"sql={self.sql:.3f}s propagate={self.propagate:.3f}s total={self.total:.3f}s"
+        )
 
 
 def _add_schema_nodes(graph: Graph, schema: Schema) -> None:
@@ -57,7 +78,8 @@ def _ensure_access_target(graph: Graph, schema: Schema, access: SqlAccess) -> st
     tname = access.table.lower()
     if is_skipped_table_name(tname):
         return None
-    known = tname in {t.lower() for t in schema.tables}
+    ddl_known = {t.lower() for t in schema.tables}
+    known = tname in ddl_known
     external = access.external or is_external_table(tname)
     if external:
         tid = table_id(tname)
@@ -67,6 +89,11 @@ def _ensure_access_target(graph: Graph, schema: Schema, access: SqlAccess) -> st
             graph.add_node(cid, "column", table=tname, name=access.column.lower(), external=True)
             return cid
         return tid
+    # With DDL, only schema tables become nodes. Alias phantoms (l, r, ...)
+    # and other unknown identifiers are dropped. Without DDL, real-looking
+    # names are still allowed so schemaless scans keep their tables.
+    if ddl_known and not known:
+        return None
     tid = table_id(tname)
     if not known:
         graph.add_node(tid, "table", name=tname)
@@ -195,7 +222,7 @@ def _apply_go(
     schema: Schema,
     *,
     expand_star: bool = False,
-) -> None:
+) -> tuple[float, float]:
     colmap = schema.column_names()
     known = set(colmap)
     evidence_by_fn: dict[str, Evidence] = {}
@@ -204,17 +231,21 @@ def _apply_go(
         evidence_by_fn[fn.qualname] = Evidence(file=fn.file, line=fn.line, symbol=fn.qualname)
 
     reverse: dict[str, set[str]] = defaultdict(set)
-    for caller, callee, ev, conf in analysis.calls:
+    for hit in analysis.calls:
+        extra: dict = {}
+        if hit.candidates:
+            extra["candidates"] = list(hit.candidates)
         graph.add_edge(
             "calls",
-            function_id(caller),
-            function_id(callee),
-            confidence=conf,
-            evidence=ev,
+            function_id(hit.caller),
+            function_id(hit.callee),
+            confidence=hit.confidence,
+            evidence=hit.evidence,
+            **extra,
         )
         # Ambiguous/unknown call edges do not propagate table reads/writes.
-        if conf != Confidence.UNKNOWN:
-            reverse[callee].add(caller)
+        if hit.confidence != Confidence.UNKNOWN:
+            reverse[hit.callee].add(hit.caller)
 
     entrypoints_by_handler: dict[str, list[str]] = defaultdict(list)
     job_functions: set[str] = {j.handler.qualname for j in analysis.jobs}
@@ -271,7 +302,10 @@ def _apply_go(
         entrypoints_by_handler[handler.qualname].append(eid)
         job_functions.add(handler.qualname)
 
-    for site in analysis.sql_sites:
+    sql_sites = list(analysis.sql_sites)
+    t_sql = time.perf_counter()
+    origin_accesses: list[tuple[str, list[SqlAccess], object]] = []
+    for site in sql_sites:
         fid = function_id(site.function.qualname)
         accesses = analyze_sql(
             site.sql,
@@ -296,9 +330,13 @@ def _apply_go(
                 evidence=site.evidence,
                 **sit_kwargs,
             )
+        origin_accesses.append((site.function.qualname, accesses, site.evidence))
+    sql_s = time.perf_counter() - t_sql
+    t_prop = time.perf_counter()
+    for origin_fn, accesses, _ev in origin_accesses:
         _propagate(
             graph,
-            site.function.qualname,
+            origin_fn,
             accesses,
             reverse,
             evidence_by_fn,
@@ -306,6 +344,8 @@ def _apply_go(
             schema,
             job_functions,
         )
+    prop_s = time.perf_counter() - t_prop
+    return sql_s, prop_s
 
 
 def _apply_python(
@@ -314,7 +354,7 @@ def _apply_python(
     schema: Schema,
     *,
     expand_star: bool = False,
-) -> None:
+) -> tuple[float, float]:
     colmap = schema.column_names()
     known = set(colmap)
     evidence_by_fn: dict[str, Evidence] = {}
@@ -356,6 +396,8 @@ def _apply_python(
         )
         entrypoints_by_handler[route.handler.qualname].append(eid)
 
+    t_sql = time.perf_counter()
+    origin_accesses: list[tuple[str, list[SqlAccess]]] = []
     for site in analysis.sql_sites:
         fid = function_id(site.function.qualname)
         accesses = analyze_sql(
@@ -376,9 +418,13 @@ def _apply_python(
                 confidence=access.confidence,
                 evidence=site.evidence,
             )
+        origin_accesses.append((site.function.qualname, accesses))
+    sql_s = time.perf_counter() - t_sql
+    t_prop = time.perf_counter()
+    for origin_fn, accesses in origin_accesses:
         _propagate(
             graph,
-            site.function.qualname,
+            origin_fn,
             accesses,
             reverse,
             evidence_by_fn,
@@ -386,6 +432,7 @@ def _apply_python(
             schema,
             set(),
         )
+    return sql_s, time.perf_counter() - t_prop
 
 
 def _apply_db_triggers(graph: Graph, schema: Schema) -> None:
@@ -479,8 +526,10 @@ def scan_path(
     expand_star: bool | None = None,
     exclude: list[str] | None = None,
     config: Path | None = None,
+    profile: bool = False,
 ) -> Graph:
     root = root.resolve()
+    timings = ScanProfile()
     cfg = load_scan_config(root, config=config)
     exclude_pats = list(cfg.exclude)
     if exclude:
@@ -489,20 +538,29 @@ def scan_path(
     rules = load_rules(extra_rules)
     graph = Graph()
 
+    t0 = time.perf_counter()
     sql_files = discover_sql_files(root, exclude=exclude_pats)
     schema = replay_files(sql_files, root)
     _add_schema_nodes(graph, schema)
-
     go_files = iter_files(root, [".go"], exclude=exclude_pats)
     py_files = iter_files(root, [".py"], exclude=exclude_pats)
+    timings.parse += time.perf_counter() - t0
 
-    go_analysis = GoAnalyzer(rules).analyze(go_files, root)
+    go_analysis = GoAnalyzer(rules).analyze(go_files, root, profile=timings)
+    t_py = time.perf_counter()
     py_analysis = PythonAnalyzer(rules).analyze(py_files, root)
+    timings.resolve += time.perf_counter() - t_py
 
-    _apply_go(graph, go_analysis, schema, expand_star=expand)
-    _apply_python(graph, py_analysis, schema, expand_star=expand)
+    go_sql, go_prop = _apply_go(graph, go_analysis, schema, expand_star=expand)
+    py_sql, py_prop = _apply_python(graph, py_analysis, schema, expand_star=expand)
+    timings.sql += go_sql + py_sql
+    t_prop = time.perf_counter()
     _apply_db_triggers(graph, schema)
-
     if cfg.path:
         apply_overrides(graph, cfg.path)
+    timings.propagate += go_prop + py_prop + (time.perf_counter() - t_prop)
+
+    if profile:
+        sys.stderr.write(timings.format_line() + "\n")
+        sys.stderr.flush()
     return graph

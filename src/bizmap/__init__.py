@@ -1,3 +1,3 @@
 """BizMap: deterministic business-rule and data-lineage mapper."""
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"

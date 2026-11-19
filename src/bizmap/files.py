@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
@@ -95,15 +96,16 @@ def iter_files(
     wanted = {s.lower() if s.startswith(".") else f".{s.lower()}" for s in suffixes}
     out: list[Path] = []
     root = root.resolve()
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        if any(part in SKIP_DIR_NAMES for part in path.parts):
-            continue
-        rel_posix = rel(path, root)
-        if path_excluded(rel_posix, exclude):
-            continue
-        if path.suffix.lower() in wanted:
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
+        base = Path(dirpath)
+        for name in filenames:
+            path = base / name
+            if path.suffix.lower() not in wanted:
+                continue
+            rel_posix = rel(path, root)
+            if path_excluded(rel_posix, exclude):
+                continue
             out.append(path)
     return sorted(out)
 

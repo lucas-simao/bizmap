@@ -16,9 +16,14 @@ def named_children(node: Node) -> list[Node]:
 
 
 def walk(node: Node) -> Iterator[Node]:
-    yield node
-    for child in node.children:
-        yield from walk(child)
+    """Iterative preorder over named descendants (punctuation is skipped)."""
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        yield cur
+        named = cur.named_children
+        if named:
+            stack.extend(reversed(named))
 
 
 def first_child(node: Node, type_name: str) -> Node | None:

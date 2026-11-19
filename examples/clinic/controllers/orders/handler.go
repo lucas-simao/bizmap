@@ -12,6 +12,7 @@ import (
 
 type Clock interface {
 	Now() time.Time
+	Since(t time.Time) time.Duration
 }
 
 type Handler struct {

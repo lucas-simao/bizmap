@@ -21,6 +21,10 @@ TABLE_FROM_PREFIX = re.compile(
     r"(?:ONLY\s+)?([A-Za-z_][A-Za-z0-9_.]*)"
 )
 DYNAMIC_PLACEHOLDER = re.compile(r"\{[^{}]+\}")
+_CTE_HEAD = re.compile(r"(?is)\bWITH\s+(?:RECURSIVE\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+AS\b")
+_CTE_MORE = re.compile(r"(?is),\s*([A-Za-z_][A-Za-z0-9_]*)\s+AS\s*\(")
+_SUBQUERY_OPEN = re.compile(r"(?is)(?:\bLATERAL\s*)?\(\s*(?:SELECT|WITH|VALUES)\b")
+_ALIAS_AFTER = re.compile(r"\s*(?:AS\s+)?([A-Za-z_][A-Za-z0-9_]*)\b", re.IGNORECASE)
 
 SKIP_TABLES = {
     "new",
@@ -283,9 +287,55 @@ def _alias_ident(node: exp.Expression | str | None) -> str:
     return ""
 
 
-def _phantom_names(root: exp.Expression) -> set[str]:
-    """CTE / subquery / LATERAL / UDTF aliases that must not become table nodes."""
+def _matching_paren_close(sql: str, open_idx: int) -> int | None:
+    depth = 0
+    i = open_idx
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def text_phantom_aliases(sql: str) -> set[str]:
+    """CTE / derived-table / LATERAL aliases extracted from SQL text.
+
+    Used when sqlglot misses an alias (or the fallback path runs). Identifiers
+    that are SQL keywords are ignored.
+    """
     names: set[str] = set()
+    if not sql:
+        return names
+    head = _CTE_HEAD.search(sql)
+    if head:
+        names.add(head.group(1).lower())
+        names.update(m.group(1).lower() for m in _CTE_MORE.finditer(sql))
+    for match in _SUBQUERY_OPEN.finditer(sql):
+        paren = sql.find("(", match.start())
+        if paren < 0:
+            continue
+        close = _matching_paren_close(sql, paren)
+        if close is None:
+            continue
+        alias_m = _ALIAS_AFTER.match(sql, close + 1)
+        if not alias_m:
+            continue
+        ident = alias_m.group(1).lower()
+        if ident in SQL_KEYWORDS or ident in SKIP_TABLES:
+            continue
+        names.add(ident)
+    return names
+
+
+def _phantom_names(root: exp.Expression, extra: set[str] | None = None) -> set[str]:
+    """CTE / subquery / LATERAL / UDTF aliases that must not become table nodes."""
+    names: set[str] = set(extra or ())
     for cte in root.find_all(exp.CTE):
         n = _ident(cte.args.get("alias") or cte.this)
         if n:
@@ -294,6 +344,11 @@ def _phantom_names(root: exp.Expression) -> set[str]:
         n = _alias_ident(sub) or _alias_ident(sub.args.get("alias") if hasattr(sub, "args") else None)
         if n:
             names.add(n)
+    if hasattr(exp, "Lateral"):
+        for lat in root.find_all(exp.Lateral):
+            n = _alias_ident(lat) or _alias_ident(lat.args.get("alias") if hasattr(lat, "args") else None)
+            if n:
+                names.add(n)
     for udtf in root.find_all(exp.UDTF):
         n = _alias_ident(udtf) or _alias_ident(udtf.args.get("alias") if hasattr(udtf, "args") else None)
         if n:
@@ -312,9 +367,9 @@ def _phantom_names(root: exp.Expression) -> set[str]:
     return names
 
 
-def _alias_map(root: exp.Expression) -> dict[str, str]:
+def _alias_map(root: exp.Expression, extra_phantoms: set[str] | None = None) -> dict[str, str]:
     aliases: dict[str, str] = {}
-    phantoms = _phantom_names(root)
+    phantoms = _phantom_names(root, extra_phantoms)
     for table in root.find_all(exp.Table):
         name = _table_name(table)
         if not name:
@@ -459,6 +514,31 @@ def _real_tables(aliases: dict[str, str], phantoms: set[str]) -> set[str]:
     return out
 
 
+def _table_allowed(
+    table: str | None,
+    known_tables: set[str] | None,
+    phantoms: set[str] | None = None,
+) -> bool:
+    """Whether ``table`` may become a table/column access.
+
+    With a non-empty DDL set, only those tables (plus catalogs) are kept.
+    Without DDL, any real-looking identifier is kept except phantoms.
+    """
+    if not table:
+        return False
+    leaf = table.lower().split(".")[-1]
+    if phantoms and (leaf in phantoms or table.lower() in phantoms):
+        return False
+    if is_skipped_table_name(leaf):
+        return False
+    if is_external_table(table):
+        return True
+    known = {t.lower() for t in (known_tables or ())}
+    if known:
+        return leaf in known or table.lower() in known
+    return True
+
+
 def _analyze_statement(
     stmt: exp.Expression,
     sql: str,
@@ -467,9 +547,11 @@ def _analyze_statement(
     expand_star: bool,
     out: list[SqlAccess],
     seen: set[tuple],
+    extra_phantoms: set[str] | None = None,
+    known_tables: set[str] | None = None,
 ) -> None:
-    aliases = _alias_map(stmt)
-    phantoms = _phantom_names(stmt)
+    aliases = _alias_map(stmt, extra_phantoms)
+    phantoms = _phantom_names(stmt, extra_phantoms)
     conf = Confidence.UNKNOWN if dynamic else Confidence.EXACT
 
     def known_cols(table: str) -> list[str]:
@@ -492,7 +574,10 @@ def _analyze_statement(
         for inner in stmt.find_all(exp.Select):
             if inner is stmt:
                 continue
-            _analyze_select(inner, sql, schema_columns, dynamic, expand_star, out, seen, aliases, phantoms)
+            _analyze_select(
+                inner, sql, schema_columns, dynamic, expand_star, out, seen, aliases, phantoms,
+                known_tables=known_tables,
+            )
         return
 
     if isinstance(stmt, exp.Update):
@@ -512,7 +597,10 @@ def _analyze_statement(
                 t = _resolve_table(col.table, aliases, table, phantoms)
                 _add(out, "read", t, col.name, conf, sql, dynamic, seen)
         for inner in stmt.find_all(exp.Select):
-            _analyze_select(inner, sql, schema_columns, dynamic, expand_star, out, seen, aliases, phantoms)
+            _analyze_select(
+                inner, sql, schema_columns, dynamic, expand_star, out, seen, aliases, phantoms,
+                known_tables=known_tables,
+            )
         return
 
     if isinstance(stmt, exp.Delete):
@@ -531,7 +619,10 @@ def _analyze_statement(
     if isinstance(stmt, exp.Select) or stmt.find(exp.Select):
         select = stmt if isinstance(stmt, exp.Select) else stmt.find(exp.Select)
         if select:
-            _analyze_select(select, sql, schema_columns, dynamic, expand_star, out, seen, aliases, phantoms)
+            _analyze_select(
+                select, sql, schema_columns, dynamic, expand_star, out, seen, aliases, phantoms,
+                known_tables=known_tables,
+            )
         return
 
 
@@ -545,8 +636,9 @@ def _analyze_select(
     seen: set[tuple],
     aliases: dict[str, str] | None = None,
     phantoms: set[str] | None = None,
+    known_tables: set[str] | None = None,
 ) -> None:
-    aliases = aliases or _alias_map(stmt)
+    aliases = aliases or _alias_map(stmt, phantoms)
     phantoms = phantoms if phantoms is not None else _phantom_names(stmt)
     conf = Confidence.UNKNOWN if dynamic else Confidence.EXACT
     tables = _real_tables(aliases, phantoms)
@@ -575,6 +667,8 @@ def _analyze_select(
         for table in targets:
             if not table or is_skipped_table_name(table) or table.lower().split(".")[-1] in phantoms:
                 continue
+            if not _table_allowed(table, known_tables, phantoms):
+                continue
             if expand_star:
                 cols = (schema_columns or {}).get(table.lower(), []) if table else []
                 if cols:
@@ -596,6 +690,8 @@ def _analyze_select(
         if table is None:
             continue
         if table.lower().split(".")[-1] in phantoms:
+            continue
+        if not _table_allowed(table, known_tables, phantoms):
             continue
         _add(out, "read", table, col.name, conf, sql, dynamic, seen)
 
@@ -640,16 +736,20 @@ def _fallback_table_accesses(
     sql: str,
     dynamic: bool,
     known_tables: set[str] | None = None,
+    phantoms: set[str] | None = None,
 ) -> list[SqlAccess]:
     out: list[SqlAccess] = []
     seen: set[tuple] = set()
     kind = _kind_from_sql(sql)
     conf = Confidence.UNKNOWN
     known = {t.lower() for t in (known_tables or ())}
+    phantoms = set(phantoms or ()) | text_phantom_aliases(sql)
     found_real = False
     for match in TABLE_FROM_PREFIX.finditer(sql):
         table = match.group(1).split(".")[-1]
         if is_skipped_table_name(table):
+            continue
+        if not _table_allowed(table, known or None, phantoms):
             continue
         prefix = sql[: match.start()].upper()
         edge_kind = kind
@@ -662,23 +762,29 @@ def _fallback_table_accesses(
         found_real = True
     if not found_real:
         match = re.search(r"(?is)\b(?:INTO|UPDATE|FROM)\s+([A-Za-z_][A-Za-z0-9_.]*)", sql)
-        if match and not is_skipped_table_name(match.group(1).split(".")[-1]):
-            _add(out, kind, match.group(1), None, conf, sql, True, seen)
-            found_real = True
-    if not found_real:
-        candidates = sorted(t for t in known if t not in SQL_KEYWORDS) if known else []
-        _add(
-            out,
-            kind,
-            None,
-            None,
-            Confidence.UNKNOWN,
-            sql,
-            True,
-            seen,
-            unknown_table=True,
-            candidates=candidates,
-        )
+        if match:
+            table = match.group(1).split(".")[-1]
+            if _table_allowed(table, known or None, phantoms):
+                _add(out, kind, match.group(1), None, conf, sql, True, seen)
+                found_real = True
+    if found_real:
+        return out
+    # Aliases-only (or FROM-less) SQL: do not invent table:unknown when DDL exists.
+    if known or phantoms:
+        return out
+    candidates = sorted(t for t in known if t not in SQL_KEYWORDS) if known else []
+    _add(
+        out,
+        kind,
+        None,
+        None,
+        Confidence.UNKNOWN,
+        sql,
+        True,
+        seen,
+        unknown_table=True,
+        candidates=candidates,
+    )
     return out
 
 
@@ -694,13 +800,16 @@ def analyze_sql(
 
     Column edges are emitted only when the SQL names columns. ``SELECT *`` and
     INSERT without a column list stay table-level unless ``expand_star`` is set
-    (SELECT * only). CTE / subquery aliases and SQL keywords never become tables.
+    (SELECT * only). CTE / subquery / LATERAL aliases and SQL keywords never
+    become tables. When ``known_tables`` (DDL) is non-empty, only those tables
+    (plus catalogs) are emitted.
     """
     if not sql or not sql.strip():
         return []
-    known = set(known_tables or ())
+    known = {t.lower() for t in (known_tables or ())}
     if schema_columns:
-        known.update(schema_columns.keys())
+        known.update(k.lower() for k in schema_columns.keys())
+    phantoms = text_phantom_aliases(sql)
     if DYNAMIC_PLACEHOLDER.search(sql) and not re.search(
         r"(?is)\b(?:FROM|INTO|UPDATE|JOIN)\s+[A-Za-z_]", sql
     ):
@@ -723,7 +832,9 @@ def analyze_sql(
     try:
         stmts = sqlglot.parse(normalized, read="postgres", error_level=ErrorLevel.IGNORE)
     except Exception:
-        return _fallback_table_accesses(sql, dynamic=True, known_tables=known)
+        return _fallback_table_accesses(
+            sql, dynamic=True, known_tables=known, phantoms=phantoms
+        )
 
     out: list[SqlAccess] = []
     seen: set[tuple] = set()
@@ -736,7 +847,22 @@ def analyze_sql(
             continue
         parsed_any = True
         parsed_stmts.append(stmt)
-        _analyze_statement(stmt, sql, schema_columns, dynamic, expand_star, out, seen)
+        _analyze_statement(
+            stmt,
+            sql,
+            schema_columns,
+            dynamic,
+            expand_star,
+            out,
+            seen,
+            extra_phantoms=phantoms,
+            known_tables=known,
+        )
+    out = [
+        a
+        for a in out
+        if a.unknown_table or _table_allowed(a.table, known or None, phantoms)
+    ]
     if not parsed_any or not out:
         # FROM-less SELECT (set_config, now(), SELECT 1) touches no table.
         # Functions are never tables; do not invent table:unknown.
@@ -747,7 +873,9 @@ def analyze_sql(
             return []
         if parsed_any and not out and _sql_looks_fromless_select(sql):
             return []
-        return _fallback_table_accesses(sql, dynamic=True, known_tables=known)
+        return _fallback_table_accesses(
+            sql, dynamic=True, known_tables=known, phantoms=phantoms
+        )
     if dynamic:
         for access in out:
             access.dynamic = True
