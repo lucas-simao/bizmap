@@ -950,6 +950,14 @@ class JsAnalyzer:
             wrappers_by_mod[module] = _collect_wrappers(tree, consts, clients)
 
         _import_path_helpers(consts_by_mod, import_specs_by_mod)
+        # Helpers built from imported helpers (`site = (id) => `${base()}/sites/${id}``)
+        # resolve once the imports are in scope; one more round covers one hop.
+        for _round in range(2):
+            for _p, _rf, module, tree, _src in parsed:
+                consts = consts_by_mod.get(module) or {}
+                for key, value in _collect_path_helpers(tree, consts).items():
+                    consts.setdefault(key, value)
+            _import_path_helpers(consts_by_mod, import_specs_by_mod)
         for _path, _rel_file, module, tree, _src in parsed:
             mounts.extend(
                 _collect_cross_mounts(
@@ -1772,6 +1780,10 @@ def _collect_imports(
             r"import\s+([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\{([^}]+)\}",
             head,
         )
+        star = re.search(r"import\s+\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)", head)
+        if star:
+            specs[star.group(1)] = (src_mod, "*")
+            out[star.group(1)] = f"{src_mod}.*"
         named = re.search(r"import\s*\{([^}]+)\}", head)
         default = re.search(r"import\s+([A-Za-z_][A-Za-z0-9_]*)\s*$", head.strip())
         if not default:
@@ -2852,10 +2864,16 @@ def _collect_path_helpers(tree: Node, consts: dict[str, str]) -> dict[str, str]:
         scope = {k: v for k, v in consts.items() if k not in params}
         scope.update(out)  # helpers defined earlier in the file may compose
         value, _unresolved = _resolve_js_string(expr, scope)
-        if not value or not value.startswith("/") or any(ch.isspace() for ch in value):
+        if not value or any(ch.isspace() for ch in value):
             continue
-        # Pure: the only holes are the helper's own parameters.
-        if not set(_HOLE.findall(value)) <= set(params):
+        lead = _HOLE.match(value)
+        base_hole = lead.group(1) if lead and _ENV_LIKE.match(lead.group(1)) else None
+        if not (value.startswith("/") or base_hole or value.startswith(("http://", "https://"))):
+            continue
+        # Pure: the only holes are the helper's own parameters (plus a leading
+        # env/base placeholder such as `{VITE_API_URL}`).
+        holes = set(_HOLE.findall(value)) - ({base_hole} if base_hole else set())
+        if not holes <= set(params):
             continue
         out[f"{name}()"] = value
         out[f"{name}()#params"] = ",".join(params)
@@ -2870,6 +2888,12 @@ def _import_path_helpers(
         consts = consts_by_mod.setdefault(module, {})
         for local, (src_mod, orig) in specs.items():
             src = consts_by_mod.get(src_mod) or {}
+            if orig == "*":
+                # `import * as P from './paths'` → P.site(), P.routes.team()
+                for skey, sval in src.items():
+                    if skey.endswith("()") or skey.endswith("()#params"):
+                        consts.setdefault(f"{local}.{skey}", sval)
+                continue
             key = f"{orig}()"
             if key in src and f"{local}()" not in consts:
                 consts[f"{local}()"] = src[key]
@@ -2890,7 +2914,7 @@ def _apply_path_helper(call: Node, consts: dict[str, str]) -> str | None:
     elif func.type == "member_expression":
         obj = func.child_by_field_name("object")
         prop = func.child_by_field_name("property")
-        if obj is None or prop is None or obj.type != "identifier":
+        if obj is None or prop is None or obj.type not in {"identifier", "member_expression"}:
             return None
         key = f"{text(obj)}.{text(prop)}()"
     else:

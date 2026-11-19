@@ -186,3 +186,73 @@ export async function loadItem(item: { id: number }) {
     for fn, ep in expected.items():
         assert _calls(graph, fn) == {ep}, (fn, _calls(graph, fn), _unresolved(graph, fn))
         assert _unresolved(graph, fn) == [], (fn, _unresolved(graph, fn))
+
+
+def test_base_helpers_namespace_imports_and_composed_helpers(tmp_path: Path) -> None:
+    """`${base()}/x` with base() in another file returning `${API_URL}/api/v1/client`,
+    `import * as P` + `P.site(id)`, object helpers, and helpers composed from
+    imported helpers."""
+    web, api = tmp_path / "web", tmp_path / "api"
+    _write(tmp_path, "bizmap.yaml", "services:\n  api:\n    env: VITE_API_URL\n")
+    _write(
+        api,
+        "server.ts",
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.get('/api/v1/client/sites/:id/orders', h);
+app.get('/api/v1/client/sites/:id/summary', h);
+app.get('/api/v1/client/orders/:id', h);
+app.get('/api/v1/client/sites/:id/stock', h);
+""",
+    )
+    _write(web, "tsconfig.json", '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }\n')
+    _write(
+        web,
+        "src/lib/base.ts",
+        """
+const API_URL = import.meta.env.VITE_API_URL;
+export const base = () => `${API_URL}/api/v1/client`;
+""",
+    )
+    _write(
+        web,
+        "src/lib/paths.ts",
+        """
+import { base } from '@/lib/base';
+
+export const site = (siteId: string) => `/sites/${encodeURIComponent(siteId)}`;
+export const paths = { order: (id: string) => `/orders/${id}` };
+export const siteStock = (siteId: string) => `${base()}/sites/${siteId}/stock`;
+""",
+    )
+    _write(
+        web,
+        "src/screens.ts",
+        """
+import axios from 'axios';
+import { base } from '@/lib/base';
+import { paths, siteStock } from '@/lib/paths';
+import * as P from '@/lib/paths';
+
+const http = axios.create();
+
+export const listSiteOrders = (siteId: string) => http.get(`${base()}${P.site(siteId)}/orders`);
+export const siteSummary = (siteId: string) => http.get(base() + P.site(siteId) + '/summary');
+export const getOrder = (id: string) => http.get(`${base()}${paths.order(id)}`);
+export const getStock = (siteId: string) => http.get(siteStock(siteId));
+""",
+    )
+    graph = scan_paths([web, api], config=tmp_path / "bizmap.yaml")
+    expected = {
+        "src.screens.listSiteOrders": "api/entrypoint:http:GET:/api/v1/client/sites/:id/orders",
+        "src.screens.siteSummary": "api/entrypoint:http:GET:/api/v1/client/sites/:id/summary",
+        "src.screens.getOrder": "api/entrypoint:http:GET:/api/v1/client/orders/:id",
+        "src.screens.getStock": "api/entrypoint:http:GET:/api/v1/client/sites/:id/stock",
+    }
+    for fn, ep in expected.items():
+        assert _calls(graph, fn) == {ep}, (fn, _calls(graph, fn), _unresolved(graph, fn))
+        assert _unresolved(graph, fn) == [], (fn, _unresolved(graph, fn))
+    for helper in ("src.lib.base.base", "src.lib.paths.site", "src.lib.paths.siteStock"):
+        assert _calls(graph, helper) == set(), helper
