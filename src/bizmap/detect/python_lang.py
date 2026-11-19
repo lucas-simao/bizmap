@@ -3749,6 +3749,24 @@ def _link_function_tables(analysis: PyAnalysis, parsed: list) -> None:
 _DISPATCH_SKIP_RECEIVERS = {"self", "cls", "super"}
 
 
+def _callable_refs(value: Node, module: str, imap: ImportMap, functions: dict) -> list[str]:
+    """A function reference, or the scanned functions a `lambda` value calls."""
+    ref = _fn_ref(value, module, imap, functions)
+    if ref:
+        return [ref]
+    if value.type != "lambda":
+        return []
+    out: list[str] = []
+    body = value.child_by_field_name("body")
+    for node in walk(body) if body is not None else []:
+        if node.type == "call":
+            func = node.child_by_field_name("function")
+            hit = _fn_ref(func, module, imap, functions) if func is not None else None
+            if hit and hit not in out:
+                out.append(hit)
+    return out
+
+
 def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
     functions = analysis.functions
     class_fields: dict[str, list[str]] = {}
@@ -3781,8 +3799,7 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                     continue
                 for i, arg in enumerate(call_posargs(node)):
                     if i < len(fields):
-                        ref = _fn_ref(arg, module, imap, functions)
-                        if ref:
+                        for ref in _callable_refs(arg, module, imap, functions):
                             field_targets.setdefault(fields[i], set()).add(ref)
                 args = node.child_by_field_name("arguments")
                 for kw in args.named_children if args is not None else []:
@@ -3792,8 +3809,7 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                     value = kw.child_by_field_name("value")
                     if name is None or value is None or text(name) not in fields:
                         continue
-                    ref = _fn_ref(value, module, imap, functions)
-                    if ref:
+                    for ref in _callable_refs(value, module, imap, functions):
                         field_targets.setdefault(text(name), set()).add(ref)
             elif node.type == "dictionary":
                 for pair in node.named_children:
@@ -3803,8 +3819,7 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                     value = pair.child_by_field_name("value")
                     if key is None or value is None or key.type != "string":
                         continue
-                    ref = _fn_ref(value, module, imap, functions)
-                    if ref:
+                    for ref in _callable_refs(value, module, imap, functions):
                         key_targets.setdefault(unquote(text(key)), set()).add(ref)
 
     if not field_targets and not key_targets:
@@ -3816,6 +3831,50 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
             fdef = fn.node
             if fdef.type == "decorated_definition":
                 fdef = fdef.child_by_field_name("definition") or fdef
+            def _field_targets_of(expr: Node | None) -> set[str]:
+                """`x["k"]`, `x.get("k")`, `x.k`, `getattr(x, "k")` → functions stored under k."""
+                if expr is None:
+                    return set()
+                if expr.type == "subscript":
+                    sub = expr.child_by_field_name("subscript")
+                    if sub is not None and sub.type == "string":
+                        return key_targets.get(unquote(text(sub)), set())
+                if expr.type == "call" and call_callee_name(expr) == "get":
+                    pos = call_posargs(expr)
+                    func_ = expr.child_by_field_name("function")
+                    if (
+                        pos
+                        and pos[0].type == "string"
+                        and func_ is not None
+                        and func_.type == "attribute"
+                    ):
+                        return key_targets.get(unquote(text(pos[0])), set())
+                if expr.type == "call" and call_callee_name(expr) == "getattr":
+                    pos = call_posargs(expr)
+                    if len(pos) >= 2 and pos[1].type == "string":
+                        k = unquote(text(pos[1]))
+                        return field_targets.get(k, set()) | key_targets.get(k, set())
+                if expr.type == "attribute":
+                    obj_ = expr.child_by_field_name("object")
+                    attr_ = expr.child_by_field_name("attribute")
+                    name_ = text(attr_) if attr_ is not None else ""
+                    if (
+                        name_ in field_targets
+                        and name_ not in method_names
+                        and not (obj_ is not None and text(obj_) in _DISPATCH_SKIP_RECEIVERS)
+                    ):
+                        return field_targets[name_]
+                return set()
+
+            local_alias: dict[str, set[str]] = {}
+            for node in walk(fdef):
+                if node.type == "assignment":
+                    left = node.child_by_field_name("left")
+                    right = node.child_by_field_name("right")
+                    if left is not None and left.type == "identifier":
+                        found = _field_targets_of(right)
+                        if found:
+                            local_alias[text(left)] = found
             for node in walk(fdef):
                 if node.type != "call":
                     continue
@@ -3826,7 +3885,11 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                 targets: set[str] = set()
                 if func is None:
                     continue
-                if func.type == "attribute":
+                if func.type == "identifier" and text(func) in local_alias:
+                    targets = local_alias[text(func)]
+                elif func.type == "call" and call_callee_name(func) == "get":
+                    targets = _field_targets_of(func)
+                elif func.type == "attribute":
                     obj = func.child_by_field_name("object")
                     attr = func.child_by_field_name("attribute")
                     name = text(attr) if attr is not None else ""

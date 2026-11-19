@@ -186,3 +186,66 @@ def runner(worker, conn):
     # `worker.run(...)` keeps the older object-dispatch behavior: every
     # structural implementer is listed as an inferred candidate.)
     assert function_id("builders._build_sales") not in _callees(graph, "svc.Worker.go")
+
+
+def test_query_function_in_config_roster_reaches_its_table(tmp_path: Path) -> None:
+    """Evaluation item: a route reached 2 of 3 tables because the `identity`
+    query function lives in a configuration dict / roster."""
+    _write(
+        tmp_path,
+        "schema.sql",
+        SCHEMA + "CREATE TABLE properties (id text, owner text, active boolean);\n",
+    )
+    _write(tmp_path, "builders.py", BUILDERS)
+    _write(
+        tmp_path,
+        "roster.py",
+        """
+from fastapi import FastAPI
+from sqlalchemy import text
+
+import builders
+
+app = FastAPI()
+
+
+def _identity(conn, pid):
+    return conn.execute(text("SELECT id, owner FROM properties WHERE id = :p AND active"), {"p": pid})
+
+
+ROSTER = {
+    "identity": {"label": "Identity", "query": _identity},
+    "sales": {"label": "Sales", "query": lambda conn, pid: builders._build_sales(conn)},
+    "stock": {"label": "Stock", "query": builders._build_stock},
+}
+
+
+def section(kind, conn, pid):
+    cfg = ROSTER[kind]
+    q = cfg["query"]
+    return q(conn, pid)
+
+
+def section_get(kind, conn, pid):
+    return ROSTER[kind].get("query")(conn, pid)
+
+
+def section_direct(kind, conn, pid):
+    return ROSTER[kind]["query"](conn, pid)
+
+
+@app.get("/properties/{pid}/report")
+def report(pid: str, conn=None):
+    return [section(k, conn, pid) for k in ("identity", "sales", "stock")]
+""",
+    )
+    graph = scan_path(tmp_path)
+    for fn in ("roster.section", "roster.section_get", "roster.section_direct"):
+        callees = _callees(graph, fn)
+        assert {
+            function_id("roster._identity"),
+            function_id("builders._build_sales"),
+            function_id("builders._build_stock"),
+        } <= callees, (fn, callees)
+    reach = _reach(graph, "entrypoint:http:GET:/properties/{pid}/report")
+    assert {"table:properties", "table:sales", "table:stock"} <= reach, reach
