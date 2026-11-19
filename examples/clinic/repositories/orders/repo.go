@@ -16,6 +16,15 @@ func New(db *pgxpool.Pool) *Repo {
 	return &Repo{db: db}
 }
 
+func (r *Repo) BindTenant(ctx context.Context, clinicID string) error {
+	_, err := r.db.Exec(ctx, `SELECT set_config('app.clinic_id', $1, true)`, clinicID)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Query(ctx, `SELECT now()`)
+	return err
+}
+
 func (r *Repo) Create(ctx context.Context, id, patientID string) error {
 	_, err := r.db.Exec(ctx, `
 INSERT INTO appointments (id, patient_id, status)
@@ -30,6 +39,24 @@ SELECT d.status
 FROM appointments a
 JOIN LATERAL (SELECT status FROM appointments x WHERE x.id = a.id) d ON true
 `)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Query(ctx, `
+SELECT l.*
+FROM appointments a
+JOIN LATERAL (SELECT a.id AS aid, a.status) l ON true
+`)
+	return err
+}
+
+func (r *Repo) Files(ctx context.Context, id string) error {
+	_, err := r.db.Query(ctx, `
+SELECT files.file_id
+FROM (
+    SELECT file_id FROM attachments WHERE appointment_id = $1
+) files
+`, id)
 	return err
 }
 

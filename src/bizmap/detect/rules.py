@@ -89,17 +89,21 @@ def load_rules(extra_dirs: list[Path] | None = None) -> list[Rule]:
 
 
 def method_matches(name: str, spec: dict[str, Any] | None) -> bool:
+    """Match a call/decorator name against a rule spec.
+
+    Names in ``in`` are matched **exactly** (case-sensitive). HTTP route
+    rules therefore list ``GET`` not ``get``; FastAPI lists ``get``.
+    """
     if not spec:
         return True
-    name_u = name
     allowed = [str(x) for x in _as_list(spec.get("in"))]
-    if allowed and name_u not in allowed and name_u.lower() not in [a.lower() for a in allowed]:
+    if allowed and name not in allowed:
         return False
     regex = spec.get("regex")
     if regex:
         import re
 
-        if not re.search(regex, name_u):
+        if not re.search(regex, name):
             return False
     return True
 

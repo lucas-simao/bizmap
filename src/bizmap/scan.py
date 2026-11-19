@@ -19,7 +19,7 @@ from bizmap.graph import (
 )
 from bizmap.overrides import apply_overrides, load_scan_config
 from bizmap.schema_replay import Schema, replay_files
-from bizmap.sql_analyze import SqlAccess, analyze_sql, is_external_table
+from bizmap.sql_analyze import SqlAccess, analyze_sql, is_external_table, is_skipped_table_name
 
 
 def _add_schema_nodes(graph: Graph, schema: Schema) -> None:
@@ -55,6 +55,8 @@ def _ensure_access_target(graph: Graph, schema: Schema, access: SqlAccess) -> st
         )
         return "table:unknown"
     tname = access.table.lower()
+    if is_skipped_table_name(tname):
+        return None
     known = tname in {t.lower() for t in schema.tables}
     external = access.external or is_external_table(tname)
     if external:
@@ -126,11 +128,17 @@ def _propagate(
     schema: Schema,
     job_functions: set[str],
 ) -> None:
-    """Copy origin accesses up the call graph as **table-level** inferred edges."""
+    """Copy origin accesses up the call graph as **table-level** inferred edges.
+
+    Dynamic-table / ``table:unknown`` accesses stay on the origin function
+    only — they must not flood every caller and HTTP route.
+    """
     table_accesses: list[tuple[str, SqlAccess]] = []
     seen_tables: set[tuple[str, str]] = set()
     for access in accesses:
         tname = "unknown" if access.unknown_table or not access.table else access.table.lower()
+        if access.unknown_table or tname == "unknown":
+            continue
         key = (_kind_edge(access.kind), tname)
         if key in seen_tables:
             continue
@@ -204,7 +212,9 @@ def _apply_go(
             confidence=conf,
             evidence=ev,
         )
-        reverse[callee].add(caller)
+        # Ambiguous/unknown call edges do not propagate table reads/writes.
+        if conf != Confidence.UNKNOWN:
+            reverse[callee].add(caller)
 
     entrypoints_by_handler: dict[str, list[str]] = defaultdict(list)
     job_functions: set[str] = {j.handler.qualname for j in analysis.jobs}
@@ -216,9 +226,7 @@ def _apply_go(
         conf = route.confidence
         if route.path_confidence == Confidence.UNKNOWN:
             conf = Confidence.UNKNOWN
-        graph.add_node(
-            eid,
-            "entrypoint",
+        node_kwargs: dict = dict(
             kind="http",
             method=route.method,
             path=route.path,
@@ -228,6 +236,9 @@ def _apply_go(
             candidates=list(route.candidates or []),
             evidence=route.evidence.to_dict(),
         )
+        if getattr(route, "path_unresolved", False):
+            node_kwargs["unresolved"] = True
+        graph.add_node(eid, "entrypoint", **node_kwargs)
         if handler:
             graph.add_edge(
                 "triggers",
@@ -467,9 +478,10 @@ def scan_path(
     extra_rules: list[Path] | None = None,
     expand_star: bool | None = None,
     exclude: list[str] | None = None,
+    config: Path | None = None,
 ) -> Graph:
     root = root.resolve()
-    cfg = load_scan_config(root)
+    cfg = load_scan_config(root, config=config)
     exclude_pats = list(cfg.exclude)
     if exclude:
         exclude_pats.extend(exclude)

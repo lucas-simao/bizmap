@@ -224,18 +224,11 @@ class PythonAnalyzer:
                     method = call_callee_name(node)
                     args = call_args(node)
                     evidence = Evidence(file=rel_file, line=line_of(node), symbol=fn.qualname)
-                    # same-module call graph
+                    # same-module call graph only (unique within the resolved module)
                     if method in by_local and by_local[method].qualname != fn.qualname:
                         analysis.calls.append(
                             (fn.qualname, by_local[method].qualname, evidence, Confidence.INFERRED)
                         )
-                    else:
-                        # unique across project
-                        matches = [f for f in analysis.functions.values() if f.name == method]
-                        if len(matches) == 1 and matches[0].qualname != fn.qualname:
-                            analysis.calls.append(
-                                (fn.qualname, matches[0].qualname, evidence, Confidence.INFERRED)
-                            )
 
                     for rule in sql_rules:
                         if not method_matches(method, (rule.detect.get("calls") or {}).get("method")):

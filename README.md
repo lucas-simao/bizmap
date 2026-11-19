@@ -45,7 +45,10 @@ uv run bizmap why orders.status
 `--mermaid` is an **entrypoint → table** rollup (readable on large apps).
 Use `--mermaid-focus orders` for the neighborhood of one table, and
 `--expand-star` only if you want `SELECT *` expanded to schema columns at the
-SQL origin. `exclude` globs in `bizmap.yaml` skip seed/demo trees.
+SQL origin.
+
+`bizmap.yaml` is loaded from `--config path`, else the scan root, else the
+git toplevel. `exclude` globs skip seed/demo trees inside the scan root.
 
 ### Example `why` output
 
@@ -88,30 +91,41 @@ flowchart LR
   GET_stock -->|reads inferred| inventory
 ```
 
-## How it works (v0.1.1)
+## How it works (v0.1.2)
 
 1. **Schema replayer** — applies `schema.sql` / migration folders in order
    (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`,
    drop/add constraints, `DO $$` blocks) and extracts `CREATE TRIGGER` plus the
    tables/columns their plpgsql functions write.
 2. **Go detector** — Echo v4 routes (`group.POST(path, handler)` with group
-   prefixes, cross-package consts, and factory handlers), pgx v5
-   `tx.Exec|Query|QueryRow(ctx, sql, args)`, and **any** `go` statement whose
-   target uses `time.NewTicker` / `time.Tick` / `time.After` loops or a cron
-   library. Packages are keyed by import path; methods by
-   `(import-path, Type, Method)`.
+   prefixes, cross-package consts, factory handlers, and wrappers such as
+   `wrap(h.Version)`). Method names must be exactly `GET`/`POST`/…/`Any`/`Match`
+   with a string-like path. pgx v5 `tx.Exec|Query|QueryRow(ctx, sql, args)`,
+   and **any** `go` statement whose target uses `time.NewTicker` / `time.Tick`
+   / `time.After` loops or a cron library. Packages are keyed by import path;
+   display names are always the directory relative to the scan root.
 3. **Call graph** — handler → service → repository using typed locals,
-   constructors, and import aliases. Unscanned/unknown receivers are left
-   unresolved (no unique-name fallback). Reads/writes propagate to HTTP and
-   job entrypoints as table-level `inferred` edges.
+   constructors, import aliases, and injected func fields
+   (`Service{ring: notify.Send}`). Unscanned/unknown receivers stay unresolved
+   (no unique-name fallback). Inferred calls require a unique callee inside
+   the resolved package/type set. Reads/writes propagate to HTTP and job
+   entrypoints as table-level `inferred` edges; `table:unknown` does not.
 4. **SQL** — named columns stay column-level; `SELECT *` and column-less
-   INSERT are table-level. CTE/subquery aliases and catalogs like `pg_roles`
-   are not app tables.
+   INSERT are table-level. FROM-less SELECT (`now()`, `set_config`) touches
+   no table. CTE/subquery/LATERAL aliases and catalogs like `pg_roles` are
+   not app tables.
 5. **Python detector** — enough FastAPI + SQL-literal capture to map a worker
    that reads the same tables. SQLAlchemy `text()`/`execute()` is wired;
    Express is a YAML stub for v0.2.
-6. **Overrides** — `bizmap.yaml` next to the tree fills in `why`, extra
-   edges, `exclude` globs, and `expand_star`.
+6. **Overrides** — `bizmap.yaml` (`--config`, scan root, or git toplevel)
+   fills in `why`, extra edges, `exclude` globs, and `expand_star`.
+
+### Performance
+
+v0.1.2 caches per-function local type maps so call resolution stays close to
+v0.1 speed. On the synthetic fixtures, `bizmap scan examples/shop` and
+`examples/clinic` finish in tens of milliseconds on a laptop; the cache is
+aimed at large trees where v0.1.1 walked types on every call.
 
 Graph format: [docs/graph-schema.md](docs/graph-schema.md).  
 YAML rule format: [docs/detector-rules.md](docs/detector-rules.md).  

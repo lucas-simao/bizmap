@@ -35,6 +35,7 @@ func handleSetup() {}
     assert route.path.endswith("/setup")
     assert route.path != "/setup"
     assert route.path_confidence == Confidence.UNKNOWN
+    assert route.path_unresolved is True
 
 
 def test_ambiguous_handler_is_unknown_with_candidates(tmp_path: Path) -> None:

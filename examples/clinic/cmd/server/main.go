@@ -12,6 +12,7 @@ import (
 	userctrl "clinic/controllers/users"
 	"clinic/emailprefs"
 	"clinic/jobs"
+	"clinic/notify"
 	"clinic/profile"
 	orderrepo "clinic/repositories/orders"
 	userrepo "clinic/repositories/users"
@@ -25,7 +26,7 @@ func main() {
 	pool, _ := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
 	orepo := orderrepo.New(pool)
 	urepo := userrepo.New(pool)
-	osvc := ordersvc.New(orepo)
+	osvc := ordersvc.New(orepo, notify.Send)
 	usvc := usersvc.New(urepo)
 	oh := orderctrl.New(osvc)
 	uh := userctrl.New(usvc)
@@ -37,6 +38,7 @@ func main() {
 	g.GET("/appointments", oh.List)
 	g.GET("/appointments/:id", oh.Get)
 	g.PATCH("/appointments/:id", oh.Update)
+	g.GET("/version", orderctrl.Wrap(oh.Version))
 	g.POST("/patients", uh.Create)
 	g.GET("/patients", uh.List)
 	g.GET("/patients/:id", uh.Get)

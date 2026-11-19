@@ -24,16 +24,49 @@ class ScanConfig:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-def find_overrides(root: Path) -> Path | None:
+def git_toplevel(start: Path) -> Path | None:
+    """Return the git working tree root that contains ``start``, if any."""
+    cur = start.resolve()
+    for parent in [cur, *cur.parents]:
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
+def _yaml_in(directory: Path) -> Path | None:
     for name in ("bizmap.yaml", "bizmap.yml"):
-        candidate = root / name
+        candidate = directory / name
         if candidate.is_file():
             return candidate
     return None
 
 
-def load_scan_config(root: Path) -> ScanConfig:
-    path = find_overrides(root)
+def find_overrides(root: Path, config: Path | None = None) -> Path | None:
+    """Locate bizmap.yaml.
+
+    Search order: explicit ``--config`` path, the scan root, then the git
+    toplevel (so excludes work when scanning a subdirectory).
+    """
+    if config is not None:
+        path = config.expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        else:
+            path = path.resolve()
+        if path.is_file():
+            return path
+        return None
+    found = _yaml_in(root.resolve())
+    if found is not None:
+        return found
+    git_root = git_toplevel(root)
+    if git_root is not None and git_root != root.resolve():
+        return _yaml_in(git_root)
+    return None
+
+
+def load_scan_config(root: Path, config: Path | None = None) -> ScanConfig:
+    path = find_overrides(root, config=config)
     if path is None:
         return ScanConfig()
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
