@@ -979,7 +979,9 @@ class JsAnalyzer:
             for _p, _rf, module, tree, _src in parsed:
                 consts = consts_by_mod.get(module) or {}
                 for key, value in _collect_path_helpers(tree, consts).items():
-                    consts.setdefault(key, value)
+                    # later rounds see imported helpers: their value is more
+                    # complete (`{base()}/x` → `{VITE_API_URL}/api/v1/client/x`)
+                    consts[key] = value
             _import_path_helpers(consts_by_mod, import_specs_by_mod)
         for _path, _rel_file, module, tree, _src in parsed:
             mounts.extend(

@@ -172,10 +172,12 @@ def test_single_segment_suffix_needs_method_hint(tmp_path: Path) -> None:
         tmp_path,
         {
             "src/list.ts": """
+import { container } from './container';
+
 export const ORDERS_KEY = '/orders';
 
-export async function listOrders(client: any) {
-  return client.get('/orders');
+export async function listOrders() {
+  return container.resolve('http').get('/orders');
 }
 """,
         },
@@ -217,7 +219,7 @@ def test_literal_clears_matching_unresolved_http(tmp_path: Path) -> None:
         {
             "src/orders.ts": """
 export async function loadOrder(id: string) {
-  const res = await fetch(`${window.__CONFIG__.apiBase}/orders/${id}`);
+  const res = await fetch(`${window.__CONFIG__.apiBase}/api/v1/orders/${id}`);
   return res.json();
 }
 """,
@@ -409,8 +411,10 @@ app.get('/api/v1/items/:id', bffItem);
         web,
         "src/screens.ts",
         """
-export async function loadItem(http: any, id: string) {
-  return http.get(`/items/${id}`);
+import { container } from './container';
+
+export async function loadItem(id: string) {
+  return container.resolve('http').get(`/items/${id}`);
 }
 """,
     )
@@ -545,7 +549,7 @@ from fastapi import FastAPI
 app = FastAPI()
 
 
-@app.get("/api/v1/items/{item_id}")
+@app.get("/v1/items/{item_id}")
 def item(item_id: str):
     return {}
 """,
@@ -553,7 +557,7 @@ def item(item_id: str):
     graph = scan_paths([web, api])
     assert _calls_http_from(graph, function_id("src.paths.itemPath")) == set()
     hits = _calls_http_from(graph, function_id("src.items.getItem"))
-    assert hits == {"api/entrypoint:http:GET:/api/v1/items/{item_id}"}, hits
+    assert hits == {"api/entrypoint:http:GET:/v1/items/{item_id}"}, hits
 
 
 def test_uncalled_helper_keeps_its_literal(tmp_path: Path) -> None:
@@ -734,9 +738,11 @@ def test_module_const_literal_origin_is_the_function(tmp_path: Path) -> None:
 const REPORT = '/v1/report-video';
 const DIRECT = '/v1/reports/latest';
 
+import { container } from './c';
+
 export async function handle(req: any) {
-  const r = await fetch(window.__cfg.base + REPORT);
-  return r.json();
+  const r = await container.resolve('http').get(window.__cfg.base + REPORT);
+  return r.data;
 }
 
 export async function latest(http: any) {
