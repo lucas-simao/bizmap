@@ -30,3 +30,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     action TEXT NOT NULL,
     payload JSONB
 );
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id BIGSERIAL PRIMARY KEY,
+    body TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS attachments (
+    id UUID PRIMARY KEY,
+    appointment_id UUID NOT NULL,
+    file_id UUID NOT NULL
+);

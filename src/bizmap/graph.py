@@ -102,7 +102,7 @@ class Graph:
     """Lineage graph: nodes + edges + reconstructed schema."""
 
     def __init__(self) -> None:
-        self.version = "0.1.1"
+        self.version = "0.1.2"
         self.generated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.schema: dict[str, Any] = {"tables": {}}
         self.nodes: dict[str, Node] = {}
@@ -186,7 +186,7 @@ class Graph:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Graph:
         graph = cls()
-        graph.version = str(data.get("version") or "0.1.1")
+        graph.version = str(data.get("version") or "0.1.2")
         graph.generated_at = str(data.get("generated_at") or graph.generated_at)
         graph.schema = data.get("schema") or {"tables": {}}
         for raw in data.get("nodes") or []:

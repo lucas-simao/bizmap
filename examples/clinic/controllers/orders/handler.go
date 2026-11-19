@@ -27,8 +27,23 @@ func NewHandler(svc *ordersvc.Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// Wrap is a handler wrapper: Echo registers wrap(h.Version), not Wrap itself.
+func Wrap(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		return next(c)
+	}
+}
+
+// options is a lowercase helper — must not be detected as HTTP OPTIONS.
+func (h *Handler) options(c echo.Context, allow string) {
+	_ = h
+	_ = c
+	_ = allow
+}
+
 // Create books a new appointment.
 func (h *Handler) Create(c echo.Context) error {
+	h.options(c, "GET,POST")
 	_ = mw.Current(c.Param("id"))
 	if h.clock != nil {
 		_ = h.clock.Now()
@@ -37,6 +52,12 @@ func (h *Handler) Create(c echo.Context) error {
 		return err
 	}
 	return c.NoContent(http.StatusCreated)
+}
+
+// Version is registered through Wrap and does not touch a table.
+func (h *Handler) Version(c echo.Context) error {
+	_ = h
+	return c.NoContent(http.StatusOK)
 }
 
 // List returns appointments for the front desk.

@@ -65,6 +65,13 @@ def main() -> None:
     multiple=True,
     help="Extra YAML detector-rule files or directories (repeatable).",
 )
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to bizmap.yaml (default: scan root, then git toplevel).",
+)
 def scan_cmd(
     path: Path,
     out_path: Path,
@@ -73,12 +80,14 @@ def scan_cmd(
     mermaid_limit: int,
     expand_star: bool,
     rules_dirs: tuple[Path, ...],
+    config_path: Path | None,
 ) -> None:
     """Scan a codebase and write bizmap.graph.json."""
     graph = scan_path(
         path,
         extra_rules=list(rules_dirs) or None,
         expand_star=True if expand_star else None,
+        config=config_path,
     )
     payload = graph.to_dict()
     out_path.parent.mkdir(parents=True, exist_ok=True)

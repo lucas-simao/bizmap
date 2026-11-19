@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.1.2 — 2026-11-19
+
+Precision fixes after a private evaluation of v0.1.1 on a real Echo + pgx
+codebase. Behavior is generic; tests and fixtures are synthetic only
+(`examples/shop`, `examples/clinic`, tmp fixtures).
+
+### Fixed
+
+- **FROM-less SELECT** (`SELECT now()`, `SELECT set_config(...)`) is not a
+  dynamic table. Functions are never tables. `table:unknown` and other
+  dynamic-table nodes stay on the origin function and are not copied up
+  the call graph or onto HTTP/job entrypoints.
+- **Qualified names** always use the directory path relative to the scan
+  root (`cmd/server.main`, `internal/services/appointments.Service.Run`).
+  A package no longer has two spellings (clause vs dir prefix).
+- **HTTP routes** match method names exactly (`GET`, `POST`, `PUT`,
+  `PATCH`, `DELETE`, `OPTIONS`, `HEAD`, `Any`, `Match`) and require a
+  string-like path. Lowercase helpers such as `h.options(c, ...)` are not
+  routes.
+- **Const route paths** resolve across scanned packages (import path, then
+  unique suffix). Unscanned consts keep the `{pkg.Name}` placeholder and
+  set `unresolved: true` on the entrypoint.
+- **Function-field dispatch**: `s.ring(...)` follows the single function
+  assigned in a composite literal or constructor (`Service{ring: notify.Send}`
+  / `New(repo, notify.Send)`). Ambiguous assignments stay unresolved.
+- **Subquery / LATERAL / CTE alias outputs** (`l`, `r`, `l.*`,
+  `files.file_id`) never become table or column nodes. Only DDL-known or
+  clearly-real tables/columns do.
+- **Inferred calls** are created only when the callee is unique within the
+  resolved package/type set. Unknown receivers do not pick a globally
+  unique method or propagate its table edges.
+- **Wrapped handlers** (`wrap(h.Version)`, `mw(handler)`) unwrap to the
+  inner func/method. Factories that take data (`StaffPhoto(cfg)`) still
+  resolve to the factory.
+- **`bizmap.yaml` lookup**: `--config path`, then the scan root, then the
+  git toplevel. Excludes apply to the scanned tree.
+
+### Performance
+
+Per-function `_local_types` (and per-file types) are cached so call
+resolution stays close to v0.1 speed.
+
 ## 0.1.1 — 2026-11-19
 
 Go resolution accuracy fixes after a private evaluation of v0.1 against a

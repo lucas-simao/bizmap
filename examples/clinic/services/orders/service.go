@@ -7,17 +7,26 @@ import (
 	orderrepo "clinic/repositories/orders"
 )
 
+type Notifier func(ctx context.Context, msg string) error
+
 type Service struct {
 	repo *orderrepo.Repo
+	ring Notifier
 }
 
-func New(repo *orderrepo.Repo) *Service {
-	return &Service{repo: repo}
+func New(repo *orderrepo.Repo, ring Notifier) *Service {
+	return &Service{repo: repo, ring: ring}
 }
 
 func (s *Service) Create(ctx context.Context, id, patientID string) error {
+	if err := s.repo.BindTenant(ctx, patientID); err != nil {
+		return err
+	}
 	if err := s.repo.Create(ctx, id, patientID); err != nil {
 		return err
+	}
+	if s.ring != nil {
+		_ = s.ring(ctx, id)
 	}
 	return s.repo.WriteAudit(ctx, orderrepo.AuditRow{Action: audit.AppointmentCreated})
 }

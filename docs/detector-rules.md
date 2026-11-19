@@ -66,28 +66,34 @@ String arguments are resolved from:
 Anything involving a non-literal identifier is marked `unknown`. Truncated
 paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
 
-## Go resolution (v0.1.1)
+## Go resolution (v0.1.2)
 
-- Packages are keyed by **import path** (`module` from `go.mod` + directory),
-  not the `package` clause. `repositories/foo` and `services/foo` can both
-  define `Create` without colliding.
+- Function **display names** are the directory relative to the scan root,
+  always (`internal/services/appointments.Service.Run`). Packages are still
+  keyed by **import path** for resolution.
 - Calls and Echo handlers resolve through each file's import aliases.
 - Method values (`h.Create`) use a `(import-path, Type, Method)` key after
   inferring `h` from constructors, composite literals, parameters, and struct
   fields. There is **no** `matches[0]` fallback on name collisions.
 - Import-alias or unknown-receiver calls (`middleware.Current(c)`, `s.Now()`)
   stay unresolved when the package is unscanned or the type is unknown.
-  Unique method names in unrelated packages are not used as a fallback.
-- A handler argument that is a **call** (`profile.StaffPhoto(cfg)`) resolves
-  to the factory function; SQL in the returned closure is attributed to it.
+  Inferred call edges require a unique callee inside that package/type set
+  and do not propagate table edges otherwise.
+- Injected **func fields** (`s.ring(...)` with `Service{ring: notify.Send}` or
+  a constructor argument) resolve to the single assigned function.
+- A handler argument that is a **call** unwraps to an inner func/method
+  (`wrap(h.Version)`, `mw(handler)`). Factories that take data
+  (`profile.StaffPhoto(cfg)`) still resolve to the factory.
+- Echo methods match **exactly** (`GET`, not `options`). The path argument
+  must be string-like (literal, const, or concatenation).
 - `func main` is not a writer entrypoint unless it is a detected job or route.
-  `exclude` globs in `bizmap.yaml` skip seed/demo trees.
+  `bizmap.yaml` is found via `--config`, the scan root, or the git toplevel.
 
-## Bundled rules (v0.1.1)
+## Bundled rules (v0.1.2)
 
 | File | Status | What it detects |
 | --- | --- | --- |
-| `echo.yaml` | active | Echo v4 `group.POST("/path", handler)` (literals, consts, factories) |
+| `echo.yaml` | active | Echo v4 `group.POST("/path", handler)` (literals, consts, factories, wrappers; `Any`/`Match`) |
 | `pgx.yaml` | active | pgx v5 `Exec` / `Query` / `QueryRow` SQL |
 | `go_ticker.yaml` | active | Any `go` statement whose target uses ticker/cron patterns |
 | `fastapi.yaml` | active | FastAPI `@app.get("/path")` |

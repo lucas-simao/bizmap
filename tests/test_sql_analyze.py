@@ -89,3 +89,33 @@ def test_looks_like_sql() -> None:
     assert looks_like_sql("SELECT 1")
     assert looks_like_sql("\nINSERT INTO t VALUES (1)")
     assert not looks_like_sql("/api/orders")
+
+
+def test_fromless_select_is_not_a_table() -> None:
+    for sql in (
+        "SELECT now()",
+        "SELECT set_config('app.clinic_id', $1, true)",
+        "SELECT 1",
+    ):
+        acc = analyze_sql(sql, known_tables={"appointments", "patients"})
+        assert acc == [], sql
+
+
+def test_subquery_alias_output_is_not_a_table() -> None:
+    acc = analyze_sql(
+        "SELECT files.file_id FROM (SELECT file_id FROM attachments WHERE appointment_id = $1) files",
+        schema_columns={"attachments": ["id", "appointment_id", "file_id"]},
+    )
+    tables = {a.table.lower() for a in acc}
+    assert "files" not in tables
+    assert "attachments" in tables
+    assert not any(a.table.lower() == "files" for a in acc)
+
+
+def test_lateral_star_alias_is_not_a_table() -> None:
+    acc = analyze_sql(
+        "SELECT l.* FROM appointments a JOIN LATERAL (SELECT a.id AS aid, a.status) l ON true"
+    )
+    tables = {a.table.lower() for a in acc}
+    assert "l" not in tables
+    assert "appointments" in tables

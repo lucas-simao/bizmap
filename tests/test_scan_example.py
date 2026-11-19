@@ -55,7 +55,7 @@ def test_scan_shop_example_graph(example_root: Path) -> None:
     assert _edge(graph, "triggers", ep, handler) is not None
 
     # starting the goroutine from main is not a synchronous writer
-    assert _edge(graph, "writes", function_id("main.main"), column_id("orders", "status")) is None
+    assert _edge(graph, "writes", function_id("cmd/shop.main"), column_id("orders", "status")) is None
 
     # job writes orders.status
     expire_fn = function_id("repository.Repo.ExpirePendingOrders")
@@ -118,7 +118,7 @@ def test_cli_scan_and_why(example_root: Path, tmp_path: Path) -> None:
     mmd = out.with_suffix(".mmd").read_text(encoding="utf-8")
     assert "flowchart LR" in mmd
     data = json.loads(out.read_text(encoding="utf-8"))
-    assert data["version"] == "0.1.1"
+    assert data["version"] == "0.1.2"
     assert data["nodes"]
     assert data["schema"]["tables"]["orders"]
 

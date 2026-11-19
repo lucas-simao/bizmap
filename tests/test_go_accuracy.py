@@ -29,6 +29,7 @@ EXPECTED_ROUTES = {
     ("POST", "/api/pending/setup"): "controllers/orders.Handler.Setup",
     ("GET", "/email-prefs"): "controllers/users.Handler.Prefs",
     ("GET", "/profile/photo"): "profile.StaffPhoto",
+    ("GET", "/api/version"): "controllers/orders.Handler.Version",
 }
 
 EXPECTED_TABLES = {
@@ -63,7 +64,9 @@ def test_clinic_route_handlers_and_tables(clinic_root: Path) -> None:
         assert node.attrs.get("confidence", "exact") != "unknown" or path.startswith("{")
         trig = _edge(graph, "triggers", node.id, function_id(handler))
         assert trig is not None, f"{method} {path} did not trigger {handler}"
-        table = EXPECTED_TABLES[handler]
+        table = EXPECTED_TABLES.get(handler)
+        if table is None:
+            continue
         # origin SQL may be column-level; propagation to the handler is table-level
         assert (
             _edge(graph, "writes", function_id(handler), table_id(table)) is not None
@@ -81,7 +84,7 @@ def test_clinic_route_handlers_and_tables(clinic_root: Path) -> None:
         for n in graph.nodes.values()
         if n.type == "entrypoint" and n.attrs.get("kind") == "http"
     ]
-    assert len(http_eps) == 10
+    assert len(http_eps) == 11
 
     # Same-named packages stay distinct.
     assert function_id("controllers/orders.Handler.Create") in graph.nodes
@@ -133,8 +136,8 @@ def test_clinic_jobs_and_exclude_and_main(clinic_root: Path) -> None:
         assert "cmd/seed" not in str(file)
         assert not str(file).startswith("demo/")
 
-    # main.main is not a writer entrypoint.
-    main_fn = function_id("main.main")
+    # cmd/server.main is not a writer entrypoint (dir-relative qualname).
+    main_fn = function_id("cmd/server.main")
     assert not any(
         e.from_id == main_fn and e.type in {"reads", "writes"} for e in graph.edges.values()
     )
@@ -148,7 +151,11 @@ def test_clinic_phantoms_star_and_situations(clinic_root: Path) -> None:
     assert "last" not in table_names
     assert "l" not in table_names
     assert "d" not in table_names
+    assert "r" not in table_names
+    assert "files" not in table_names
     assert "set" not in table_names
+    assert not any(n.startswith("column:files.") for n in graph.nodes)
+    assert not any(n.startswith("column:l.") for n in graph.nodes)
     assert "unknown" in table_names or "table:unknown" in graph.nodes
 
     pg = graph.get(table_id("pg_roles"))
@@ -217,3 +224,11 @@ def test_clinic_cross_package_const_paths(clinic_root: Path) -> None:
     # Truncated leftovers from dropping the const must not appear as their own routes.
     assert _http(graph, "POST", "/setup") is None
     assert _http(graph, "POST", "/api/setup") is None
+    wrap = _http(graph, "GET", "/api/version")
+    assert wrap is not None
+    assert wrap.attrs.get("symbol") == "controllers/orders.Handler.Version"
+    assert not any(
+        n.attrs.get("method") == "OPTIONS" and "{c}" in str(n.attrs.get("path"))
+        for n in graph.nodes.values()
+        if n.type == "entrypoint"
+    )

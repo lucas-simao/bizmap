@@ -266,26 +266,47 @@ def _alias_name(node: exp.Expression | None) -> str:
     return ""
 
 
+def _alias_ident(node: exp.Expression | str | None) -> str:
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node.lower()
+    name = _alias_name(node) if isinstance(node, exp.Expression) else ""
+    if name:
+        return name
+    ident = _ident(node)
+    if ident:
+        return ident.lower()
+    this = getattr(node, "this", None)
+    if this is not None and this is not node:
+        return _ident(this).lower()
+    return ""
+
+
 def _phantom_names(root: exp.Expression) -> set[str]:
-    """CTE / subquery / UDTF aliases that must not become table nodes."""
+    """CTE / subquery / LATERAL / UDTF aliases that must not become table nodes."""
     names: set[str] = set()
     for cte in root.find_all(exp.CTE):
         n = _ident(cte.args.get("alias") or cte.this)
         if n:
             names.add(n.lower())
     for sub in root.find_all(exp.Subquery):
-        n = _alias_name(sub)
+        n = _alias_ident(sub) or _alias_ident(sub.args.get("alias") if hasattr(sub, "args") else None)
         if n:
             names.add(n)
     for udtf in root.find_all(exp.UDTF):
-        n = _alias_name(udtf)
+        n = _alias_ident(udtf) or _alias_ident(udtf.args.get("alias") if hasattr(udtf, "args") else None)
         if n:
             names.add(n)
         inner = _ident(udtf.this) if hasattr(udtf, "this") else ""
-        if inner:
-            names.add(inner.lower())
+        # Function names (unnest, jsonb_each, ...) are not tables; skip
+        # copying the function identifier when it already lives in SKIP_TABLES.
+        if inner and inner.lower() not in SKIP_TABLES:
+            # LATERAL (subquery) AS alias: inner is a Select, not a table name.
+            if not isinstance(getattr(udtf, "this", None), (exp.Select, exp.Subquery, exp.Query)):
+                names.add(inner.lower())
     for unnest in root.find_all(exp.Unnest):
-        n = _alias_name(unnest)
+        n = _alias_ident(unnest)
         if n:
             names.add(n)
     return names
@@ -333,9 +354,16 @@ def _resolve_table(
             if rleaf in phantoms or rleaf in SQL_KEYWORDS:
                 return None
             return resolved
-        if key in phantoms:
+        if key in phantoms or leaf in phantoms:
             return None
-        return raw_table
+        # Unresolved qualifier: only accept it when it is a real FROM/JOIN
+        # table we already recorded. Never invent tables from subquery aliases
+        # such as ``files.file_id`` or ``l.*``.
+        real_leaves = {v.lower().split(".")[-1] for v in aliases.values()}
+        real_full = {v.lower() for v in aliases.values()}
+        if leaf in real_leaves or key in real_full:
+            return raw_table.split(".")[-1]
+        return None
     if fallback:
         return fallback
     real = {v for v in aliases.values() if v.lower().split(".")[-1] not in phantoms}
@@ -523,11 +551,29 @@ def _analyze_select(
     conf = Confidence.UNKNOWN if dynamic else Confidence.EXACT
     tables = _real_tables(aliases, phantoms)
     fallback = next(iter(tables)) if len(tables) == 1 else None
-    has_star = bool(list(stmt.find_all(exp.Star)))
-    if has_star:
+    star_on_real = False
+    for col in stmt.find_all(exp.Column):
+        if col.name != "*":
+            continue
+        qual = str(col.table or "").lower()
+        if qual and (qual in phantoms or qual.split(".")[-1] in phantoms):
+            continue
+        star_on_real = True
+        break
+    if not star_on_real:
+        for star in stmt.find_all(exp.Star):
+            parent = star.parent
+            qual = ""
+            if isinstance(parent, exp.Column):
+                qual = str(parent.table or "").lower()
+            if qual and (qual in phantoms or qual.split(".")[-1] in phantoms):
+                continue
+            star_on_real = True
+            break
+    if star_on_real:
         targets = [fallback] if fallback else list(tables)
         for table in targets:
-            if not table or is_skipped_table_name(table):
+            if not table or is_skipped_table_name(table) or table.lower().split(".")[-1] in phantoms:
                 continue
             if expand_star:
                 cols = (schema_columns or {}).get(table.lower(), []) if table else []
@@ -541,8 +587,15 @@ def _analyze_select(
     for col in stmt.find_all(exp.Column):
         if col.name == "*":
             continue
+        qual = str(col.table or "").lower()
+        if qual and (qual in phantoms or qual.split(".")[-1] in phantoms):
+            # Alias output (files.file_id, r.x) — inner query already recorded
+            # the real table/column. Never emit the alias as a table.
+            continue
         table = _resolve_table(col.table, aliases, fallback, phantoms)
-        if table is None and col.table and str(col.table).lower() in phantoms:
+        if table is None:
+            continue
+        if table.lower().split(".")[-1] in phantoms:
             continue
         _add(out, "read", table, col.name, conf, sql, dynamic, seen)
 
@@ -552,6 +605,35 @@ def _kind_from_sql(sql: str) -> str:
     if re.match(r"(?is)^(INSERT|UPDATE|DELETE|MERGE)\b", stripped):
         return "write"
     return "read"
+
+
+def _is_fromless_select_stmt(stmt: exp.Expression | None) -> bool:
+    """True for ``SELECT now()`` / ``SELECT set_config(...)`` with no FROM/JOIN."""
+    if stmt is None:
+        return False
+    select: exp.Select | None
+    if isinstance(stmt, exp.Select):
+        select = stmt
+    elif isinstance(stmt, exp.With) and isinstance(stmt.this, exp.Select):
+        select = stmt.this
+    else:
+        return False
+    if select.args.get("from") or select.args.get("joins"):
+        return False
+    for table in select.find_all(exp.Table):
+        name = _table_name(table)
+        if name and not is_skipped_table_name(name):
+            return False
+    return True
+
+
+def _sql_looks_fromless_select(sql: str) -> bool:
+    stripped = sql.strip().lstrip("(").strip()
+    if not re.match(r"(?is)^SELECT\b", stripped):
+        return False
+    if re.search(r"(?is)\b(FROM|JOIN|INTO|UPDATE|DELETE)\s+", stripped):
+        return False
+    return True
 
 
 def _fallback_table_accesses(
@@ -646,14 +728,25 @@ def analyze_sql(
     out: list[SqlAccess] = []
     seen: set[tuple] = set()
     parsed_any = False
+    parsed_stmts: list[exp.Expression] = []
     for stmt in stmts:
         if stmt is None:
             continue
         if isinstance(stmt, exp.Command):
             continue
         parsed_any = True
+        parsed_stmts.append(stmt)
         _analyze_statement(stmt, sql, schema_columns, dynamic, expand_star, out, seen)
     if not parsed_any or not out:
+        # FROM-less SELECT (set_config, now(), SELECT 1) touches no table.
+        # Functions are never tables; do not invent table:unknown.
+        fromless = False
+        if parsed_stmts:
+            fromless = all(_is_fromless_select_stmt(s) for s in parsed_stmts)
+        if fromless or (not parsed_any and _sql_looks_fromless_select(sql)):
+            return []
+        if parsed_any and not out and _sql_looks_fromless_select(sql):
+            return []
         return _fallback_table_accesses(sql, dynamic=True, known_tables=known)
     if dynamic:
         for access in out:
