@@ -95,3 +95,32 @@ func Register(g *echo.Group) {
     assert ("GET", "/api/v1/client/org/settings/users/:id/history") in routes, routes
     assert ("GET", "/api/v1/client/org/settings/admin/audit/:id") in routes, routes
     assert not any(p.startswith("/org/") or p.startswith("/audit") for _m, p in routes), routes
+
+
+def test_empty_path_route_is_the_group_root(tmp_path: Path) -> None:
+    _write(tmp_path, "go.mod", "module app\n\ngo 1.22\n")
+    _write(
+        tmp_path,
+        "main.go",
+        """
+package main
+
+import "github.com/labstack/echo/v4"
+
+type H struct{}
+
+func (h *H) List(c echo.Context) error   { return nil }
+func (h *H) Create(c echo.Context) error { return nil }
+
+func main() {
+    e := echo.New()
+    h := &H{}
+    items := e.Group("/api/items")
+    items.GET("", h.List)
+    items.POST(``, h.Create)
+    e.Start(":8080")
+}
+""",
+    )
+    routes = _routes(scan_path(tmp_path))
+    assert {("GET", "/api/items"), ("POST", "/api/items")} <= routes, routes

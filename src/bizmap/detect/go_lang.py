@@ -623,11 +623,14 @@ def _path_is_string_like(
     package_consts: dict[str, ResolvedString],
 ) -> bool:
     """True when a route path argument is a string/const, not ``h.options(c, ...)``."""
-    if node is None or not resolved.usable:
+    if node is None:
         return False
     node = _unwrap_literal(node) or node
     if node.type in {"interpreted_string_literal", "raw_string_literal"}:
+        # any literal, including "" (the group root: `orders.POST("", h)`)
         return True
+    if not resolved.usable:
+        return False
     if node.type == "binary_expression":
         return True
     if node.type == "selector_expression":
