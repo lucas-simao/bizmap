@@ -333,6 +333,9 @@ def _mount_method_prefix(call: Node, consts: dict[str, str]) -> str:
             val, _u = _resolve_js_string(args[0], consts)
             return val or ""
     if method_l in {"route", "group"} and args:
+        # `.route('/x', child)` is a mount, not the parent's own prefix.
+        if len(args) >= 2:
+            return ""
         val, _u = _resolve_js_string(args[0], consts)
         return val or ""
     return ""
@@ -362,9 +365,9 @@ def _chain_prefix(call: Node, consts: dict[str, str], routers: dict[str, str]) -
                     val, _u = _resolve_js_string(args[0], consts)
                     if val:
                         prefix = _join_route(prefix, val)
-            elif method_l == "route" and args:
+            elif method_l == "route" and args and len(args) < 2:
                 val, _u = _resolve_js_string(args[0], consts)
-                if val and (len(args) == 1 or args[0].type in {"string", "template_string", "identifier"}):
+                if val and args[0].type in {"string", "template_string", "identifier"}:
                     prefix = _join_route(prefix, val)
     return prefix
 
@@ -413,6 +416,37 @@ def _fn_param_names(node: Node | None) -> list[str]:
             )
             if ident is not None and ident.type == "identifier":
                 names.append(text(ident))
+    return names
+
+
+def _assigned_name(node: Node | None) -> str:
+    """Identifier of ``const r = <node>`` / ``export const r = <node>``."""
+    cur = node
+    depth = 0
+    while cur is not None and depth < 24:
+        if cur.type == "variable_declarator":
+            return _declarator_name(cur)
+        cur = cur.parent
+        depth += 1
+    return ""
+
+
+def _enclosing_js_params(node: Node | None) -> list[str]:
+    """Parameter names of every enclosing function/arrow (for nested factories)."""
+    names: list[str] = []
+    cur = node.parent if node is not None else None
+    depth = 0
+    while cur is not None and depth < 48:
+        if cur.type in {
+            "function_declaration",
+            "function",
+            "function_expression",
+            "arrow_function",
+            "method_definition",
+        }:
+            names.extend(_fn_param_names(cur))
+        cur = cur.parent
+        depth += 1
     return names
 
 
@@ -669,8 +703,14 @@ class JsAnalyzer:
             chain_router = _is_router_factory(node)
             if method in HTTP_METHODS and args:
                 path_val, path_unresolved = _resolve_js_string(args[0], consts)
-                prefix = _chain_prefix(node, consts, routers)
-                is_router = recv in routers or chain_router
+                assigned = _assigned_name(node)
+                if assigned and assigned in routers:
+                    prefix = routers[assigned]
+                else:
+                    prefix = _chain_prefix(node, consts, routers)
+                is_router = recv in routers or chain_router or bool(
+                    assigned and assigned in routers
+                )
                 if is_router and method == "use":
                     continue
                 if is_router and method == "route":
@@ -710,16 +750,29 @@ class JsAnalyzer:
                         fn_nodes,
                     )
                     continue
-                # Outbound client call — only known HTTP clients / wrappers.
+                # Outbound client call — known clients, or a factory param
+                # (`makeApi = (client) => ({ list: () => client.get('/x') })`).
                 if method in CLIENT_HTTP_METHODS:
-                    if not _is_known_http_client(recv, clients, node):
+                    param_names = _enclosing_js_params(node)
+                    param_client = bool(
+                        recv
+                        and recv in param_names
+                        and _looks_like_http_path(path_val)
+                    )
+                    known = _is_known_http_client(recv, clients, node)
+                    if not known and not param_client:
                         continue
                     if is_router:
                         continue
                     base = clients.get(recv) or ""
+                    if not base and param_client:
+                        base = "{" + recv + "}"
                     composed = _join_route(base, path_val) if path_val else base
                     if not composed or not _looks_like_http_path(composed):
-                        continue
+                        if param_client and path_val:
+                            composed = _join_route("{" + recv + "}", path_val)
+                        else:
+                            continue
                     analysis.http_calls.append(
                         JsHttpCall(
                             method=method.upper(),
@@ -727,7 +780,9 @@ class JsAnalyzer:
                             file=rel_file,
                             line=line_of(node),
                             symbol=_enclosing_symbol(node, module),
-                            unresolved=path_unresolved or ("{" in composed),
+                            unresolved=path_unresolved
+                            or ("{" in composed)
+                            or (param_client and recv not in clients),
                         )
                     )
                     continue
@@ -1094,8 +1149,11 @@ def _collect_receivers(tree: Node, consts: dict[str, str] | None = None) -> tupl
         if node.type != "call_expression":
             continue
         method = call_callee_name(node).lower()
+        if method not in {"route", "use", "group"}:
+            continue
         recv = _receiver_ident(node)
-        if recv not in routers or method not in {"route", "use", "group"}:
+        parent = recv if recv in routers else _assigned_name(node)
+        if parent not in routers:
             continue
         args = call_args(node)
         if len(args) < 2:
@@ -1106,7 +1164,7 @@ def _collect_receivers(tree: Node, consts: dict[str, str] | None = None) -> tupl
         sub = args[1]
         sub_name = text(sub) if sub.type == "identifier" else ""
         if sub_name and (sub_name in routers or sub_name):
-            routers[sub_name] = _join_route(routers.get(recv) or "", prefix)
+            routers[sub_name] = _join_route(routers.get(parent) or "", prefix)
     return routers, clients
 
 
@@ -1340,8 +1398,11 @@ def _collect_cross_mounts(
         if node.type != "call_expression":
             continue
         method = call_callee_name(node).lower()
+        if method not in {"route", "use", "group"}:
+            continue
         recv = _receiver_ident(node)
-        if recv not in routers or method not in {"route", "use", "group"}:
+        parent = recv if recv in routers else _assigned_name(node)
+        if parent not in routers:
             continue
         args = call_args(node)
         if len(args) < 2:
@@ -1362,7 +1423,7 @@ def _collect_cross_mounts(
             child_mod, child_name = module, sub_name
         if child_mod == module:
             continue
-        mounts.append((module, recv, prefix, child_mod, child_name))
+        mounts.append((module, parent, prefix, child_mod, child_name))
     return mounts
 
 
@@ -1458,6 +1519,7 @@ def _propagate_client_bases(
         if not changed:
             break
 
+    fn_params_by_mod: dict[str, dict[str, list[str]]] = {}
     for module, tree in trees_by_mod.items():
         consts = consts_by_mod.get(module) or {}
         clients = clients_by_mod.setdefault(module, {})
@@ -1477,34 +1539,70 @@ def _propagate_client_bases(
                 if recv in factories:
                     clients[name] = factories[recv]
 
-        fn_params: dict[str, list[str]] = {}
+        params: dict[str, list[str]] = {}
         for node in walk(tree):
             if node.type in {"function_declaration", "function", "method_definition"}:
                 name_n = node.child_by_field_name("name")
                 name = text(name_n) if name_n else ""
                 if name:
-                    fn_params[name] = _fn_param_names(node)
+                    params[name] = _fn_param_names(node)
             if node.type == "variable_declarator":
                 value = node.child_by_field_name("value")
                 name = _declarator_name(node)
                 if name and value is not None and value.type in {"arrow_function", "function"}:
-                    fn_params[name] = _fn_param_names(value)
-        for node in walk(tree):
-            if node.type != "call_expression":
-                continue
-            callee = call_callee_name(node)
-            params = fn_params.get(callee)
-            if not params:
-                continue
-            args = call_args(node)
-            for i, arg in enumerate(args):
-                if i >= len(params) or arg.type != "identifier":
-                    continue
-                src = text(arg)
-                if src in clients:
-                    clients[params[i]] = clients[src]
-
+                    params[name] = _fn_param_names(value)
+        fn_params_by_mod[module] = params
         _ = consts  # reserved for future const-based bases
+
+    def _fn_params_for(module: str, local_name: str) -> tuple[str, list[str]] | None:
+        local_params = fn_params_by_mod.get(module) or {}
+        if local_name in local_params:
+            return module, local_params[local_name]
+        specs = import_specs_by_mod.get(module) or {}
+        if local_name not in specs:
+            return None
+        src_mod, orig = specs[local_name]
+        exports = exports_by_mod.get(src_mod) or {}
+        key = exports.get("default") if orig == "default" else exports.get(orig, orig)
+        src_params = fn_params_by_mod.get(src_mod) or {}
+        if key and key in src_params:
+            return src_mod, src_params[key]
+        if orig in src_params:
+            return src_mod, src_params[orig]
+        return None
+
+    for _ in range(8):
+        changed = False
+        for module, tree in trees_by_mod.items():
+            clients = clients_by_mod.setdefault(module, {})
+            for node in walk(tree):
+                if node.type != "call_expression":
+                    continue
+                callee = call_callee_name(node)
+                resolved = _fn_params_for(module, callee)
+                if not resolved:
+                    continue
+                dest_mod, params = resolved
+                dest_clients = clients_by_mod.setdefault(dest_mod, {})
+                args = call_args(node)
+                for i, arg in enumerate(args):
+                    if i >= len(params) or arg.type != "identifier":
+                        continue
+                    src = text(arg)
+                    base = clients.get(src)
+                    if base is None:
+                        base = dest_clients.get(src)
+                    if base is None:
+                        continue
+                    pname = params[i]
+                    if dest_clients.get(pname) != base:
+                        dest_clients[pname] = base
+                        changed = True
+                    if clients.get(pname) != base:
+                        clients[pname] = base
+                        changed = True
+        if not changed:
+            break
 
 
 

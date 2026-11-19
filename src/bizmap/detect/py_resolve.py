@@ -135,6 +135,18 @@ def _placeholder_for(name: str) -> ResolvedString:
     return ResolvedString(None, False, True, placeholder=token)
 
 
+_BASE_FIELD_NAMES = {"base_url", "baseurl", "base", "host", "origin"}
+
+
+def _local_base_field(attr_name: str, found: ResolvedString) -> bool:
+    """True when ``self.base_url`` is a constructor/config field, not an env origin."""
+    if attr_name.lower() not in _BASE_FIELD_NAMES or not found.unresolved:
+        return False
+    inner = (found.placeholder or found.path_text or "").strip("{}")
+    leaf = inner.split(".")[-1].lower()
+    return leaf in _BASE_FIELD_NAMES or leaf == attr_name.lower()
+
+
 def parse_imports(root: Node, module: str) -> ImportMap:
     imap = ImportMap()
     for node in walk(root):
@@ -302,13 +314,21 @@ def resolve_expr(
             if head == "self":
                 key = f"self.{attr_name}"
                 if key in env:
-                    return env[key]
+                    found = env[key]
+                    if _local_base_field(attr_name, found):
+                        return _placeholder_for("base")
+                    return found
                 if key in module_consts:
                     return module_consts[key]
                 if attr_name in env:
-                    return env[attr_name]
+                    found = env[attr_name]
+                    if _local_base_field(attr_name, found):
+                        return _placeholder_for("base")
+                    return found
                 if attr_name in module_consts:
                     return module_consts[attr_name]
+                if attr_name.lower() in {"base_url", "baseurl", "base", "host", "origin"}:
+                    return _placeholder_for("base")
             if head in imap.modules:
                 mod = imap.modules[head]
                 found = (consts_by_module.get(mod) or {}).get(attr_name)

@@ -148,22 +148,29 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `--exclude GLOB` (repeatable) merges with YAML `exclude`. `--profile`
   prints parse / resolve / sql / propagate timings to stderr.
 
-## JavaScript / TypeScript resolution (v0.2.5)
+## JavaScript / TypeScript resolution (v0.2.6)
 
 - `.js` / `.mjs` / `.cjs` use tree-sitter-javascript; `.ts` / `.tsx` use
   tree-sitter-typescript (`language_typescript` / `language_tsx`).
 - Express / Fastify / Hono: routes require a known app/router receiver
   (`express()`, `Router()`, `fastify()`, `new Hono()`, chained
-  `new Hono().use().get()`, or typed as such) and a string-literal or
+  `new Hono().use().get()`, chained-export
+  `export const r = new Hono().use(mw).get('/a', h)`, or typed as such)
+  and a string-literal or
   resolvable const path. `.basePath('/v1')` and `.route('/x', sub)` /
   `app.use('/v1/items', importedRouter)` apply prefixes across files
-  (default/named exports, nested mounts). Known HTTP clients (`fetch`,
+  (default/named exports, nested mounts, chained-export children).
+  Known HTTP clients (`fetch`,
   `axios` + instances, `ky`, `ofetch`, `got`, `superagent`) emit outbound
   `calls_http`; `Map` / `Set` / `Headers` / `URLSearchParams` /
   `searchParams` / `config.headers` do not. `axios.create` /
   `ky.create` / `ofetch.create` `{baseURL}` (exported, factory-built, or
-  passed as a parameter) compose with later `.get('/x')`. Relative
-  `fetch('/x')` matches only the same repo or a `services:` mapping.
+  passed as a parameter into an object-literal factory) compose with
+  later `.get('/x')`; uncomposed parameter clients stay
+  `unresolved_http`. Relative
+  `fetch('/x')` matches only the same repo; constructor/config `{base}`
+  URLs may match across repos when the path has 2+ literal segments or a
+  `services:` mapping.
   Inline-arrow handlers attribute `supabase.from('t')` access to the route.
 - Supabase JS: `supabase.from('t').select|insert|update|delete|upsert`
   emits table reads/writes; `.rpc('fn')` calls `function:sql.fn` when
@@ -175,7 +182,7 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `entrypoint:http:POST:/functions/v1/<name>`, with call edges from the
   handler body into imported helpers.
 
-## Bundled rules (v0.2.5)
+## Bundled rules (v0.2.6)
 
 | File | Status | What it detects |
 | --- | --- | --- |

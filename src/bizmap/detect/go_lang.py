@@ -40,7 +40,7 @@ _PATH_SELECTOR = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\
 SQL_PARAM_NAMES = {"query", "q", "sql"}
 HTTP_PATH_PARAM_NAMES = {"path", "urlpath", "p"}
 HTTP_METHOD_PARAM_NAMES = {"method", "httpmethod"}
-HTTP_BASE_FIELD_NAMES = {"baseurl", "base", "host", "origin"}
+HTTP_BASE_FIELD_NAMES = {"baseurl", "base_url", "base", "host", "origin"}
 
 
 def _parser() -> Parser:
@@ -698,6 +698,8 @@ def _resolve_expr(
             found = _lookup_const(ip, name, consts_by_import)
             if found and found.usable:
                 return found
+            if name.lower() in HTTP_BASE_FIELD_NAMES:
+                return ResolvedString(None, False, True, placeholder="{base}")
             return ResolvedString(None, False, True, placeholder=f"{{{pkg}.{name}}}")
         return ResolvedString(None, False, True, placeholder=f"{{{text(node)}}}")
     if node.type == "binary_expression":
@@ -728,6 +730,16 @@ def _resolve_expr(
             fmt_text = fmt_res.path_text if fmt_res.usable else ""
             if fmt_text:
                 return _sprintf(fmt_text, args[1:], env, package_consts, aliases, consts_by_import)
+        if method in {"PathEscape", "QueryEscape", "PathUnescape", "QueryUnescape"} and args:
+            inner = args[0]
+            if inner.type == "identifier":
+                return ResolvedString(
+                    None, False, True, placeholder="{" + text(inner) + "}"
+                )
+            resolved = _resolve_expr(inner, env, package_consts, aliases, consts_by_import)
+            if resolved.placeholder:
+                return resolved
+            return ResolvedString(None, False, True, placeholder="{id}")
         if method in {"Getenv", "LookupEnv"} and args and (ip == "os" or recv == "os"):
             key = _resolve_expr(args[0], env, package_consts, aliases, consts_by_import)
             if key.fully_static and key.text:
