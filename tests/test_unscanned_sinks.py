@@ -62,7 +62,9 @@ def direct(conn):
         edges = [e for e in _data_edges(graph, fn) if table in e.to_id]
         assert edges, (fn, [e.id for e in _data_edges(graph, fn)])
         assert all(e.attrs.get("sink_not_scanned") is True for e in edges), (fn, [(e.id, e.attrs) for e in edges])
-        assert all(e.confidence.value == "inferred" for e in edges), (fn, [(e.id, e.confidence) for e in edges])
+        # literal SQL: the tables are certain (exact); the executor is the
+        # unknown part, carried by `sink_not_scanned`
+        assert all(e.confidence.value == "exact" for e in edges), (fn, [(e.id, e.confidence) for e in edges])
         node = graph.get(function_id(fn))
         assert "db.rpc.rpc_sql" in (node.attrs.get("unresolved_calls") or []), (fn, node.attrs)
         assert (node.attrs.get("unresolved_call_reasons") or {}).get("db.rpc.rpc_sql") == "target_not_scanned"

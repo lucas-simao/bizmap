@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **`sink_not_scanned` no longer downgrades literal SQL**: the edge
+  confidence describes the SQL (a literal stays `exact`); the unscanned
+  executor is carried by the `sink_not_scanned: true` flag.
+- **Nested Python functions** get the enclosing function in their id
+  (`panels.sales.compute` vs `panels.stock.compute`), so same-named inner
+  functions no longer share a node.
+
 - **TS helper composition**: transparent segment helpers
   (`seg = (s) => encodeURIComponent(s)`) inside other helpers
   (`` `/v1/items/${seg(id)}` ``); helpers imported through barrels
