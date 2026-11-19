@@ -19,9 +19,12 @@ class ResolvedString:
     fully_static: bool
     dynamic: bool
     placeholder: str | None = None
+    alternatives: list[str] | None = None
 
     @property
     def usable(self) -> bool:
+        if self.alternatives:
+            return any(str(t).strip() for t in self.alternatives if t)
         return bool(
             (self.text and str(self.text).strip())
             or (self.placeholder and str(self.placeholder).strip())
@@ -38,6 +41,12 @@ class ResolvedString:
     @property
     def unresolved(self) -> bool:
         return not self.fully_static
+
+    def all_texts(self) -> list[str]:
+        if self.alternatives:
+            return [t for t in self.alternatives if t and str(t).strip()]
+        text = self.path_text
+        return [text] if text and str(text).strip() else []
 
 
 @dataclass
@@ -96,7 +105,9 @@ def join_route_path(*parts: str) -> str:
 
 
 def _plus(lv: ResolvedString, rv: ResolvedString) -> ResolvedString:
-    if lv.fully_static and rv.fully_static and lv.text is not None and rv.text is not None:
+    lefts = lv.all_texts() or [""]
+    rights = rv.all_texts() or [""]
+    if lv.fully_static and rv.fully_static and lv.text is not None and rv.text is not None and len(lefts) == 1 and len(rights) == 1:
         return ResolvedString(lv.text + rv.text, True, False)
 
     def piece(part: ResolvedString) -> str:
@@ -106,8 +117,17 @@ def _plus(lv: ResolvedString, rv: ResolvedString) -> ResolvedString:
             return part.placeholder
         return part.text or ""
 
+    texts = [a + b for a in lefts for b in rights]
+    texts = [t for t in dict.fromkeys(texts) if t]
     combined = piece(lv) + piece(rv)
-    return ResolvedString(combined or None, False, True, placeholder=combined or None)
+    static = lv.fully_static and rv.fully_static
+    return ResolvedString(
+        texts[0] if texts else combined or None,
+        static,
+        not static,
+        placeholder=None if static else (combined or None),
+        alternatives=texts or None,
+    )
 
 
 def _placeholder_for(name: str) -> ResolvedString:
@@ -279,6 +299,16 @@ def resolve_expr(
         attr_name = text(attr) if attr is not None else raw.rsplit(".", 1)[-1]
         if obj is not None and obj.type == "identifier":
             head = text(obj)
+            if head == "self":
+                key = f"self.{attr_name}"
+                if key in env:
+                    return env[key]
+                if key in module_consts:
+                    return module_consts[key]
+                if attr_name in env:
+                    return env[attr_name]
+                if attr_name in module_consts:
+                    return module_consts[attr_name]
             if head in imap.modules:
                 mod = imap.modules[head]
                 found = (consts_by_module.get(mod) or {}).get(attr_name)
@@ -303,9 +333,31 @@ def resolve_expr(
                     # origin-preserving: settings-like attrs keep the attr spelling
                     return _placeholder_for(f"{head}.{attr_name}")
         return _placeholder_for(raw)
-    if node.type in {"parenthesized_expression", "conditional_expression"}:
+    if node.type == "parenthesized_expression":
         if node.named_children:
             return resolve_expr(node.named_children[0], env, module_consts, imap, consts_by_module)
+    if node.type == "conditional_expression":
+        # ``A if cond else B`` — emit both candidates.
+        children = list(node.named_children)
+        if len(children) >= 3:
+            left = resolve_expr(children[0], env, module_consts, imap, consts_by_module, dicts, dicts_by_module)
+            right = resolve_expr(children[2], env, module_consts, imap, consts_by_module, dicts, dicts_by_module)
+            texts: list[str] = []
+            for part in (left, right):
+                texts.extend(part.all_texts())
+            texts = [t for t in dict.fromkeys(texts) if t]
+            if not texts:
+                return _placeholder_for(text(node)[:40])
+            static = left.fully_static and right.fully_static
+            return ResolvedString(
+                texts[0],
+                static,
+                not static,
+                placeholder=None if static else texts[0],
+                alternatives=texts,
+            )
+        if node.named_children:
+            return resolve_expr(node.named_children[0], env, module_consts, imap, consts_by_module, dicts, dicts_by_module)
     if node.type == "interpolation":
         inner = next((c for c in node.named_children if c.type != "type"), None)
         return resolve_expr(inner, env, module_consts, imap, consts_by_module)

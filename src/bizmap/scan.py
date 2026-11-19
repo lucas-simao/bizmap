@@ -356,6 +356,13 @@ def _apply_go(
     for fn in analysis.functions.values():
         _add_function_node_go(graph, fn)
         evidence_by_fn[fn.qualname] = Evidence(file=fn.file, line=fn.line, symbol=fn.qualname)
+    _attach_unresolved_calls(
+        graph,
+        [
+            (u.caller, u.callee)
+            for u in getattr(analysis, "unresolved_calls", []) or []
+        ],
+    )
 
     reverse: dict[str, set[str]] = defaultdict(set)
     for hit in analysis.calls:
@@ -471,6 +478,7 @@ def _apply_go(
             schema,
             job_functions,
         )
+    _copy_unresolved_to_entrypoints(graph, entrypoints_by_handler)
     prop_s = time.perf_counter() - t_prop
     return sql_s, prop_s
 
@@ -569,6 +577,13 @@ def _apply_python(
             **extra,
         )
         evidence_by_fn[fn.qualname] = Evidence(file=fn.file, line=fn.line, symbol=fn.qualname)
+    _attach_unresolved_calls(
+        graph,
+        [
+            (u.caller, u.callee)
+            for u in getattr(analysis, "unresolved_calls", []) or []
+        ],
+    )
     for caller, callee, ev, conf in analysis.calls:
         graph.add_edge("calls", function_id(caller), function_id(callee), confidence=conf, evidence=ev)
         reverse[callee].add(caller)
@@ -667,6 +682,7 @@ def _apply_python(
     _propagate_collections(graph, analysis, reverse, entrypoints_by_handler)
     _apply_queues(graph, analysis, entrypoints_by_handler)
     _apply_rpc(graph, analysis, schema)
+    _copy_unresolved_to_entrypoints(graph, entrypoints_by_handler)
     return sql_s, time.perf_counter() - t_prop
 
 
@@ -899,7 +915,62 @@ def _apply_rpc(graph: Graph, analysis: PyAnalysis, schema: Schema) -> None:
         )
 
 
+def _attach_unresolved_calls(graph: Graph, pairs: list[tuple[str, str]]) -> None:
+    by_caller: dict[str, list[str]] = defaultdict(list)
+    for caller, callee in pairs:
+        if callee and callee not in by_caller[caller]:
+            by_caller[caller].append(callee)
+    for caller, names in by_caller.items():
+        fid = function_id(caller)
+        node = graph.get(fid)
+        if node is None:
+            graph.add_node(
+                fid,
+                "function",
+                name=caller,
+                unresolved_calls=list(names),
+                confidence=Confidence.UNKNOWN.value,
+            )
+            node = graph.get(fid)
+        if node is None:
+            continue
+        existing = list(node.attrs.get("unresolved_calls") or [])
+        for name in names:
+            if name not in existing:
+                existing.append(name)
+        node.attrs["unresolved_calls"] = existing
+        node.attrs.setdefault("confidence", Confidence.UNKNOWN.value)
+
+
+def _copy_unresolved_to_entrypoints(
+    graph: Graph, entrypoints_by_handler: dict[str, list[str]]
+) -> None:
+    for qual, eids in entrypoints_by_handler.items():
+        fn_node = graph.get(function_id(qual))
+        names = list((fn_node.attrs.get("unresolved_calls") or []) if fn_node else [])
+        if not names:
+            continue
+        for eid in eids:
+            ep = graph.get(eid)
+            if ep is None:
+                continue
+            existing = list(ep.attrs.get("unresolved_calls") or [])
+            for name in names:
+                if name not in existing:
+                    existing.append(name)
+            ep.attrs["unresolved_calls"] = existing
+            ep.attrs.setdefault("confidence", Confidence.UNKNOWN.value)
+
+
 def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
+    for qual, (file, line) in (analysis.functions or {}).items():
+        graph.add_node(
+            function_id(qual),
+            "function",
+            name=qual,
+            language="javascript",
+            evidence={"file": file, "line": line, "symbol": qual},
+        )
     for route in analysis.routes:
         if route.method == "USE":
             continue
@@ -930,6 +1001,65 @@ def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
             hid,
             confidence=Confidence.UNKNOWN if route.unresolved else Confidence.INFERRED,
         )
+    reverse: dict[str, set[str]] = defaultdict(set)
+    for call in getattr(analysis, "calls", []) or []:
+        graph.add_node(
+            function_id(call.callee),
+            "function",
+            name=call.callee,
+            language="javascript",
+            evidence={"file": call.file, "line": call.line, "symbol": call.callee},
+        )
+        graph.add_edge(
+            "calls",
+            function_id(call.caller),
+            function_id(call.callee),
+            confidence=Confidence.INFERRED,
+            evidence=Evidence(file=call.file, line=call.line, symbol=call.caller),
+        )
+        reverse[call.callee].add(call.caller)
+    for access in getattr(analysis, "accesses", []) or []:
+        rolled = SqlAccess(
+            kind=access.kind,
+            table=access.table,
+            column=None,
+            confidence=Confidence.EXACT,
+            raw_sql="",
+            unknown_table=access.table == "unknown",
+        )
+        if access.target_kind == "collection":
+            target = _ensure_collection(graph, access.table)
+        else:
+            target = _ensure_access_target(graph, schema, rolled)
+        if not target:
+            continue
+        fid = function_id(access.symbol)
+        graph.add_node(
+            fid,
+            "function",
+            name=access.symbol,
+            language="javascript",
+            evidence={"file": access.file, "line": access.line, "symbol": access.symbol},
+        )
+        graph.add_edge(
+            _kind_edge(access.kind),
+            fid,
+            target,
+            confidence=Confidence.INFERRED if access.table == "unknown" else Confidence.EXACT,
+            evidence=Evidence(file=access.file, line=access.line, symbol=access.symbol),
+        )
+        # Copy table-level edges onto callers and HTTP entrypoints.
+        for caller in {access.symbol, *_callers_of(access.symbol, reverse)}:
+            for node in graph.nodes.values():
+                if node.type != "entrypoint":
+                    continue
+                if node.attrs.get("symbol") == caller:
+                    graph.add_edge(
+                        _kind_edge(access.kind),
+                        node.id,
+                        target,
+                        confidence=Confidence.INFERRED,
+                    )
     for rpc in analysis.rpc_calls:
         fname = rpc.name.split(".")[-1].lower()
         target = function_id(f"sql.{fname}")
@@ -1050,8 +1180,15 @@ def _link_http(
                 graph.add_edge("calls_http", fid, eid, confidence=conf, evidence=ev)
             continue
         keys = unresolved_http_keys(url)
-        if keys:
-            unmatched.append({"url": url, "method": method, "keys": keys, "from": fid})
+        node = graph.get(fid)
+        if node is not None:
+            notes = list(node.attrs.get("unresolved_http") or [])
+            note = {"url": url, "method": method, "keys": keys}
+            if note not in notes:
+                notes.append(note)
+            node.attrs["unresolved_http"] = notes
+            node.attrs.setdefault("unresolved", True)
+        unmatched.append({"url": url, "method": method, "keys": keys, "from": fid})
     graph.attrs["unresolved_http"] = unmatched
     return unmatched
 

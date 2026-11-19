@@ -13,7 +13,7 @@ PLACEHOLDER_N = re.compile(r"\$(\d+)")
 NAMED_PARAM = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 PY_PERCENT = re.compile(r"%s")
 SQL_START = re.compile(
-    r"^\s*\(?\s*(WITH|SELECT|INSERT|UPDATE|DELETE|MERGE)\b",
+    r"^\s*\(?\s*(WITH|SELECT|INSERT|UPDATE|DELETE|MERGE|EXECUTE)\b",
     re.IGNORECASE,
 )
 # Bare or quoted identifier, optionally schema-qualified (pg_dump style).
@@ -25,10 +25,16 @@ TABLE_FROM_PREFIX = re.compile(
 )
 DYNAMIC_PLACEHOLDER = re.compile(r"\{[^{}]+\}")
 # Table-name holes: `"UPDATE "+t+" SET"`, `EXECUTE format('UPDATE %I ...')`.
+# Strip ON CONFLICT / FOR UPDATE OF first so `DO UPDATE SET` / aliases are not holes.
 DYNAMIC_TABLE_HOLE = re.compile(
-    r"(?is)\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+"
-    r"(?:ONLY\s+)?(?:%I|%s|%L|\{[^{}]+\}|(?=\s*(?:SET|WHERE|VALUES|RETURNING)\b))"
+    r"(?is)\b(?:INSERT\s+INTO|(?<!DO\s)UPDATE|DELETE\s+FROM)\s+"
+    r"(?:ONLY\s+)?(?:%I|%s|%L|\?|\{[^{}]+\}|(?=\s*(?:SET|WHERE|VALUES|RETURNING)\b))"
 )
+_ON_CONFLICT_TAIL = re.compile(r"(?is)\bON\s+CONFLICT\b.*$")
+_FOR_UPDATE_CLAUSE = re.compile(
+    r"(?is)\bFOR\s+UPDATE(?:\s+OF\s+[A-Za-z_][\w.]*(?:\s*,\s*[A-Za-z_][\w.]*)*)?"
+)
+_FORMAT_IDENT = re.compile(r"(?is)\bformat\s*\(\s*['\"][^'\"]*%I")
 EXTERNAL_SCHEMAS = {
     "pg_catalog",
     "information_schema",
@@ -355,6 +361,30 @@ def ident_is_qualified(raw: str | None) -> bool:
     return len(ident_parts(raw)) >= 2 or ("." in (raw or ""))
 
 
+def has_dynamic_table_hole(sql: str | None) -> bool:
+    """True when a *table name* is interpolated, not a SET/EXCLUDED column.
+
+    ``"UPDATE "+t+" SET"`` and ``EXECUTE format('%I')`` are holes.
+    Literal ``INSERT ... ON CONFLICT (...) DO UPDATE SET c = EXCLUDED.c`` is not.
+    """
+    if not sql or not sql.strip():
+        return False
+    if _FORMAT_IDENT.search(sql) or (
+        re.search(r"(?is)\bEXECUTE\s+format\s*\(", sql) and "%I" in sql
+    ):
+        return True
+    stripped = _ON_CONFLICT_TAIL.sub("", sql)
+    stripped = _FOR_UPDATE_CLAUSE.sub("", stripped)
+    if DYNAMIC_TABLE_HOLE.search(stripped):
+        return True
+    if DYNAMIC_PLACEHOLDER.search(stripped) and re.search(
+        r"(?is)\b(?:INSERT|UPDATE|DELETE|MERGE)\b", stripped
+    ):
+        if not re.search(r"(?is)\b(?:FROM|INTO|UPDATE|JOIN)\s+[A-Za-z_]", stripped):
+            return True
+    return False
+
+
 def looks_like_sql(text: str | None) -> bool:
     if not text:
         return False
@@ -382,20 +412,6 @@ def is_external_table(name: str | None) -> bool:
     leaf = parts[-1] if parts else raw.split(".")[-1]
     if leaf.startswith("pg_") or leaf in PG_CATALOG_TABLES:
         return True
-    return False
-
-
-def has_dynamic_table_hole(sql: str) -> bool:
-    """True when DML has a missing/interpolated table name, not a FROM-less SELECT."""
-    if not sql or not sql.strip():
-        return False
-    if DYNAMIC_TABLE_HOLE.search(sql):
-        return True
-    if DYNAMIC_PLACEHOLDER.search(sql) and re.search(
-        r"(?is)\b(?:INSERT|UPDATE|DELETE|MERGE)\b", sql
-    ):
-        if not re.search(r"(?is)\b(?:FROM|INTO|UPDATE|JOIN)\s+[A-Za-z_]", sql):
-            return True
     return False
 
 
@@ -547,10 +563,18 @@ def _phantom_names(root: exp.Expression, extra: set[str] | None = None) -> set[s
     return names
 
 
+def _is_lock_table(table: exp.Expression) -> bool:
+    """``FOR UPDATE OF alias`` is a lock target, not a FROM table."""
+    parent = getattr(table, "parent", None)
+    return parent is not None and type(parent).__name__ == "Lock"
+
+
 def _alias_map(root: exp.Expression, extra_phantoms: set[str] | None = None) -> dict[str, str]:
     aliases: dict[str, str] = {}
     phantoms = _phantom_names(root, extra_phantoms)
     for table in root.find_all(exp.Table):
+        if _is_lock_table(table):
+            continue
         name = _table_name(table)
         if not name:
             continue
@@ -794,6 +818,16 @@ def _analyze_statement(
                 seen,
                 skip_names=skip_names,
             )
+        conflict = stmt.args.get("conflict") if hasattr(stmt, "args") else None
+        if conflict is not None:
+            for expr in conflict.args.get("expressions") or []:
+                name = ""
+                if isinstance(expr, exp.EQ):
+                    name = _ident(expr.this)
+                else:
+                    name = _ident(expr)
+                if name and name.lower() not in SKIP_TABLES:
+                    _add(out, "write", table, name, conf, sql, dynamic, seen, skip_names=skip_names)
         for inner in stmt.find_all(exp.Select):
             if inner is stmt:
                 continue
@@ -930,6 +964,11 @@ def _analyze_select(
 def _kind_from_sql(sql: str) -> str:
     stripped = sql.strip()
     if re.match(r"(?is)^(INSERT|UPDATE|DELETE|MERGE)\b", stripped):
+        return "write"
+    # ``EXECUTE format('UPDATE %I SET ...')`` is a write of an unknown table.
+    if re.match(r"(?is)^EXECUTE\b", stripped) and re.search(
+        r"(?is)\b(INSERT|UPDATE|DELETE|MERGE)\b", stripped
+    ):
         return "write"
     return "read"
 
@@ -1080,7 +1119,8 @@ def analyze_sql(
         and not re.search(r"(?is)\b(?:FROM|INTO|UPDATE|JOIN)\s+[A-Za-z_]", sql)
         and re.search(r"(?is)\b(?:INSERT|UPDATE|DELETE|MERGE)\b", sql)
     ):
-        # e.g. UPDATE {table} SET ... / UPDATE %I SET ... — table name interpolated.
+        # e.g. UPDATE {table} SET ... / EXECUTE format('%I') — table name interpolated.
+        # Literal ON CONFLICT ... DO UPDATE SET c = EXCLUDED.c is not a hole.
         kind = _kind_from_sql(sql)
         return [
             SqlAccess(
