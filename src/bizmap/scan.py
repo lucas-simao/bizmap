@@ -600,7 +600,15 @@ def _apply_python(
         ],
     )
     for caller, callee, ev, conf in analysis.calls:
-        graph.add_edge("calls", function_id(caller), function_id(callee), confidence=conf, evidence=ev)
+        via = (getattr(analysis, "call_vias", None) or {}).get((caller, callee))
+        graph.add_edge(
+            "calls",
+            function_id(caller),
+            function_id(callee),
+            confidence=conf,
+            evidence=ev,
+            **({"via": via} if via else {}),
+        )
         reverse[callee].add(caller)
 
     entrypoints_by_handler: dict[str, list[str]] = defaultdict(list)

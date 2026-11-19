@@ -66,6 +66,16 @@
 
 ### Added
 
+- **Python module-qualified calls**: `from reports import sales` +
+  `sales.bind_store(...)` now resolves to `reports.sales.bind_store`
+  (`exact`), like `import reports.sales as m` + `m.bind_store(...)`.
+- **Functions passed as arguments**: a function reference passed to another
+  function (`_respond(request, exports.export_items)`, `run_with(self.build)`,
+  `functools.partial(...)` included) is called by the function that passes it
+  (`calls`, `inferred`, `via: passed_as_arg`) when the receiver calls or
+  forwards that parameter — or when the receiver is not scanned. Route
+  registration and logging helpers are ignored.
+
 - **Python executors are calls**: a function handed to
   `loop.run_in_executor(pool, fn, …)`, `pool.submit(fn, …)`,
   `asyncio.to_thread(fn, …)`, `anyio … run_sync`, `run_in_threadpool`,

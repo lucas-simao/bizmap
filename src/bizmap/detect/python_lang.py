@@ -758,6 +758,8 @@ class PyAnalysis:
     bindings: dict[str, str] = field(default_factory=dict)
     schema: Schema = field(default_factory=Schema)
     workers: list[PyFunction] = field(default_factory=list)
+    # (caller, callee) -> how a `calls` edge was derived (e.g. "passed_as_arg")
+    call_vias: dict[tuple[str, str], str] = field(default_factory=dict)
 
 
 class PythonAnalyzer:
@@ -963,6 +965,7 @@ class PythonAnalyzer:
         _link_function_tables(analysis, parsed)
         _link_field_dispatch(analysis, parsed)
         _link_executor_calls(analysis, parsed)
+        _link_module_calls_and_passed_fns(analysis, parsed)
         _link_sql_references(analysis, parsed, consts_by_module, dicts_by_module)
         unique: dict[tuple, PySqlSite] = {}
         for site in analysis.sql_sites:
@@ -3462,7 +3465,13 @@ def _link_sql_references(
 # ---------------------------------------------------------------------------
 
 
-def _fn_ref(node: Node, module: str, imap: ImportMap, functions: dict) -> str | None:
+def _fn_ref(
+    node: Node,
+    module: str,
+    imap: ImportMap,
+    functions: dict,
+    self_class: str | None = None,
+) -> str | None:
     if node.type == "identifier":
         name = text(node)
         local = f"{module}.{name}"
@@ -3478,13 +3487,24 @@ def _fn_ref(node: Node, module: str, imap: ImportMap, functions: dict) -> str | 
         obj = node.child_by_field_name("object")
         attr = node.child_by_field_name("attribute")
         if obj is not None and attr is not None and obj.type == "identifier":
-            mod = imap.modules.get(text(obj))
-            if mod and f"{mod}.{text(attr)}" in functions:
-                return f"{mod}.{text(attr)}"
+            oname, aname = text(obj), text(attr)
+            mod = imap.modules.get(oname)
+            if mod and f"{mod}.{aname}" in functions:
+                return f"{mod}.{aname}"
+            # `from pkg import module` + `module.fn`
+            if oname in imap.from_names:
+                src_mod, orig = imap.from_names[oname]
+                target = f"{src_mod}.{orig}.{aname}"
+                if target in functions:
+                    return target
+            if oname in {"self", "cls"} and self_class:
+                target = f"{module}.{self_class}.{aname}"
+                if target in functions:
+                    return target
         return None
     if node.type == "call" and call_callee_name(node) == "partial":
         pos = call_posargs(node)
-        return _fn_ref(pos[0], module, imap, functions) if pos else None
+        return _fn_ref(pos[0], module, imap, functions, self_class) if pos else None
     return None
 
 
@@ -3787,3 +3807,140 @@ def _link_executor_calls(analysis: PyAnalysis, parsed: list) -> None:
                         continue
                     existing.add((fn.qualname, callee))
                     analysis.calls.append((fn.qualname, callee, ev, Confidence.INFERRED))
+
+
+
+# ---------------------------------------------------------------------------
+# `from reports import sales` + `sales.bind_store(...)`, and function
+# references passed as arguments (`_respond(request, exports.export_items)`).
+# ---------------------------------------------------------------------------
+
+# Callees whose function arguments are registrations or metadata, not calls.
+_PASSED_FN_SKIP = {
+    "add_api_route",
+    "add_url_rule",
+    "add_route",
+    "add_api_websocket_route",
+    "add_event_handler",
+    "add_exception_handler",
+    "add_middleware",
+    "include_router",
+    "route",
+    "register",
+    "connect",
+    "signal",
+    "atexit",
+    "wraps",
+    "isinstance",
+    "issubclass",
+    "getattr",
+    "hasattr",
+    "setattr",
+    "callable",
+    "id",
+    "repr",
+    "print",
+    "debug",
+    "info",
+    "warning",
+    "error",
+    "exception",
+}
+
+
+def _self_class_of(fn: PyFunction) -> str | None:
+    return fn.class_name
+
+
+def _param_used(fn_node: Node, pname: str) -> bool:
+    """True when parameter ``pname`` is called or handed on in the body."""
+    body = fn_node.child_by_field_name("body")
+    if body is None:
+        return False
+    for node in walk(body):
+        if node.type == "identifier" and text(node) == pname:
+            parent = node.parent
+            if parent is None:
+                continue
+            if parent.type == "call" and parent.child_by_field_name("function") == node:
+                return True
+            if parent.type in {"argument_list", "keyword_argument", "return_statement", "list", "tuple", "pair"}:
+                return True
+    return False
+
+
+def _link_module_calls_and_passed_fns(analysis: PyAnalysis, parsed: list) -> None:
+    functions = analysis.functions
+    existing = {(c, d) for c, d, _e, _k in analysis.calls}
+
+    def add(caller: str, callee: str, ev: Evidence, conf: Confidence, via: str | None) -> None:
+        if caller == callee or (caller, callee) in existing:
+            return
+        existing.add((caller, callee))
+        analysis.calls.append((caller, callee, ev, conf))
+        if via:
+            analysis.call_vias[(caller, callee)] = via
+
+    for _path, rel_file, _src, _tree, module, imap, fns in parsed:
+        for fn in fns:
+            fdef = fn.node
+            if fdef.type == "decorated_definition":
+                fdef = fdef.child_by_field_name("definition") or fdef
+            self_class = _self_class_of(fn)
+            for node in walk(fdef):
+                if node.type != "call":
+                    continue
+                owner = _enclosing_fn_node(node)
+                if owner is None or (owner.start_byte, owner.end_byte) != (fdef.start_byte, fdef.end_byte):
+                    continue
+                ev = Evidence(file=rel_file, line=line_of(node), symbol=fn.qualname)
+                func = node.child_by_field_name("function")
+                callee = (
+                    _fn_ref(func, module, imap, functions, self_class) if func is not None else None
+                )
+                # (a) module-qualified call resolved through the import
+                if callee and func is not None and func.type == "attribute":
+                    add(fn.qualname, callee, ev, Confidence.EXACT, None)
+                # (b) function references passed as arguments
+                name = call_callee_name(node)
+                if name in _PASSED_FN_SKIP or name in _EXECUTOR_POS or name in _EXECUTOR_TARGET:
+                    continue
+                args = node.child_by_field_name("arguments")
+                if args is None:
+                    continue
+                target_params: list[str] = []
+                target_fn = functions.get(callee) if callee else None
+                if target_fn is not None:
+                    target_params = _param_names(
+                        target_fn.node.child_by_field_name("definition")
+                        if target_fn.node.type == "decorated_definition"
+                        else target_fn.node
+                    )
+                    if target_params and target_params[0] in {"self", "cls"}:
+                        target_params = target_params[1:]
+                pos_index = 0
+                for arg in args.named_children:
+                    kw_name: str | None = None
+                    value = arg
+                    if arg.type == "keyword_argument":
+                        kw = arg.child_by_field_name("name")
+                        kw_name = text(kw) if kw is not None else None
+                        value = arg.child_by_field_name("value") or arg
+                    ref = _fn_ref(value, module, imap, functions, self_class)
+                    this_pos = pos_index
+                    if arg.type != "keyword_argument":
+                        pos_index += 1
+                    if not ref or ref == callee:
+                        continue
+                    if target_fn is not None:
+                        pname = kw_name or (
+                            target_params[this_pos] if this_pos < len(target_params) else None
+                        )
+                        if not pname or not _param_used(
+                            target_fn.node.child_by_field_name("definition")
+                            if target_fn.node.type == "decorated_definition"
+                            else target_fn.node,
+                            pname,
+                        ):
+                            continue
+                    add(fn.qualname, ref, ev, Confidence.INFERRED, "passed_as_arg")
