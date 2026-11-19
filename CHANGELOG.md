@@ -75,6 +75,15 @@
 
 ### Added
 
+- **Calls into unscanned first-party code** (direct, `functools.partial`,
+  executors such as `run_in_executor` / `submit` / `to_thread`): the caller
+  gets the qualified name in `unresolved_calls` and
+  `unresolved_call_reasons: {name: target_not_scanned}`. SQL strings or SQL
+  constants handed to that call are linked to the caller's tables as
+  `inferred` with `sink_not_scanned: true` (never `exact`, never dropped).
+  Stdlib and common third-party packages are not reported. `bizmap report`
+  breaks unresolved calls down by reason.
+
 - **Python module-qualified calls**: `from reports import sales` +
   `sales.bind_store(...)` now resolves to `reports.sales.bind_store`
   (`exact`), like `import reports.sales as m` + `m.bind_store(...)`.

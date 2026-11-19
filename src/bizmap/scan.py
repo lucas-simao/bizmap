@@ -599,6 +599,12 @@ def _apply_python(
             for u in getattr(analysis, "unresolved_calls", []) or []
         ],
     )
+    for (caller, callee), reason in sorted((getattr(analysis, "unresolved_reasons", None) or {}).items()):
+        node = graph.get(function_id(caller))
+        if node is not None:
+            reasons = dict(node.attrs.get("unresolved_call_reasons") or {})
+            reasons[callee] = reason
+            node.attrs["unresolved_call_reasons"] = reasons
     for caller, callee, ev, conf in analysis.calls:
         via = (getattr(analysis, "call_vias", None) or {}).get((caller, callee))
         graph.add_edge(
@@ -672,14 +678,23 @@ def _apply_python(
                 continue
             conf = getattr(site, "confidence", None) or access.confidence
             via = getattr(site, "via", None)
-            graph.add_edge(
+            extra_attrs: dict = {}
+            if via:
+                extra_attrs["via"] = via
+            if getattr(site, "sink_not_scanned", False):
+                extra_attrs["sink_not_scanned"] = True
+            edge = graph.add_edge(
                 _kind_edge(access.kind),
                 fid,
                 target,
                 confidence=conf,
                 evidence=site.evidence,
-                **({"via": via} if via else {}),
+                **extra_attrs,
             )
+            if getattr(site, "sink_not_scanned", False):
+                # Nothing scanned proves the unscanned callee runs this SQL:
+                # cap at inferred even if another observation said exact.
+                edge.confidence = Confidence.INFERRED
             note = getattr(site, "note", None)
             if note:
                 node = graph.get(fid)
