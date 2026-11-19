@@ -34,3 +34,8 @@ jobs:
         run: |
           pip install .
           bizmap --version
+      - name: Smoke-test report on examples
+        run: |
+          bizmap report examples/shop
+          bizmap report examples/pyplatform
+          bizmap report examples/clinic --redact --salt ci
