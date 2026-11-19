@@ -158,6 +158,21 @@ def has_meaningful_literal(path: str) -> bool:
     return any(not _is_param(p) for p in parts)
 
 
+def literal_segment_count(path: str) -> int:
+    """Count non-parameter path segments (`internal/x` → 2)."""
+    return sum(1 for p in normalize_path(path).split("/") if p and not _is_param(p))
+
+
+def _service_prefix_hit(url: str, services: dict[str, Any] | None) -> bool:
+    if not url or not services:
+        return False
+    raw = url.lower()
+    for prefix in expand_service_prefixes(services):
+        if prefix and raw.startswith(str(prefix).lower()):
+            return True
+    return False
+
+
 def path_template_match(template: str, actual: str) -> bool:
     """Match a client path against a route template.
 
@@ -173,9 +188,11 @@ def path_template_match(template: str, actual: str) -> bool:
     for ts, actual_seg in zip(t_parts, a_parts, strict=True):
         if not ts and not actual_seg:
             continue
+        if _is_param(ts) and _is_param(actual_seg):
+            # Dynamic call-site segments (`{id}`, PathEscape) match route params
+            # when surrounding literals still agree.
+            continue
         if _is_param(ts):
-            if _is_param(actual_seg):
-                return False
             continue
         if _is_param(actual_seg):
             return False
@@ -229,14 +246,20 @@ def match_http(
     if not any(has_meaningful_literal(c) for c in candidates):
         return []
     relative = is_relative_client_url(url)
+    service_hit = _service_prefix_hit(url, services or {})
+    specific = max((literal_segment_count(c) for c in candidates), default=0) >= 2
     hits: list[str] = []
     for eid, rmethod, rpath in routes:
         if rmethod.upper() != method_u:
             continue
-        if relative and caller_repo and route_repos:
+        if caller_repo and route_repos:
             rrepo = route_repos.get(eid)
             if rrepo and rrepo != caller_repo:
-                continue
+                # Bare `fetch('/x')` stays same-repo. Constructor/config bases
+                # (`{base}/internal/x`) may match across repos when the path is
+                # specific (2+ literal segments) or `services:` maps the origin.
+                if relative or not (service_hit or specific):
+                    continue
         for cand in candidates:
             if not has_meaningful_literal(cand):
                 continue

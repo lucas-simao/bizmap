@@ -105,7 +105,7 @@ flowchart LR
   GET_stock -->|reads inferred| inventory
 ```
 
-## How it works (v0.2.5)
+## How it works (v0.2.6)
 
 1. **Schema replayer** — applies `schema.sql` / migration folders in order
    (`CREATE TABLE IF NOT EXISTS`, quoted/schema-qualified pg_dump identifiers,
@@ -127,20 +127,27 @@ flowchart LR
    including range-over-literal-slice SQL and helpers that take a `query`/`q`
    string (tables attributed to the caller). Outbound `net/http`
    `NewRequest` / `NewRequestWithContext`, `client.Do`, and `http.Get`/`Post`
-   (const, env, `fmt.Sprintf`, concat) become `calls_http`. Helpers that take
+   (const, env, `fmt.Sprintf`, concat, `url.PathEscape`) become `calls_http`.
+   Dynamic segments (`"/items/" + url.PathEscape(id) + "/approve"`) match
+   `/items/:id/approve` routes. Helpers that take
    `path`/`method` from the caller (`getJSON(ctx, path, out)` concatenating
-   `c.baseURL + path`) compose at the call site. Any `go` statement
+   `c.baseURL + path`) compose at the call site. A struct `baseURL` field is
+   `{base}+path`, not a relative fetch. Any `go` statement
    whose target uses `time.NewTicker` / `time.Tick` / `time.After` loops or a
    cron library. Packages are keyed by import path; display names are the
    directory relative to the scan root. With no `go.mod`, import paths fall
    back to a unique scanned-directory suffix and print a warning.
 3. **Python detector** — FastAPI/Flask routes (module/imported consts, `+`,
    f-strings, `APIRouter` / `include_router` prefixes, factory helpers such as
-   `app = create_service()` and apps imported from another module). Unresolvable
+   `app = create_service()` including nested helpers
+   (`create_service() -> new_app(**kw) -> FastAPI(**kw)`) and apps imported
+   from another module). Unresolvable
    path pieces stay `{name}` placeholders (`unresolved`, never truncated).
    SQLAlchemy Core/ORM usage and `text()`/`execute()` SQL, plus SQL strings
    held in module dicts (`QUERIES["a"]`) and callables injected as arguments,
-   `deps.run_query` / `self.run_query`, dataclass `Callable` fields, and
+   `deps.run_query` / `self.run_query`, dataclass/NamedTuple `Callable`
+   fields constructed with kwargs in another module and passed into
+   `create_app(deps)` (closure, `app.state`, or a typed parameter), and
    module-level instances (`svc = Svc(run_query); svc.go()`). Unresolvable
    typed dispatch is `unresolved_calls`. HTTP routes require a known
    FastAPI/Flask app, APIRouter, or Blueprint, or a module-level
@@ -148,24 +155,36 @@ flowchart LR
    Constructor/annotation dispatch
    (`Drainer(outbox)` → `self.outbox.settle`, `store: Store` → `store.save`).
    Firebase Functions + Firestore collections, including
-   document refs (`ref.set` after `collection().document()`), transactions,
-   and batches. Celery / RQ / Cloud Tasks / Pub/Sub (enqueue linked to the
+   document refs (`ref.set` after `collection().document()`, including an
+   assigned `ref` variable), transactions, and batches. Non-DB calls inside
+   a Firestore write dict (`datetime.now()`) are not `table:unknown`.
+   Celery / RQ / Cloud Tasks / Pub/Sub (enqueue linked to the
    consumer by URL suffix, a one-hop URL helper, or `queues:`) and
    `while True` workers. `supabase.rpc("fn")` links to SQL functions.
    Client URLs keep the env/host origin (`os.environ["X_URL"]`), not a
-   local variable name.
+   local variable name. `payload.get` / Mapping `.get` are not HTTP;
+   only `requests` / `httpx` / `aiohttp` / `urllib` clients and sessions.
+   A constructor/config `base_url` is `{base}+path`, not a relative fetch.
 4. **JavaScript / TypeScript detector** — Express / Fastify / Hono routes
    on a known app/router, including chained factories
-   (`new Hono().use('*', mw).get('/a', h)`), `.basePath('/v1')`, and
-   `.route('/x', sub)` / `app.use('/v1/items', importedRouter)` with the
+   (`new Hono().use('*', mw).get('/a', h)`), including chained-export
+   routers mounted across files
+   (`export const r = new Hono().use(mw).get('/a', h)` then
+   `app.route('/v1/p', r)` / nested `.route('/api', b)`), `.basePath('/v1')`,
+   and `.route('/x', sub)` / `app.use('/v1/items', importedRouter)` with the
    mount prefix applied across files. Known HTTP clients
    (`fetch`, `axios` + instances, `ky`, `ofetch`, `got`, `superagent`)
    emit outbound `calls_http`; `Map` / `Set` / `Headers` / `URLSearchParams`
    / `searchParams` / `config.headers` do not. `axios.create({baseURL})` /
    `ky` / `ofetch` instances (exported, factory-built, or passed as a
-   parameter) and `request(path)` wrappers compose the outbound URL.
-   Relative `fetch('/projects')` matches only the same repo or a
-   `services:` mapping. Inline handlers attribute `supabase.from('t')` to
+   parameter into an object-literal factory
+   `makeApi = (client) => ({ list: () => client.get('/x') })`) and
+   `request(path)` wrappers compose the outbound URL; if a parameter
+   client cannot be composed it is `unresolved_http`, never dropped.
+   Relative `fetch('/projects')` matches only the same repo; a constructor
+   or config base is `{base}+path` and may match across repos when the path
+   has 2+ literal segments or `services:` maps it. Inline handlers
+   attribute `supabase.from('t')` to
    the route. `.ts`/`.tsx` use tree-sitter-typescript. `pg`/`postgres`
    `query()` SQL and Supabase Edge Functions
    (`serve` / `Deno.serve` in `supabase/functions/<name>/index.ts` →
@@ -257,7 +276,12 @@ table and collection names (`orders`, `users`, `tenants`, `notifications`,
   `getJSON` / TS axios-ky `baseURL` composition, same-repo relative
   `fetch`, injected callables + `unresolved_calls`, Go import-path
   suffix without `go.mod`, Firestore non-DB dicts, `table:unknown`
-  entrypoint flag. **This release.**
+  entrypoint flag.
+- **v0.2.6** — Chained-export Hono nested mounts, nested FastAPI/Flask
+  factories, Deps dataclass/NamedTuple callables into `create_app`,
+  axios/ky object-literal factories, Go PathEscape/sprintf param
+  routes, constructor `{base}` HTTP matching, Python dict.get is not
+  HTTP, assigned Firestore document refs. **This release.**
 - **v0.3** — GitHub Action that warns when a PR changes a writer of a column
   that another in-flight PR also touches (“lineage conflict”).
 - **v0.4** — MCP server so agents can query `why orders.status` without

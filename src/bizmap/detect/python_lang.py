@@ -52,7 +52,17 @@ FIRESTORE_DOC_EVENTS = {
 FIRESTORE_READ = {"get", "stream", "list_documents"}
 FIRESTORE_WRITE = {"set", "update", "delete", "add"}
 SA_QUERY = {"select", "insert", "update", "delete"}
-HTTP_CLIENT_LIBS = ("httpx", "requests")
+HTTP_CLIENT_LIBS = ("httpx", "requests", "aiohttp", "urllib")
+HTTP_CLIENT_CTORS = {
+    "Client",
+    "AsyncClient",
+    "Session",
+    "AsyncSession",
+    "ClientSession",
+}
+HTTP_CLIENT_FUNCS = HTTP_METHODS | {"request", "urlopen", "urlretrieve"}
+HTTP_WRAPPER_METHODS = {"_get", "_post", "_put", "_patch", "_delete", "_request"}
+HTTP_BASE_FIELDS = {"base_url", "baseurl", "base", "host", "origin"}
 CELERY_DECORATORS = {"task", "shared_task"}
 
 
@@ -237,22 +247,44 @@ def _ctor_prefix(call: Node) -> tuple[str, str] | None:
 
 
 def _collect_app_factories(parsed: list) -> dict[str, tuple[str, str]]:
-    """Functions that return FastAPI()/Flask()/APIRouter()/Blueprint()."""
+    """Functions that return FastAPI()/Flask()/APIRouter()/Blueprint().
+
+    Nested helpers (``create_service() -> new_app(**kw) -> FastAPI(**kw)``)
+    are followed across modules up to depth 5.
+    """
     factories: dict[str, tuple[str, str]] = {}
-    for _path, _rf, _src, _tree, module, _imap, fns in parsed:
-        for fn in fns:
-            spec = _function_app_factory(fn.node)
-            if spec is None:
-                continue
-            factories[fn.name] = spec
-            factories[fn.qualname] = spec
-            factories[f"{module}.{fn.name}"] = spec
+    for _ in range(5):
+        changed = False
+        for _path, _rf, _src, _tree, module, imap, fns in parsed:
+            for fn in fns:
+                spec = _function_app_factory(fn.node, factories, imap)
+                if spec is None:
+                    continue
+                for key in (fn.name, fn.qualname, f"{module}.{fn.name}"):
+                    if factories.get(key) != spec:
+                        factories[key] = spec
+                        changed = True
+        if not changed:
+            break
     return factories
 
 
-def _function_app_factory(fn_node: Node) -> tuple[str, str] | None:
+def _function_app_factory(
+    fn_node: Node,
+    factories: dict[str, tuple[str, str]] | None = None,
+    imap: ImportMap | None = None,
+) -> tuple[str, str] | None:
+    factories = factories or {}
+    imap = imap or ImportMap()
     local: dict[str, tuple[str, str]] = {}
     found: tuple[str, str] | None = None
+
+    def spec_of(call: Node) -> tuple[str, str] | None:
+        spec = _ctor_prefix(call)
+        if spec is not None:
+            return spec
+        return _lookup_app_factory(call_callee_name(call), imap, factories)
+
     for node in walk(fn_node):
         if node.type == "assignment":
             left = node.child_by_field_name("left")
@@ -260,7 +292,7 @@ def _function_app_factory(fn_node: Node) -> tuple[str, str] | None:
             if left is None or right is None or left.type != "identifier":
                 continue
             if right.type == "call":
-                spec = _ctor_prefix(right)
+                spec = spec_of(right)
                 if spec is not None:
                     local[text(left)] = spec
         if node.type != "return_statement":
@@ -269,7 +301,7 @@ def _function_app_factory(fn_node: Node) -> tuple[str, str] | None:
         if expr is None:
             continue
         if expr.type == "call":
-            spec = _ctor_prefix(expr)
+            spec = spec_of(expr)
             if spec is not None:
                 found = spec
         elif expr.type == "identifier" and text(expr) in local:
@@ -286,6 +318,88 @@ def _inside_firestore_write(node: Node) -> bool:
         cur = cur.parent
         depth += 1
     return False
+
+
+def _normalize_http_base(url: str) -> str:
+    """Rewrite constructor/config origin fields to ``{base}`` + path."""
+    if not url.startswith("{") or "}" not in url:
+        return url
+    inner, rest = url[1:].split("}", 1)
+    leaf = inner.split(".")[-1]
+    if leaf.lower() in HTTP_BASE_FIELDS:
+        return "{base}" + rest
+    return url
+
+
+def _placeholder_is_local_base(res: ResolvedString) -> bool:
+    if not res.unresolved:
+        return False
+    inner = (res.placeholder or res.path_text or "").strip("{}")
+    leaf = inner.split(".")[-1].lower()
+    return leaf in HTTP_BASE_FIELDS
+
+
+def _collect_py_http_clients(tree: Node, imap: ImportMap) -> set[str]:
+    """Module names, constructors, and instances of requests/httpx/aiohttp/urllib."""
+    clients: set[str] = set()
+    for raw in imap.raw:
+        low = raw.lower()
+        for lib in HTTP_CLIENT_LIBS:
+            if lib in low:
+                clients.add(lib)
+                if lib == "urllib":
+                    clients.add("urllib.request")
+                    clients.add("request")
+    for local, (mod, orig) in imap.from_names.items():
+        if any(lib in mod for lib in HTTP_CLIENT_LIBS):
+            clients.add(local)
+            if orig in HTTP_CLIENT_CTORS or orig.lower() in HTTP_CLIENT_FUNCS:
+                clients.add(local)
+    for alias, mod in imap.modules.items():
+        if any(lib in mod for lib in HTTP_CLIENT_LIBS):
+            clients.add(alias)
+    for node in walk(tree):
+        if node.type == "assignment":
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
+            lname = text(left) if left is not None and left.type == "identifier" else ""
+            if not lname or right is None:
+                continue
+            if right.type == "identifier" and text(right) in clients:
+                clients.add(lname)
+                continue
+            if right.type != "call":
+                continue
+            callee = call_callee_name(right)
+            qual = call_qualname(right)
+            if callee in HTTP_CLIENT_CTORS or any(lib in qual for lib in HTTP_CLIENT_LIBS):
+                if (
+                    callee in HTTP_CLIENT_CTORS
+                    or "Client" in callee
+                    or "Session" in callee
+                    or any(lib in qual for lib in HTTP_CLIENT_LIBS)
+                ):
+                    clients.add(lname)
+        if node.type == "with_item":
+            value = node.child_by_field_name("value")
+            alias = node.child_by_field_name("alias")
+            if alias is None and node.named_children:
+                alias = node.named_children[-1] if len(node.named_children) > 1 else None
+            alias_name = ""
+            if alias is not None:
+                if alias.type == "identifier":
+                    alias_name = text(alias)
+                elif alias.named_children:
+                    ident = alias.named_children[-1]
+                    if ident.type == "identifier":
+                        alias_name = text(ident)
+            if not alias_name or value is None:
+                continue
+            qual = call_qualname(value) if value.type == "call" else text(value)
+            callee = call_callee_name(value) if value.type == "call" else ""
+            if callee in HTTP_CLIENT_CTORS or any(lib in qual for lib in HTTP_CLIENT_LIBS):
+                clients.add(alias_name)
+    return clients
 
 
 def _ensure_path(path: str) -> str:
@@ -968,7 +1082,7 @@ class PythonAnalyzer:
             (fn.class_name, fn.name): fn for fn in fns if fn.class_name
         }
         imported_fns = self._imported_functions(imap, analysis)
-        has_http_lib = any(any(lib in s for s in imap.raw) for lib in HTTP_CLIENT_LIBS)
+        http_clients = _collect_py_http_clients(tree, imap)
         local_dicts = local_dicts or {}
         dicts_by_module = dicts_by_module or {}
         consts_by_module = consts_by_module or {}
@@ -1041,7 +1155,15 @@ class PythonAnalyzer:
                 self._record_sqlalchemy(analysis, fn, node, method, pos, resolve_fn, evidence)
                 self._record_firestore(analysis, fn, node, method, resolve_fn, evidence, refmap)
                 self._record_http_client(
-                    analysis, fn, node, method, qual, pos, has_http_lib, resolve_fn, evidence
+                    analysis,
+                    fn,
+                    node,
+                    method,
+                    qual,
+                    pos,
+                    http_clients,
+                    resolve_fn,
+                    evidence,
                 )
                 self._record_queues(analysis, fn, node, method, qual, pos, resolve_fn, evidence)
                 self._record_rpc(analysis, fn, node, method, pos, resolve_fn, evidence)
@@ -1127,10 +1249,9 @@ class PythonAnalyzer:
         local_dicts: dict[str, dict[str, ResolvedString]] | None = None,
         dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]] | None = None,
     ) -> None:
-        if _inside_firestore_write(node) or (
-            method in FIRESTORE_WRITE | FIRESTORE_READ | {"collection", "document"}
-            and _collections_in_chain(node, resolve)
-        ):
+        if method in FIRESTORE_WRITE | FIRESTORE_READ | {"collection", "document"}:
+            return
+        if _inside_firestore_write(node):
             return
         for rule in self._sql_rules:
             if not method_matches(method, (rule.detect.get("calls") or {}).get("method")):
@@ -1347,24 +1468,39 @@ class PythonAnalyzer:
         method: str,
         qual: str,
         pos: list[Node],
-        has_http_lib: bool,
+        http_clients: set[str],
         resolve,
         evidence: Evidence,
     ) -> None:
         method_l = method.lower()
-        looks_client = any(lib in qual for lib in HTTP_CLIENT_LIBS) or (
-            has_http_lib and method_l in HTTP_METHODS | {"request"}
+        func = node.child_by_field_name("function")
+        recv = ""
+        if func is not None and func.type == "attribute" and func.named_children:
+            recv = text(func.named_children[0])
+        wrapper = method_l in HTTP_WRAPPER_METHODS or method in HTTP_WRAPPER_METHODS
+        lib_call = any(lib in qual for lib in HTTP_CLIENT_LIBS)
+        instance_call = bool(recv) and recv in http_clients and method_l in HTTP_CLIENT_FUNCS
+        module_call = recv in HTTP_CLIENT_LIBS or recv.split(".")[-1] in HTTP_CLIENT_LIBS
+        module_call = module_call and method_l in HTTP_CLIENT_FUNCS
+        ident_client = (
+            func is not None
+            and func.type == "identifier"
+            and text(func) in http_clients
+            and method_l in HTTP_CLIENT_FUNCS
         )
-        if not looks_client:
+        if not (lib_call or instance_call or module_call or ident_client or wrapper):
             return
         url_node = None
         kw = call_kwargs(node)
-        if method_l == "request":
+        if method_l in {"request", "_request"}:
             mres = resolve(pos[0]) if pos else resolve(kw.get("method"))
-            http_method = (mres.path_text if mres and mres.usable else "GET").upper()
-            url_node = pos[1] if len(pos) > 1 else kw.get("url")
+            http_method = (mres.path_text if mres and mres.usable else "POST").upper()
+            url_node = pos[1] if len(pos) > 1 else kw.get("url") or (pos[0] if pos else None)
+        elif method_l in {"urlopen", "urlretrieve"}:
+            http_method = "GET"
+            url_node = pos[0] if pos else kw.get("url")
         else:
-            http_method = method.upper()
+            http_method = method_l.lstrip("_").upper()
             url_node = pos[0] if pos else kw.get("url")
         if url_node is None:
             return
@@ -1384,7 +1520,7 @@ class PythonAnalyzer:
                 PyHttpCall(
                     function=fn,
                     method=http_method,
-                    url=url,
+                    url=_normalize_http_base(url),
                     evidence=evidence,
                     unresolved=unresolved,
                     confidence=conf,
@@ -1945,12 +2081,34 @@ def _resolve_callable_injection(
         hit = _unique_fn(by_name.get(field_name) or [])
         return hit.qualname if hit else None
 
+    def _node_key(node: Node) -> tuple[int, int, str]:
+        return (node.start_byte, node.end_byte, node.type)
+
+    by_node = {_node_key(fn.node): fn for fn in analysis.functions.values()}
+
+    def enclosing_fns(fn: PyFunction) -> list[PyFunction]:
+        out: list[PyFunction] = []
+        cur = fn.node.parent
+        while cur is not None:
+            if cur.type == "function_definition":
+                hit = by_node.get(_node_key(cur))
+                if hit is not None:
+                    out.append(hit)
+            cur = cur.parent
+        return out
+
     new_calls: list[tuple[str, str, Evidence, Confidence]] = []
     for fn in analysis.functions.values():
         params = set(param_of.get(fn.qualname) or [])
-        anns = param_ann.get(fn.qualname) or {}
+        anns = dict(param_ann.get(fn.qualname) or {})
+        for enc in enclosing_fns(fn):
+            params.update(param_of.get(enc.qualname) or [])
+            anns.update(param_ann.get(enc.qualname) or {})
         for node in walk(fn.node):
             if node.type != "call":
+                continue
+            owner = _enclosing_fn_node(node)
+            if owner is not None and _node_key(owner) != _node_key(fn.node):
                 continue
             method = call_callee_name(node)
             func = node.child_by_field_name("function")
@@ -1976,6 +2134,15 @@ def _resolve_callable_injection(
                 field = method
                 obj = func.named_children[0]
                 obj_name = text(obj) if obj.type == "identifier" else ""
+                if obj.type == "attribute" and obj.named_children:
+                    tail = text(obj.named_children[-1]) if len(obj.named_children) >= 2 else ""
+                    # app.state.deps.fetch() / request.app.state.deps.fetch()
+                    if tail and (
+                        tail in params
+                        or tail in anns
+                        or any(tail == fld for _cls, fld in field_targets)
+                    ):
+                        obj_name = tail
                 targets: set[str] = set()
                 if obj_name == "self" and fn.class_name:
                     targets.update(field_targets.get((fn.class_name, field), ()))
@@ -2022,6 +2189,24 @@ def _resolve_callable_injection(
                         PyUnresolvedCall(
                             caller=fn.qualname,
                             callee=f"{fn.class_name}.{field}",
+                            evidence=evidence,
+                        )
+                    )
+                typ = anns.get(obj_name)
+                class_methods = {
+                    f.name for f in analysis.functions.values() if f.class_name == typ
+                }
+                if (
+                    not targets
+                    and typ
+                    and typ in callable_fields
+                    and field not in class_methods
+                    and field not in {"__init__", "__new__", "__post_init__"}
+                ):
+                    analysis.unresolved_calls.append(
+                        PyUnresolvedCall(
+                            caller=fn.qualname,
+                            callee=f"{typ}.{field}",
                             evidence=evidence,
                         )
                     )
@@ -2393,10 +2578,15 @@ def _class_field_env(
                         continue
                     if text(left).startswith("self."):
                         res = resolve(right)
+                        field = text(left)
+                        leaf = field.split(".", 1)[-1]
+                        if leaf.lower() in HTTP_BASE_FIELDS and (
+                            not res.usable or _placeholder_is_local_base(res)
+                        ):
+                            res = ResolvedString(None, False, True, placeholder="{base}")
                         if res.usable:
-                            field = text(left)
                             out[field] = res
-                            out[field.split(".", 1)[-1]] = res
+                            out[leaf] = res
     return out
 
 

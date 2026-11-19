@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.2.6 — 2026-11-19
+
+Chained-export Hono mounts, nested Python app factories, injected Deps
+callables, axios/ky object-literal factories, dynamic Go URL segments,
+constructor-base HTTP matching, Python dict.get precision, and assigned
+Firestore document refs after a private evaluation of v0.2.5. Behavior is
+generic; tests and fixtures are synthetic only (`orders`, `users`,
+`tenants`, `documents`, `jobs`, `items`).
+
+### Fixed
+
+- **Chained-export Hono mounts**: `export const r = new Hono().use(mw).get('/a', h).post('/b/:id', h)`
+  mounted via `app.route('/v1/p', r)` (and nested `.route('/api', b)`)
+  records the full prefix `/api/v1/p/a`. Statement-style mounts already
+  worked; chained-export style now uses the same cross-file mount path.
+- **Nested FastAPI/Flask factories**: `create_service() -> new_app(**kw) -> FastAPI(**kw)`
+  (across modules, depth up to 5) keeps `@app.get` / `@app.route` on the
+  caller's variable.
+- **Deps callables**: a dataclass/NamedTuple of callables constructed with
+  keyword args in another module (`Deps(fetch=_fetch, save=_save)`) and
+  passed into `create_app(deps)` resolves `deps.fetch(...)` in nested
+  handlers, `app.state.deps`, and typed parameters so SQL reaches tables.
+  Unresolvable typed dispatch emits `unresolved_calls`.
+- **TS object-literal client factories**: `export const makeApi = (client) => ({ list: () => client.get('/x') })`
+  called as `makeApi(api)` where `api = axios.create({baseURL: ENV})`
+  composes `{ENV}/x` `calls_http`. If the instance is not composable the
+  call is kept as `unresolved_http` (never dropped).
+- **Go dynamic URL segments**: `"/items/" + url.PathEscape(id) + "/approve"`
+  and `fmt.Sprintf("/items/%s/approve", id)` normalize the hole to a param
+  placeholder and match `/items/:id/approve` or `{id}` routes.
+- **Constructor/config HTTP bases**: a client whose base comes from a
+  constructor parameter or config field (`self.base_url`, Go `baseURL`) is
+  not a relative fetch. Treat it as `{base}+path` and match across repos
+  when the remaining path has 2+ literal segments (inferred) or
+  `services:` maps it. Only bare `fetch('/x')` stays same-repo.
+- **Python dict.get**: `payload.get('k')` / `d.get(...)` on dicts, params,
+  and Mapping are not HTTP. Only `requests` / `httpx` / `aiohttp` /
+  `urllib` clients and their sessions/instances emit `calls_http`.
+- **Assigned Firestore refs**: `ref = db.collection('c').document(x)` then
+  `ref.update({'at': datetime.now()})` writes `c` and does not invent a
+  `table:unknown` read from the non-DB call inside the dict.
+
+### Changed
+
+- Graph format **0.2.6**.
+
 ## 0.2.5 — 2026-11-19
 
 Factory/imported FastAPI+Flask routes, HTTP-client precision, SQL concat
