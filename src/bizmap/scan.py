@@ -707,7 +707,7 @@ def _apply_python(
                 extra_attrs["via"] = via
             if getattr(site, "sink_not_scanned", False):
                 extra_attrs["sink_not_scanned"] = True
-            edge = graph.add_edge(
+            graph.add_edge(
                 _kind_edge(access.kind),
                 fid,
                 target,
@@ -715,10 +715,6 @@ def _apply_python(
                 evidence=site.evidence,
                 **extra_attrs,
             )
-            if getattr(site, "sink_not_scanned", False):
-                # Nothing scanned proves the unscanned callee runs this SQL:
-                # cap at inferred even if another observation said exact.
-                edge.confidence = Confidence.INFERRED
             note = getattr(site, "note", None)
             if note:
                 node = graph.get(fid)

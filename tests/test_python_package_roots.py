@@ -82,3 +82,34 @@ def test_colliding_package_names_fall_back_to_paths(tmp_path: Path) -> None:
         function_id("services.a.src.common.util.helper"),
         function_id("services.b.src.common.util.helper"),
     }, ids
+
+
+def test_nested_functions_with_same_name_get_distinct_ids(tmp_path: Path) -> None:
+    _write(tmp_path, "schema.sql", "CREATE TABLE a (x int);\nCREATE TABLE b (y int);\n")
+    _write(
+        tmp_path,
+        "panels.py",
+        """
+from sqlalchemy import text
+
+
+def sales(conn):
+    def compute():
+        return conn.execute(text("SELECT x FROM a"))
+
+    return compute()
+
+
+def stock(conn):
+    def compute():
+        return conn.execute(text("SELECT y FROM b"))
+
+    return compute()
+""",
+    )
+    graph = scan_path(tmp_path)
+    assert function_id("panels.sales.compute") in graph.nodes
+    assert function_id("panels.stock.compute") in graph.nodes
+    assert "table:a" in _reach(graph, function_id("panels.sales.compute"))
+    assert "table:b" not in _reach(graph, function_id("panels.sales.compute"))
+    assert "table:b" in _reach(graph, function_id("panels.stock.compute"))

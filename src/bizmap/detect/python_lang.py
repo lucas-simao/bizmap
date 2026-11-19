@@ -198,6 +198,19 @@ def _enclosing_class(node: Node) -> str | None:
     return None
 
 
+def _enclosing_function_names(node: Node) -> str | None:
+    """`outer.mid` for a function nested in functions (up to the class/module)."""
+    names: list[str] = []
+    cur = node.parent
+    while cur is not None and cur.type != "class_definition":
+        if cur.type == "function_definition":
+            ident = cur.child_by_field_name("name")
+            if ident is not None:
+                names.append(text(ident))
+        cur = cur.parent
+    return ".".join(reversed(names)) or None
+
+
 def _enclosing_fn_node(node: Node) -> Node | None:
     cur = node.parent
     while cur is not None:
@@ -726,12 +739,18 @@ class PyFunction:
     node: Node
     class_name: str | None = None
     role: str | None = None
+    # enclosing function(s) for nested definitions: `outer` / `outer.mid`
+    parent: str | None = None
 
     @property
     def qualname(self) -> str:
+        parts = [self.module]
         if self.class_name:
-            return f"{self.module}.{self.class_name}.{self.name}"
-        return f"{self.module}.{self.name}"
+            parts.append(self.class_name)
+        if self.parent:
+            parts.append(self.parent)
+        parts.append(self.name)
+        return ".".join(parts)
 
 
 @dataclass
@@ -1080,6 +1099,7 @@ class PythonAnalyzer:
                     node=node,
                     class_name=_enclosing_class(node),
                     role=role,
+                    parent=_enclosing_function_names(node),
                 )
             )
         return fns
@@ -4288,7 +4308,8 @@ def _link_unscanned_sinks(
                     ]
                     for site in analysis.sql_sites:
                         if site.function.qualname == fn.qualname and _norm_sql(site.sql) == norm:
-                            site.confidence = Confidence.INFERRED
+                            # confidence describes the SQL (literal → exact);
+                            # the unknown executor is the sink_not_scanned flag
                             site.sink_not_scanned = True
                             matched = True
                     if not matched:
@@ -4298,7 +4319,6 @@ def _link_unscanned_sinks(
                                 sql=sql,
                                 dynamic=False,
                                 evidence=ev,
-                                confidence=Confidence.INFERRED,
                                 sink_not_scanned=True,
                             )
                         )

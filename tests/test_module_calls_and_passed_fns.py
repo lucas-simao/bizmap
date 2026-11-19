@@ -84,10 +84,10 @@ def sales_route(store: str):
 
 @app.get("/exports/items")
 def export_items(request):
-    return _exports_response(request, exports.export_items)
+    return _build_response(request, exports.export_items)
 
 
-def _exports_response(request, fn):
+def _build_response(request, fn):
     return fn(request.query_params)
 """,
     )
