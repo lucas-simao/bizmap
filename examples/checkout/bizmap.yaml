@@ -1,0 +1,16 @@
+# Three services, one database:
+#   web (TypeScript, axios)  →  api (Go, Echo + pgx)  →  billing (Python, FastAPI)
+#   billing → api when the payment provider confirms a charge.
+name: checkout
+database: checkout
+repos:
+  - web
+  - api
+  - billing
+services:
+  api:
+    url: http://api.internal
+    env: [VITE_API_URL, API_URL]
+  billing:
+    url: http://billing.internal
+    env: BILLING_URL

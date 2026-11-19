@@ -2,7 +2,24 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Python phantom unknown reads**: `execute(text("..."), params)` no longer
+  adds a `reads <table> [unknown]` next to the exact edges (the `text()` call
+  was also read as unresolved SQL), and SQLAlchemy builders
+  (`update(T).where(...).values(...)`, `insert(...)`, `delete(...)`) no
+  longer produce `table:unknown` because their source text contains
+  `UPDATE`/`INSERT`/`DELETE`.
+
 ### Added
+
+- **`examples/checkout`**: web (TypeScript + axios) → api (Go + Echo + pgx,
+  ticker job) → billing (Python + FastAPI) → api, one database. Used by the
+  README demo, covered by a chain test and a golden snapshot; CI prints its
+  Mermaid diagram, `why orders.status`, and report.
+- **README rewrite**: problem-first pitch, 3-service demo with real output,
+  stack matrix, comparison, coverage report. Detector-by-detector detail
+  moved to `docs/how-it-works.md`.
 
 - **`bizmap report`** (`--json`, `--redact`, `--salt`): coverage of a scan —
   entrypoints reaching a table/collection (by kind, with the list that does

@@ -1,4 +1,4 @@
-# nodes (95)
+# nodes (94)
 collection collection:events
 collection collection:jobs
 collection collection:notifications
@@ -92,9 +92,8 @@ table table:audit_log
 table table:documents
 table table:orders
 table table:tenants
-table table:unknown
 table table:users
-# edges (149)
+# edges (145)
 calls catalog/function:app.get_order -> catalog/function:db.fetch_order [inferred]
 calls catalog/function:app.pay_order -> catalog/function:db.mark_paid [inferred]
 calls catalog/function:app.post_order -> catalog/function:db.create_order [inferred]
@@ -120,21 +119,17 @@ reads catalog/function:app.get_order -> table:orders [inferred]
 reads catalog/function:app.pay_order -> table:orders [inferred]
 reads catalog/function:app.remove_order -> table:orders [inferred]
 reads catalog/function:db.cancel_order -> column:orders.id [exact]
-reads catalog/function:db.cancel_order -> table:unknown [unknown]
-reads catalog/function:db.create_order -> table:unknown [unknown]
 reads catalog/function:db.fetch_order -> column:orders.id [exact]
 reads catalog/function:db.fetch_order -> table:orders [inferred]
 reads catalog/function:db.list_open_orders -> column:orders.status [exact]
 reads catalog/function:db.list_open_orders -> table:orders [inferred]
 reads catalog/function:db.mark_paid -> column:orders.id [exact]
-reads catalog/function:db.mark_paid -> table:unknown [unknown]
 reads catalog/function:db.raw_totals -> column:orders.status [exact]
 reads catalog/function:db.raw_totals -> table:orders [inferred]
 reads catalog/function:sql.apply_order_tax -> column:orders.id [exact]
 reads catalog/function:sql.apply_order_tax -> column:orders.order_id [exact]
 reads storefront/function:client.local_open_orders -> column:orders.id [exact]
 reads storefront/function:client.local_open_orders -> column:orders.status [exact]
-reads storefront/function:client.local_open_orders -> table:orders [unknown]
 reads worker/entrypoint:job:main.sweep -> collection:jobs [inferred]
 reads worker/function:main.sweep -> collection:jobs [exact]
 triggers catalog/entrypoint:celery:tasks.refresh_orders -> catalog/function:tasks.refresh_orders [exact]

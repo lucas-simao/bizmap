@@ -32,6 +32,8 @@ CASES = {
     "clinic": ROOT / "examples" / "clinic",
     # pyplatform/bizmap.yaml lists `repos:`, so this is a joint multi-repo scan.
     "pyplatform": ROOT / "examples" / "pyplatform",
+    # web (TS) → api (Go) → billing (Python) → api; README demo.
+    "checkout": ROOT / "examples" / "checkout",
 }
 
 
