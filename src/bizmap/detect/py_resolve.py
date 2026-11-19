@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -157,8 +158,6 @@ def parse_imports(root: Node, module: str) -> ImportMap:
         elif node.type == "import_from_statement":
             imap.raw.append(text(node))
             mod = _from_module(node, module)
-            if not mod:
-                continue
             skip_module = True
             for child in node.named_children:
                 if child.type == "relative_import":
@@ -543,7 +542,88 @@ def collect_module_dicts(
             dicts[name] = dict_literal_map(value, resolve)
         elif value.type == "identifier" and text(value) in dicts:
             dicts[name] = dicts[text(value)]
+        elif value.type == "dictionary_comprehension":
+            transformed = _dict_from_comprehension(value, dicts)
+            if transformed:
+                dicts[name] = transformed
     return dicts
+
+
+def _dict_from_comprehension(
+    node: Node,
+    dicts: dict[str, dict[str, ResolvedString]],
+) -> dict[str, ResolvedString] | None:
+    """``{k: textwrap.dedent(v) for k, v in RAW.items()}`` / ``v.strip()``."""
+    src_name = ""
+    for cur in walk(node):
+        if cur.type != "call":
+            continue
+        if call_callee_name(cur) != "items":
+            continue
+        func = cur.child_by_field_name("function")
+        if func is None or func.type != "attribute" or not func.named_children:
+            continue
+        obj = func.named_children[0]
+        if obj.type == "identifier":
+            src_name = text(obj)
+            break
+    if not src_name or src_name not in dicts:
+        return None
+    src = dicts[src_name]
+    pair = next((c for c in node.named_children if c.type == "pair"), None)
+    val_n = pair.child_by_field_name("value") if pair is not None else None
+    transform = _comprehension_transform(val_n)
+    out: dict[str, ResolvedString] = {}
+    for key, val in src.items():
+        texts = val.all_texts() or ([val.path_text] if val.path_text else [])
+        if not texts:
+            out[key] = val
+            continue
+        mapped = [transform(t) for t in texts]
+        mapped = [t for t in mapped if t]
+        static = val.fully_static
+        out[key] = ResolvedString(
+            mapped[0] if mapped else val.text,
+            static,
+            not static,
+            placeholder=None if static else (mapped[0] if mapped else val.placeholder),
+            alternatives=mapped if len(mapped) > 1 else None,
+        )
+    return out or None
+
+
+def _comprehension_transform(node: Node | None):
+    """Return a string transform for strip/dedent/identity."""
+
+    def identity(s: str) -> str:
+        return s
+
+    if node is None:
+        return identity
+    raw = text(node)
+    leaf = call_callee_name(node) if node.type == "call" else ""
+    if leaf == "dedent" or "dedent" in raw:
+        return lambda s: textwrap.dedent(s)
+    if leaf == "strip" or raw.endswith(".strip()") or ".strip(" in raw:
+        return lambda s: s.strip()
+    if leaf == "lstrip" or ".lstrip(" in raw:
+        return lambda s: s.lstrip()
+    if leaf == "rstrip" or ".rstrip(" in raw:
+        return lambda s: s.rstrip()
+    return identity
+
+
+def imported_module_name(head: str, imap: ImportMap) -> str | None:
+    """Resolve ``queries`` / ``q`` to a scanned module path."""
+    if head in imap.modules:
+        return imap.modules[head]
+    if head in imap.from_names:
+        pkg, orig = imap.from_names[head]
+        if pkg and orig:
+            nested = f"{pkg}.{orig}"
+            return nested
+        return orig or pkg or head
+    return None
 
 
 def lookup_dict(
@@ -562,8 +642,48 @@ def lookup_dict(
         found = (dicts_by_module.get(mod) or {}).get(name)
         if found:
             return found
+        nested = f"{mod}.{orig}" if mod else orig
+        found = (dicts_by_module.get(nested) or {}).get(orig)
+        if found:
+            return found
     if name in imap.modules:
         return None
+    return None
+
+
+def lookup_dict_from_node(
+    obj: Node | None,
+    imap: ImportMap,
+    dicts: dict[str, dict[str, ResolvedString]],
+    dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]],
+) -> dict[str, ResolvedString] | None:
+    """``Q``, ``queries.Q``, or ``q.Q`` after ``import pkg.queries as q``."""
+    if obj is None:
+        return None
+    if obj.type == "identifier":
+        return lookup_dict(text(obj), imap, dicts, dicts_by_module)
+    if obj.type != "attribute" or len(obj.named_children) < 2:
+        return None
+    head = obj.named_children[0]
+    attr = obj.named_children[-1]
+    if head.type != "identifier":
+        return None
+    dname = text(attr)
+    local_hit = lookup_dict(dname, imap, dicts, dicts_by_module)
+    if local_hit and text(head) not in imap.modules and text(head) not in imap.from_names:
+        return local_hit
+    mod = imported_module_name(text(head), imap)
+    if not mod:
+        return None
+    found = (dicts_by_module.get(mod) or {}).get(dname)
+    if found:
+        return found
+    # ``from . import queries`` stored as (pkg, queries) — try pkg.queries
+    if "." not in mod:
+        for key, dmap in dicts_by_module.items():
+            if key == mod or key.endswith("." + mod):
+                if dname in dmap:
+                    return dmap[dname]
     return None
 
 
@@ -580,9 +700,9 @@ def _resolve_dict_subscript(
         node.named_children[0] if node.named_children else None
     )
     idx = _subscript_index(node)
-    if obj is None or obj.type != "identifier":
+    if obj is None:
         return None
-    dmap = lookup_dict(text(obj), imap, dicts, dicts_by_module)
+    dmap = lookup_dict_from_node(obj, imap, dicts, dicts_by_module)
     if not dmap:
         return None
     key = resolve_expr(idx, env, module_consts, imap, consts_by_module, dicts, dicts_by_module)

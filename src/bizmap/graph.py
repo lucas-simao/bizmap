@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -19,7 +20,7 @@ CONFIDENCE_RANK = {
 }
 
 
-GRAPH_VERSION = "0.2.6"
+GRAPH_VERSION = "0.2.7"
 NODE_TYPES = (
     "entrypoint",
     "function",
@@ -46,6 +47,27 @@ def parse_confidence(value: str | Confidence | None) -> Confidence:
 
 def better_confidence(a: Confidence, b: Confidence) -> Confidence:
     return a if CONFIDENCE_RANK[a] >= CONFIDENCE_RANK[b] else b
+
+
+def _list_sort_key(item: Any) -> str:
+    if isinstance(item, dict):
+        return json.dumps(item, sort_keys=True, default=str)
+    if isinstance(item, list):
+        return json.dumps(item, default=str)
+    return f"{type(item).__name__}:{item}"
+
+
+def sort_list_attrs(value: Any) -> Any:
+    """Sort every list (and nested lists) so JSON is PYTHONHASHSEED-stable."""
+    if isinstance(value, list):
+        items = [sort_list_attrs(v) for v in value]
+        try:
+            return sorted(items, key=_list_sort_key)
+        except TypeError:
+            return items
+    if isinstance(value, dict):
+        return {k: sort_list_attrs(v) for k, v in value.items()}
+    return value
 
 
 @dataclass
@@ -76,7 +98,8 @@ class Node:
 
     def to_dict(self) -> dict[str, Any]:
         out = {"id": self.id, "type": self.type}
-        out.update(self.attrs)
+        for key, value in self.attrs.items():
+            out[key] = sort_list_attrs(value)
         return out
 
 
@@ -100,7 +123,8 @@ class Edge:
         }
         if self.evidence:
             out["evidence"] = self.evidence.to_dict()
-        out.update(self.attrs)
+        for key, value in self.attrs.items():
+            out[key] = sort_list_attrs(value)
         return out
 
 
@@ -191,7 +215,7 @@ class Graph:
         payload: dict[str, Any] = {
             "version": self.version,
             "generated_at": self.generated_at,
-            "schema": self.schema,
+            "schema": sort_list_attrs(self.schema),
             "nodes": [n.to_dict() for n in nodes],
             "edges": [e.to_dict() for e in edges],
         }
@@ -201,16 +225,19 @@ class Graph:
             payload["database"] = self.database
         repos = self.attrs.get("repos")
         if repos:
-            payload["repos"] = repos
+            payload["repos"] = sort_list_attrs(repos)
         services = self.attrs.get("services")
         if services:
-            payload["services"] = services
+            payload["services"] = sort_list_attrs(services)
         queues = self.attrs.get("queues")
         if queues:
-            payload["queues"] = queues
+            payload["queues"] = sort_list_attrs(queues)
         unresolved = self.attrs.get("unresolved_http")
         if unresolved:
-            payload["unresolved_http"] = unresolved
+            payload["unresolved_http"] = sort_list_attrs(unresolved)
+        warnings = self.attrs.get("warnings")
+        if warnings:
+            payload["warnings"] = sort_list_attrs(warnings)
         return payload
 
     @classmethod

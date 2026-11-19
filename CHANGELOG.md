@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.2.7 — 2026-11-19
+
+TypeScript axios/ky instance parameters and class clients, Hono long chains
+and statement-style sub-apps, Python outbound wrappers and SQL-dict aliases,
+Go const aliases, and hash-stable graph JSON after a private evaluation of
+v0.2.6. Behavior is generic; tests and fixtures are synthetic only
+(`orders`, `users`, `tenants`, `documents`, `jobs`, `items`).
+
+### Fixed
+
+- **TS instance clients across modules**: an axios/ky instance passed as a
+  function parameter into an object-literal client
+  (`makeOrders = (client) => ({ list: () => client.get('/orders') })`) or a
+  class (`constructor(private client: AxiosInstance)` + `new OrdersApi(api)`)
+  keeps the caller's `baseURL`, including
+  `` `${import.meta.env.VITE_API_URL}/api/v1` ``. Dynamic segments
+  (`/orders/${id}`) become `/orders/:id`. `calls_http` matches a Go route
+  `/api/v1/orders/:id` in another scanned repo when `services:` maps
+  `VITE_API_URL` or the remaining path has 2+ literal segments.
+- **Hono long chains**: chained `.get/.post/...` with more than 12 links
+  still receive the mount prefix (iterative walk, no shallow parent cap).
+- **Hono statement-style sub-apps**: `const s = new Hono(); s.get('/x', h)`
+  mounted via `.route('/', s)` or `.route('/sub', s)` inside an exported
+  chain that is itself mounted with a prefix records the composed path
+  (`/api/x`, `/api/sub/x`).
+- **Hono/node `serve`**: `serve({ fetch: app.fetch, port })` and
+  `export default { fetch: app.fetch }` are not a false `POST /` entrypoint.
+- **Python outbound wrappers**: `def _post(self, path, body): return
+  self._transport.request('POST', self.base_url + path, ...)` is an outbound
+  helper. Callers `self._post('/internal/orders:sync', ...)` emit
+  `calls_http` with `{base}` + the literal path (constructor/config/env
+  base, matched across repos per the v0.2.6 rule). When the path is not
+  composable the caller keeps `unresolved_http`.
+- **Python SQL dict aliases**: `from . import queries; run(queries.Q['k'])`,
+  `import pkg.queries as q; q.Q[k]`, and import-time transforms
+  (`Q = {k: textwrap.dedent(v) for k, v in RAW.items()}`, `v.strip()`)
+  resolve to reads/writes. A route calling `rpc(name)` that does
+  `run_query(Q[name])` with a literal name attributes those tables to the
+  route.
+- **Go const aliases**: `const PathPrefix = shared.PathPrefix` and
+  `var Base = shared.Base + "/v1"` resolve when both packages are scanned.
+- **Determinism**: every list attribute on nodes/edges (and top-level
+  `unresolved_http` / `warnings`) is sorted so identical input yields
+  byte-identical `bizmap.json` across `PYTHONHASHSEED` values (except
+  `generated_at`).
+
+### Changed
+
+- Graph format **0.2.7**.
+
 ## 0.2.6 — 2026-11-19
 
 Chained-export Hono mounts, nested Python app factories, injected Deps
