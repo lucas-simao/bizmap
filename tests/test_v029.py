@@ -72,10 +72,10 @@ def test_fastapi_router_factory_is_not_calls_http(tmp_path: Path) -> None:
 from fastapi import APIRouter
 def make_router() -> APIRouter:
     router = APIRouter()
-    @router.get("/s2s/items/list")
+    @router.get("/internal/items/list")
     def list_items():
         return []
-    @router.post("/s2s/items/release")
+    @router.post("/internal/items/release")
     def release_item():
         return {}
     return router
@@ -93,8 +93,8 @@ app.include_router(make_router())
     )
     graph = scan_path(tmp_path)
     http = _http_eps(graph)
-    assert ("GET", "/s2s/items/list") in http, http
-    assert ("POST", "/s2s/items/release") in http, http
+    assert ("GET", "/internal/items/list") in http, http
+    assert ("POST", "/internal/items/release") in http, http
     assert len(http) == 2, http
     http_edges = [e for e in graph.edges.values() if e.type == "calls_http"]
     assert http_edges == [], [(e.from_id, e.to_id) for e in http_edges]
