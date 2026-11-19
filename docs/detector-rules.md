@@ -1,7 +1,7 @@
 # YAML detector rules
 
-BizMap ships language engines (Go, Python, and a JavaScript/TypeScript
-pass in v0.2) that interpret **declarative YAML rules**. Adding a framework
+BizMap ships language engines (Go, Python, and JavaScript/TypeScript)
+that interpret **declarative YAML rules**. Adding a framework
 should mean adding a YAML file, not a parser.
 
 Bundled rules live in `src/bizmap/rules/`. Pass extra files or directories with
@@ -11,7 +11,7 @@ Bundled rules live in `src/bizmap/rules/`. Pass extra files or directories with
 
 ```yaml
 id: echo.v4.routes          # unique
-language: go                # go | python | javascript
+language: go                # go | python | javascript | typescript
 framework: echo
 description: human text
 status: active              # active | stub  (stubs are documented but not run)
@@ -86,7 +86,19 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   subcollections are not joined into a single path.
 - Queue produce sites (`delay`, `enqueue`, `create_task`, `publish`) emit
   `enqueues`. Cloud Tasks HTTP URLs also become `calls_http` when they
-  match a scanned route.
+  match a scanned route. A one-hop helper
+  (`create_task(task={'http_request': {'url': _get_url()}})` where
+  `_get_url` returns an f-string) is traced to that return value.
+  `queues: {queue_name: <entrypoint id or route>}` links a producer even
+  without an extracted `http_url`.
+- Constructor / annotation dispatch: `Drainer(outbox)` then
+  `self.outbox.settle(...)`, or `def run(store: Store): store.save(...)`,
+  follows the class method (`inferred`). A single Protocol/ABC
+  implementer is used when the annotation is abstract.
+- Client URLs keep the env/host origin (`os.environ["X_URL"]`,
+  `os.getenv`, `settings.x_url`, a constant, or a hostname) through local
+  assignments (`base = os.environ["X_URL"]; post(base+"/p")`).
+  `services:` env matching uses that origin, not the local variable name.
 - `supabase.rpc("name")` becomes a `calls` edge to `function:sql.name`
   when that SQL function exists.
 
@@ -105,10 +117,12 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   and do not propagate table edges otherwise.
 - Injected **func fields** (`s.ring(...)` with `Service{ring: notify.Send}` or
   a constructor argument) resolve to the single assigned function.
-- **Interface dispatch**: a call on an interface-typed field, parameter, or
-  constructor-injected value (`s.Bell.Changed(e)`) follows every scanned type
-  that has the interface's method set. One implementer → `inferred` call edge;
-  several → edges to all, `inferred`, with `candidates`.
+- **Object / interface dispatch**: a call on a field, parameter, or
+  constructor-injected value (`s.Bell.Changed(e)`, `d.outbox.Settle(ctx)`)
+  follows the concrete type assigned in a constructor or composite literal,
+  or every scanned type that has the interface's method set. One implementer
+  → `inferred` call edge; several → edges to all, `inferred`, with
+  `candidates`.
 - **Dynamic SQL**: `for _, q := range []string{"UPDATE a ...", ...}` expands
   to one SQL site per element. Helpers with a `query`/`q`/`sql` string param
   bind literals/consts at the call site and attribute tables to the caller.
@@ -122,7 +136,22 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `--exclude GLOB` (repeatable) merges with YAML `exclude`. `--profile`
   prints parse / resolve / sql / propagate timings to stderr.
 
-## Bundled rules (v0.2.1)
+## JavaScript / TypeScript resolution (v0.2.2)
+
+- `.js` / `.mjs` / `.cjs` use tree-sitter-javascript; `.ts` / `.tsx` use
+  tree-sitter-typescript (`language_typescript` / `language_tsx`).
+- Express / Fastify / Hono: `app.get('/x', handler)`, `router.post`,
+  `fastify.post`, `hono.get` with a string-like path become HTTP
+  entrypoints. Group prefixes (`app.use('/api', router)`) join when seen.
+- Supabase JS: `supabase.from('t').select|insert|update|delete|upsert`
+  emits table reads/writes; `.rpc('fn')` calls `function:sql.fn` when
+  that SQL function exists.
+- `pg` / `postgres` `client.query('SELECT …')` is analyzed as SQL.
+- Supabase Edge Functions: `Deno.serve` / `serve(handler)` in
+  `supabase/functions/<name>/index.ts` become HTTP
+  `entrypoint:http:POST:/functions/v1/<name>`.
+
+## Bundled rules (v0.2.2)
 
 | File | Status | What it detects |
 | --- | --- | --- |
@@ -136,7 +165,7 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
 | `celery.yaml` | active | Celery / RQ / Cloud Tasks / Pub/Sub produce + consume |
 | `httpx.yaml` | active | httpx / requests client calls (`calls_http`) |
 | `supabase.yaml` | active | `supabase.rpc("fn")` |
-| `express.yaml` | active | Express routes, `fetch()`, `supabase.rpc` (JS/TS) |
+| `express.yaml` | active | Express / Fastify / Hono routes, `fetch()`, Supabase `.from` / `.rpc`, `pg`/`postgres` `query()` (JS/TS via tree-sitter-typescript). Edge Functions in `supabase/functions/<name>/index.ts` become HTTP `/functions/v1/<name>`. |
 
 The engine still walks a simple intra-project call graph in code (not YAML) so
 handler → service → repository reads/writes propagate to HTTP/job entrypoints

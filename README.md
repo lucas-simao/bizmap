@@ -105,16 +105,20 @@ flowchart LR
   GET_stock -->|reads inferred| inventory
 ```
 
-## How it works (v0.2.1)
+## How it works (v0.2.2)
 
 1. **Schema replayer** — applies `schema.sql` / migration folders in order
    (`CREATE TABLE IF NOT EXISTS`, quoted/schema-qualified pg_dump identifiers,
    `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, drop/add constraints, `DO $$`
    blocks) and extracts `CREATE TRIGGER` plus the tables/columns their plpgsql
-   functions write. Comments, string literals, DECLARE'd variables, INTO
+   functions write. Function bodies are re-scanned after the full replay so
+   pg_dump `CREATE FUNCTION` before `CREATE TABLE` still records those
+   tables. `EXECUTE format('UPDATE %I ...')` is dynamic `table:unknown`.
+   Comments, string literals, DECLARE'd variables, INTO
    targets, and PL/pgSQL keywords are never table nodes. `CREATE VIEW` /
    `CREATE MATERIALIZED VIEW` become `view` nodes with `derives_from` edges.
-   Also `CREATE POLICY`, `ENABLE ROW LEVEL SECURITY`, and Alembic `upgrade()`
+   Also `CREATE POLICY`, `ENABLE ROW LEVEL SECURITY`, `DROP TABLE`
+   (`dropped: true` when still referenced), and Alembic `upgrade()`
    chains (schema role, not runtime writers) including `op.execute` of views.
 2. **Go detector** — Echo v4 routes (`group.POST(path, handler)` with group
    prefixes, cross-package consts, factory handlers, and wrappers such as
@@ -130,17 +134,26 @@ flowchart LR
    pieces stay `{name}` placeholders (`unresolved`, never truncated).
    SQLAlchemy Core/ORM usage and `text()`/`execute()` SQL, plus SQL strings
    held in module dicts (`QUERIES["a"]`) and callables injected as arguments
-   or dataclass fields. Firebase Functions + Firestore collections, including
+   or dataclass fields. Constructor/annotation dispatch
+   (`Drainer(outbox)` → `self.outbox.settle`, `store: Store` → `store.save`).
+   Firebase Functions + Firestore collections, including
    document refs (`ref.set` after `collection().document()`), transactions,
    and batches. Celery / RQ / Cloud Tasks / Pub/Sub (enqueue linked to the
-   consumer by URL suffix or `queues:`) and `while True` workers.
-   `supabase.rpc("fn")` links to SQL functions.
-4. **JavaScript detector** — Express `app.get("/path", handler)`, `fetch()`,
-   and `supabase.rpc`. `.ts` files are parsed with the JavaScript grammar.
+   consumer by URL suffix, a one-hop URL helper, or `queues:`) and
+   `while True` workers. `supabase.rpc("fn")` links to SQL functions.
+   Client URLs keep the env/host origin (`os.environ["X_URL"]`), not a
+   local variable name.
+4. **JavaScript / TypeScript detector** — Express / Fastify / Hono
+   `app.get("/path", handler)` / `router.post`, `fetch()`, Supabase
+   `.from('t').select|insert|update|delete|upsert` and `.rpc`, `pg`/`postgres`
+   `query()` SQL. `.ts`/`.tsx` use tree-sitter-typescript. Supabase Edge
+   Functions (`serve` / `Deno.serve` in `supabase/functions/<name>/index.ts`)
+   become HTTP `/functions/v1/<name>`.
 5. **Call graph** — handler → service → repository using typed locals,
    constructors, import aliases, injected func fields
-   (`Service{ring: notify.Send}`), and **interface dispatch**
-   (`s.Bell.Changed(e)` → structural implementers, `inferred`, with
+   (`Service{ring: notify.Send}`), **object/interface dispatch**
+   (`s.Bell.Changed(e)`, `self.outbox.settle(...)` → structural
+   implementers / constructor-assigned types, `inferred`, with
    `candidates` when several). Unscanned/unknown receivers stay unresolved.
    Reads/writes propagate to HTTP and job entrypoints as table-level
    `inferred` edges; `table:unknown` does not. HTTP clients emit
@@ -151,9 +164,11 @@ flowchart LR
 6. **SQL** — named columns stay column-level; `SELECT *` and column-less
    INSERT are table-level. FROM-less SELECT (`now()`, `set_config`) touches
    no table. CTE/subquery/LATERAL aliases (`l`, `r`, `l.x`) are never tables.
-   When DDL is present, only schema-known tables (plus catalogs like
-   `pg_roles`) become table nodes. `pg_catalog.*`, `information_schema.*`,
-   and `pg_*` are marked `external`.
+   Dynamic table names (`"UPDATE "+t+" SET"`) stay `table:unknown`.
+   Relations named in FROM/JOIN/INSERT/UPDATE that are not in DDL become
+   `unresolved_relation` nodes (not dropped). `pg_catalog.*`,
+   `information_schema.*`, `pg_*`, `storage.*`, `vault.*`, and `auth.*`
+   are marked `external`.
 7. **Registry** — `bizmap scan a b` or `bizmap registry merge a.json b.json`
    qualifies function/entrypoint/queue ids by repo. Tables and collections
    share ids when `database:` is the same, so `why orders.status` on the
@@ -197,7 +212,10 @@ table and collection names (`orders`, `users`, `tenants`, `notifications`,
   queues), Express/`fetch` (JS grammar), and a cross-repo registry.
 - **v0.2.1** — Quoted DDL, PL/pgSQL junk-table suppression, SQL dicts /
   callable injection, views, Firestore document refs, queue→consumer
-  links, env-based `services:`. **This release.**
+  links, env-based `services:`.
+- **v0.2.2** — Forward-ref SQL functions, dynamic `table:unknown`,
+  unresolved/external relations, object dispatch, one-hop Cloud Tasks
+  URLs, HTTP origin keys, TypeScript servers. **This release.**
 - **v0.3** — GitHub Action that warns when a PR changes a writer of a column
   that another in-flight PR also touches (“lineage conflict”).
 - **v0.4** — MCP server so agents can query `why orders.status` without

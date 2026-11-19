@@ -34,7 +34,13 @@ from bizmap.http_match import (
 from bizmap.overrides import ScanConfig, apply_overrides, load_scan_config
 from bizmap.registry import merge_graphs
 from bizmap.schema_replay import Schema, replay_files
-from bizmap.sql_analyze import SqlAccess, analyze_sql, is_external_table, is_skipped_table_name
+from bizmap.sql_analyze import (
+    SqlAccess,
+    analyze_sql,
+    ident_leaf,
+    is_external_table,
+    is_skipped_table_name,
+)
 
 
 @dataclass
@@ -78,6 +84,8 @@ def _merge_schema(base: Schema, extra: Schema) -> None:
 def _add_schema_nodes(graph: Graph, schema: Schema) -> None:
     graph.schema = schema.to_dict()
     for tname, table in schema.tables.items():
+        if table.dropped:
+            continue
         tid = table_id(tname)
         extra: dict = {}
         if table.rls:
@@ -163,30 +171,56 @@ def _ensure_access_target(graph: Graph, schema: Schema, access: SqlAccess) -> st
                 graph.add_node(cid, "column", table=tname, name=access.column.lower())
             return cid
         return vid
-    ddl_known = {t.lower() for t in schema.tables} | {t.lower() for t in schema.views}
-    known = tname in schema.tables or tname in schema.views
+    live_tables = {t.lower() for t, tbl in schema.tables.items() if not tbl.dropped}
+    ddl_known = live_tables | {t.lower() for t in schema.views}
+    table_obj = schema.tables.get(tname) or schema.tables.get(ident_leaf(tname))
+    dropped = bool(table_obj and table_obj.dropped)
+    known = (tname in live_tables) or tname in schema.views
     external = access.external or is_external_table(tname)
     if external:
         tid = table_id(tname)
-        graph.add_node(tid, "table", name=tname, external=True)
+        graph.add_node(
+            tid,
+            "table",
+            name=tname,
+            external=True,
+            kind="external_relation",
+        )
         if access.column:
             cid = column_id(tname, access.column)
-            graph.add_node(cid, "column", table=tname, name=access.column.lower(), external=True)
+            graph.add_node(
+                cid, "column", table=tname, name=access.column.lower(), external=True
+            )
             return cid
         return tid
-    # With DDL, only schema tables/views become nodes (plus schema-qualified
-    # names). Unknown identifiers are unresolved attributes, not nodes.
+    if dropped:
+        tid = table_id(tname)
+        graph.add_node(tid, "table", name=tname, dropped=True)
+        if access.column:
+            cid = column_id(tname, access.column)
+            if cid not in graph.nodes:
+                graph.add_node(cid, "column", table=tname, name=access.column.lower())
+            return cid
+        return tid
     if ddl_known and not known:
-        if getattr(access, "schema_qualified", False):
-            tid = table_id(tname)
-            graph.add_node(tid, "table", name=tname)
+        # Named FROM/JOIN/INSERT/UPDATE relation missing from DDL.
+        if access.kind == "read":
+            vid = view_id(tname)
+            graph.add_node(vid, "view", name=tname, kind="unresolved_relation")
             if access.column:
                 cid = column_id(tname, access.column)
                 if cid not in graph.nodes:
                     graph.add_node(cid, "column", table=tname, name=access.column.lower())
                 return cid
-            return tid
-        return None
+            return vid
+        tid = table_id(tname)
+        graph.add_node(tid, "table", name=tname, kind="unresolved_relation")
+        if access.column:
+            cid = column_id(tname, access.column)
+            if cid not in graph.nodes:
+                graph.add_node(cid, "column", table=tname, name=access.column.lower())
+            return cid
+        return tid
     tid = table_id(tname)
     if not known:
         graph.add_node(tid, "table", name=tname)
@@ -749,7 +783,9 @@ def _match_queue_consumer(
             candidates.append(hints[key])
         if key:
             for hkey, hint in hints.items():
-                if str(hkey).rstrip("/") == str(key).rstrip("/") or str(hkey).endswith("/" + last):
+                if str(hkey).rstrip("/") == str(key).rstrip("/") or (
+                    last and str(hkey).endswith("/" + last)
+                ):
                     candidates.append(hint)
     wanted = {c.lower().rstrip("/") for c in candidates if c}
     for node in graph.nodes.values():
@@ -776,6 +812,8 @@ def _match_queue_consumer(
             symbol.lower(),
             topic_n.lower(),
             (path.rstrip("/").split("/")[-1] if path else "").lower(),
+            node.id.lower(),
+            node.id.split("/")[-1].lower(),
         }
         if checks & wanted:
             hits.append(node.id)
@@ -791,9 +829,7 @@ def _link_queue_consumers(graph: Graph, analysis: PyAnalysis, cfg: ScanConfig) -
         if ev.queue_kind not in {"cloud_tasks", "pubsub"}:
             continue
         url = ev.http_url
-        topic = ev.name if ev.queue_kind == "pubsub" else None
-        if ev.queue_kind == "cloud_tasks" and not url:
-            continue
+        topic = ev.name if ev.queue_kind == "pubsub" else ev.name
         consumers = _match_queue_consumer(
             graph,
             url=url,
@@ -917,6 +953,60 @@ def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
             evidence={"file": rpc.file, "line": rpc.line, "symbol": rpc.symbol},
         )
         graph.add_edge("calls", src, target, confidence=Confidence.INFERRED)
+    colmap = schema.column_names()
+    known = set(colmap) | set(schema.views)
+    for site in analysis.sql_sites:
+        fid = function_id(site.symbol)
+        graph.add_node(
+            fid,
+            "function",
+            name=site.symbol,
+            language="javascript",
+            evidence={"file": site.file, "line": site.line, "symbol": site.symbol},
+        )
+        accesses = analyze_sql(
+            site.sql,
+            schema_columns=colmap,
+            dynamic=site.dynamic,
+            known_tables=known,
+        )
+        for access in accesses:
+            target = _ensure_access_target(graph, schema, access)
+            if not target:
+                continue
+            graph.add_edge(
+                _kind_edge(access.kind),
+                fid,
+                target,
+                confidence=access.confidence,
+                evidence=Evidence(file=site.file, line=site.line, symbol=site.symbol),
+            )
+    for acc in analysis.table_accesses:
+        fid = function_id(acc.symbol)
+        graph.add_node(
+            fid,
+            "function",
+            name=acc.symbol,
+            language="javascript",
+            evidence={"file": acc.file, "line": acc.line, "symbol": acc.symbol},
+        )
+        rolled = SqlAccess(
+            kind=acc.kind,
+            table=acc.table,
+            column=None,
+            confidence=Confidence.INFERRED,
+            raw_sql="",
+        )
+        target = _ensure_access_target(graph, schema, rolled)
+        if not target:
+            continue
+        graph.add_edge(
+            _kind_edge(acc.kind),
+            fid,
+            target,
+            confidence=Confidence.INFERRED,
+            evidence=Evidence(file=acc.file, line=acc.line, symbol=acc.symbol),
+        )
 
 
 def _link_http(

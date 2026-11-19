@@ -12,6 +12,7 @@ from bizmap.detect.py_resolve import (
     call_kwargs,
     call_posargs,
     call_qualname,
+    collect_local_env,
     collect_module_assignments,
     collect_module_dicts,
     find_dict_string,
@@ -20,6 +21,7 @@ from bizmap.detect.py_resolve import (
     parse_imports,
     resolve_expr,
     resolve_module_consts,
+    simple_return_value,
     unquote,
 )
 from bizmap.detect.py_schema import (
@@ -295,6 +297,21 @@ class PythonAnalyzer:
             analysis.bindings.setdefault(model.class_name, model.table)
 
         scripts = _console_scripts(root)
+        call_returns: dict[str, ResolvedString] = {}
+        for fn in analysis.functions.values():
+            imap_fn = imaps.get(fn.module) or ImportMap()
+            local = consts_by_module.get(fn.module) or {}
+            local_dicts = dicts_by_module.get(fn.module) or {}
+            env = collect_local_env(
+                fn.node, local, imap_fn, consts_by_module, local_dicts, dicts_by_module
+            )
+            ret = simple_return_value(
+                fn.node, env, local, imap_fn, consts_by_module, local_dicts, dicts_by_module
+            )
+            if ret and ret.usable:
+                call_returns[fn.name] = ret
+                call_returns[fn.qualname] = ret
+
         for _path, rel_file, _source, tree, module, imap, fns in parsed:
             local = consts_by_module.get(module) or {}
             local_dicts = dicts_by_module.get(module) or {}
@@ -306,7 +323,14 @@ class PythonAnalyzer:
                 _dicts=local_dicts,
             ) -> ResolvedString:
                 return resolve_expr(
-                    node, _local, _local, _imap, consts_by_module, _dicts, dicts_by_module
+                    node,
+                    _local,
+                    _local,
+                    _imap,
+                    consts_by_module,
+                    _dicts,
+                    dicts_by_module,
+                    call_returns,
                 )
 
             routers, includes, blueprints = self._collect_prefixes(tree, resolve)
@@ -325,6 +349,8 @@ class PythonAnalyzer:
                 scripts,
                 local_dicts,
                 dicts_by_module,
+                consts_by_module,
+                call_returns,
             )
             self._detect_main_worker(analysis, tree, module, fns, enclosing, rel_file)
 
@@ -334,6 +360,7 @@ class PythonAnalyzer:
             unique[key] = site
         analysis.sql_sites = list(unique.values())
         _resolve_callable_injection(analysis)
+        _resolve_object_dispatch(analysis)
         return analysis
 
     def _collect_functions(
@@ -673,6 +700,8 @@ class PythonAnalyzer:
         scripts: dict[str, str],
         local_dicts: dict[str, dict[str, ResolvedString]] | None = None,
         dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]] | None = None,
+        consts_by_module: dict[str, dict[str, ResolvedString]] | None = None,
+        call_returns: dict[str, ResolvedString] | None = None,
     ) -> None:
         by_local = {fn.name: fn for fn in fns if not fn.class_name}
         by_class_method: dict[tuple[str, str], PyFunction] = {
@@ -682,9 +711,37 @@ class PythonAnalyzer:
         has_http_lib = any(any(lib in s for s in imap.raw) for lib in HTTP_CLIENT_LIBS)
         local_dicts = local_dicts or {}
         dicts_by_module = dicts_by_module or {}
+        consts_by_module = consts_by_module or {}
+        call_returns = call_returns or {}
+        module_consts = consts_by_module.get(fns[0].module if fns else "") or {}
 
         for fn in fns:
-            refmap = _firestore_refmap(fn.node, resolve)
+            local_env = collect_local_env(
+                fn.node,
+                module_consts,
+                imap,
+                consts_by_module,
+                local_dicts,
+                dicts_by_module,
+                call_returns,
+            )
+
+            def resolve_fn(
+                node: Node | None,
+                _env=local_env,
+            ) -> ResolvedString:
+                return resolve_expr(
+                    node,
+                    _env,
+                    module_consts,
+                    imap,
+                    consts_by_module,
+                    local_dicts,
+                    dicts_by_module,
+                    call_returns,
+                )
+
+            refmap = _firestore_refmap(fn.node, resolve_fn)
             for node in walk(fn.node):
                 if node.type != "call":
                     continue
@@ -705,16 +762,18 @@ class PythonAnalyzer:
                     args,
                     pos,
                     imap,
-                    resolve,
+                    resolve_fn,
                     evidence,
                     local_dicts,
                     dicts_by_module,
                 )
-                self._record_sqlalchemy(analysis, fn, node, method, pos, resolve, evidence)
-                self._record_firestore(analysis, fn, node, method, resolve, evidence, refmap)
-                self._record_http_client(analysis, fn, node, method, qual, pos, has_http_lib, resolve, evidence)
-                self._record_queues(analysis, fn, node, method, qual, pos, resolve, evidence)
-                self._record_rpc(analysis, fn, node, method, pos, resolve, evidence)
+                self._record_sqlalchemy(analysis, fn, node, method, pos, resolve_fn, evidence)
+                self._record_firestore(analysis, fn, node, method, resolve_fn, evidence, refmap)
+                self._record_http_client(
+                    analysis, fn, node, method, qual, pos, has_http_lib, resolve_fn, evidence
+                )
+                self._record_queues(analysis, fn, node, method, qual, pos, resolve_fn, evidence)
+                self._record_rpc(analysis, fn, node, method, pos, resolve_fn, evidence)
 
             if _is_worker_fn(fn.node) and (
                 fn.name in {"main", "run", "worker"}
@@ -826,9 +885,20 @@ class PythonAnalyzer:
             if arg.type == "keyword_argument":
                 arg = arg.child_by_field_name("value") or arg
             for res in _sql_arg_sources(arg, resolve, imap, local_dicts, dicts_by_module):
+                sql_val = res.path_text if res.usable else ""
                 if res.fully_static and res.text and looks_like_sql(res.text):
                     analysis.sql_sites.append(
                         PySqlSite(function=fn, sql=res.text, dynamic=False, evidence=evidence)
+                    )
+                elif res.unresolved and sql_val and (
+                    looks_like_sql(sql_val)
+                    or any(
+                        tok in sql_val.upper()
+                        for tok in ("UPDATE", "INSERT", "DELETE", "SELECT")
+                    )
+                ):
+                    analysis.sql_sites.append(
+                        PySqlSite(function=fn, sql=sql_val, dynamic=True, evidence=evidence)
                     )
 
     def _record_sqlalchemy(
@@ -1079,6 +1149,7 @@ class PythonAnalyzer:
         if method == "create_task" or "create_task" in qual:
             url_res = find_dict_string(node, {"url"}, resolve)
             method_res = find_dict_string(node, {"http_method", "method"}, resolve)
+            parent_res = find_dict_string(node, {"parent", "queue"}, resolve)
             http_url = url_res.path_text if url_res and url_res.usable else None
             http_method = (
                 method_res.path_text.upper() if method_res and method_res.usable else "POST"
@@ -1087,7 +1158,12 @@ class PythonAnalyzer:
                 http_method = "POST"
             elif http_method.endswith("GET"):
                 http_method = "GET"
-            qname = http_url or "cloud-tasks"
+            qname = "cloud-tasks"
+            if parent_res and parent_res.usable:
+                parent = parent_res.path_text.rstrip("/")
+                qname = parent.split("/")[-1] or qname
+            elif http_url:
+                qname = http_url
             analysis.queue_events.append(
                 PyQueueEvent(
                     function=fn,
@@ -1552,4 +1628,275 @@ def _resolve_callable_injection(analysis: PyAnalysis) -> None:
                     for target in param_targets.get((fn.qualname, obj_name), ()):
                         # param itself is a class instance; field call already handled
                         _ = target
+    analysis.calls.extend(new_calls)
+
+
+def _annotation_leaf(node: Node | None) -> str | None:
+    if node is None:
+        return None
+    if node.type in {"identifier", "type"}:
+        raw = text(node)
+        return raw.split(".")[-1] if raw else None
+    if node.type == "attribute" and node.named_children:
+        return text(node.named_children[-1])
+    if node.type == "subscript":
+        inner = node.child_by_field_name("value") or (
+            node.named_children[0] if node.named_children else None
+        )
+        return _annotation_leaf(inner)
+    if node.type == "binary_operator" and node.named_children:
+        for child in node.named_children:
+            leaf = _annotation_leaf(child)
+            if leaf and leaf not in {"None", "NoneType"}:
+                return leaf
+    if node.named_children:
+        return _annotation_leaf(node.named_children[0])
+    raw = text(node).split("|")[0].strip()
+    return raw.split(".")[-1] if raw else None
+
+
+def _param_annotations(fn_node: Node) -> dict[str, str]:
+    params = fn_node.child_by_field_name("parameters")
+    if params is None:
+        return {}
+    out: dict[str, str] = {}
+    for p in params.named_children:
+        name = ""
+        ann = None
+        if p.type == "typed_parameter" or p.type == "typed_default_parameter":
+            name_n = p.child_by_field_name("name") or (
+                p.named_children[0] if p.named_children else None
+            )
+            name = text(name_n) if name_n is not None else ""
+            ann = p.child_by_field_name("type")
+            if ann is None:
+                for c in p.named_children:
+                    if c.type not in {"identifier", "default_parameter"} and c is not name_n:
+                        if c.type in {
+                            "type",
+                            "identifier",
+                            "attribute",
+                            "subscript",
+                            "binary_operator",
+                        }:
+                            ann = c
+                            break
+        if name and name not in {"self", "cls"}:
+            leaf = _annotation_leaf(ann)
+            if leaf:
+                out[name] = leaf
+    return out
+
+
+def _class_bases(class_node: Node) -> set[str]:
+    names: set[str] = set()
+    for child in class_node.named_children:
+        if child.type == "argument_list":
+            for arg in child.named_children:
+                leaf = _annotation_leaf(arg)
+                if leaf:
+                    names.add(leaf)
+    return names
+
+
+def _init_self_fields(class_node: Node) -> dict[str, str]:
+    """Map ``self.field`` -> ``__init__`` param assigned to it."""
+    body = class_node.child_by_field_name("body")
+    if body is None:
+        return {}
+    init = None
+    for stmt in body.named_children:
+        fn = stmt
+        if stmt.type == "decorated_definition":
+            fn = next((c for c in stmt.named_children if c.type == "function_definition"), stmt)
+        if fn.type == "function_definition" and text(fn.child_by_field_name("name")) == "__init__":
+            init = fn
+            break
+    if init is None:
+        return {}
+    params = set(_param_names(init))
+    fields: dict[str, str] = {}
+    for node in walk(init):
+        if node.type != "assignment":
+            continue
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        if left is None or right is None:
+            continue
+        if left.type == "attribute" and left.named_children:
+            obj = left.named_children[0]
+            field = text(left.named_children[-1]) if len(left.named_children) >= 2 else ""
+            if text(obj) != "self" or not field:
+                continue
+            if right.type == "identifier" and text(right) in params:
+                fields[field] = text(right)
+            elif right.type == "call":
+                fields[field] = call_callee_name(right)
+    return fields
+
+
+def _call_type_name(node: Node | None) -> str | None:
+    if node is None:
+        return None
+    if node.type == "call":
+        return call_callee_name(node)
+    if node.type == "identifier":
+        return text(node)
+    return None
+
+
+def _resolve_object_dispatch(analysis: PyAnalysis) -> None:
+    """Follow ``self.outbox.settle()`` / ``store.save()`` to class methods."""
+    methods: dict[str, dict[str, PyFunction]] = {}
+    class_nodes: dict[str, Node] = {}
+    protocol_names: set[str] = set()
+    for fn in analysis.functions.values():
+        if not fn.class_name:
+            continue
+        methods.setdefault(fn.class_name, {})[fn.name] = fn
+        cur = fn.node.parent
+        while cur is not None:
+            if cur.type == "class_definition":
+                cname = text(cur.child_by_field_name("name"))
+                if cname:
+                    class_nodes[cname] = cur
+                    bases = _class_bases(cur)
+                    if bases & {"Protocol", "ABC", "ABCMeta"}:
+                        protocol_names.add(cname)
+                break
+            cur = cur.parent
+
+    field_types: dict[tuple[str, str], set[str]] = {}
+    for cname, node in class_nodes.items():
+        for fname, src in _init_self_fields(node).items():
+            if src in methods:
+                field_types.setdefault((cname, fname), set()).add(src)
+
+    param_types: dict[tuple[str, str], set[str]] = {}
+    for fn in analysis.functions.values():
+        for name, typ in _param_annotations(fn.node).items():
+            param_types.setdefault((fn.qualname, name), set()).add(typ)
+
+    # Constructor call-sites: Drainer(Outbox()) / Drainer(outbox=box)
+    local_types: dict[tuple[str, str], str] = {}
+    for fn in analysis.functions.values():
+        for node in walk(fn.node):
+            if node.type == "assignment":
+                left = node.child_by_field_name("left")
+                right = node.child_by_field_name("right")
+                if left is not None and left.type == "identifier" and right is not None:
+                    tname = _call_type_name(right)
+                    if tname and tname in methods:
+                        local_types[(fn.qualname, text(left))] = tname
+            if node.type != "call":
+                continue
+            callee = call_callee_name(node)
+            if callee not in class_nodes:
+                continue
+            fields = _init_self_fields(class_nodes[callee])
+            pos = call_posargs(node)
+            kw = call_kwargs(node)
+            # Map positional args onto init fields (field <- param).
+            param_to_field = {v: k for k, v in fields.items()}
+            init_fn = None
+            body = class_nodes[callee].child_by_field_name("body")
+            if body is not None:
+                for stmt in body.named_children:
+                    cand = stmt
+                    if stmt.type == "decorated_definition":
+                        cand = next(
+                            (c for c in stmt.named_children if c.type == "function_definition"),
+                            stmt,
+                        )
+                    if cand.type == "function_definition" and text(cand.child_by_field_name("name")) == "__init__":
+                        init_fn = cand
+                        break
+            init_params = _param_names(init_fn) if init_fn is not None else []
+            for i, arg in enumerate(pos):
+                tname = _call_type_name(arg)
+                if not tname:
+                    if arg.type == "identifier":
+                        tname = local_types.get((fn.qualname, text(arg)))
+                if not tname:
+                    continue
+                if tname not in methods and tname not in class_nodes:
+                    continue
+                pname = init_params[i] if i < len(init_params) else None
+                field = param_to_field.get(pname or "") if pname else None
+                if field:
+                    field_types.setdefault((callee, field), set()).add(tname)
+            for k, arg in kw.items():
+                tname = _call_type_name(arg)
+                if not tname and arg.type == "identifier":
+                    tname = local_types.get((fn.qualname, text(arg)))
+                if not tname:
+                    continue
+                field = k if k in fields else param_to_field.get(k)
+                if field:
+                    field_types.setdefault((callee, field), set()).add(tname)
+
+    def implementers_of(type_name: str) -> list[str]:
+        if type_name in methods and type_name not in protocol_names:
+            return [type_name]
+        if type_name not in protocol_names and type_name in methods:
+            return [type_name]
+        proto_meths = set(methods.get(type_name, {})) - {"__init__", "__new__"}
+        if not proto_meths:
+            hits = [c for c in methods if type_name in methods[c] or c == type_name]
+            return hits[:1] if len(hits) == 1 else []
+        impls: list[str] = []
+        for cname, meths in methods.items():
+            if cname == type_name or cname in protocol_names:
+                continue
+            if proto_meths <= set(meths):
+                impls.append(cname)
+        return impls
+
+    existing = {(c, d) for c, d, _e, _k in analysis.calls}
+    new_calls: list[tuple[str, str, Evidence, Confidence]] = []
+
+    def add_call(caller: str, callee: str, evidence: Evidence) -> None:
+        if caller == callee or (caller, callee) in existing:
+            return
+        new_calls.append((caller, callee, evidence, Confidence.INFERRED))
+        existing.add((caller, callee))
+
+    for fn in analysis.functions.values():
+        params = set(_param_names(fn.node))
+        anns = _param_annotations(fn.node)
+        for node in walk(fn.node):
+            if node.type != "call":
+                continue
+            func = node.child_by_field_name("function")
+            if func is None or func.type != "attribute" or not func.named_children:
+                continue
+            obj = func.named_children[0]
+            method = call_callee_name(node)
+            evidence = Evidence(file=fn.file, line=line_of(node), symbol=fn.qualname)
+            types: set[str] = set()
+            if obj.type == "identifier":
+                oname = text(obj)
+                if oname == "self" and fn.class_name:
+                    continue  # same-class methods already recorded
+                if oname in anns:
+                    types.update(implementers_of(anns[oname]) or [anns[oname]])
+                elif oname in params:
+                    types.update(param_types.get((fn.qualname, oname), set()))
+                loc = local_types.get((fn.qualname, oname))
+                if loc:
+                    types.add(loc)
+            elif obj.type == "attribute" and obj.named_children:
+                head = obj.named_children[0]
+                field = text(obj.named_children[-1]) if len(obj.named_children) >= 2 else ""
+                if text(head) == "self" and fn.class_name and field:
+                    types.update(field_types.get((fn.class_name, field), set()))
+            for tname in types:
+                cal = methods.get(tname, {}).get(method)
+                if cal is not None:
+                    add_call(fn.qualname, cal.qualname, evidence)
+                    continue
+                for impl in implementers_of(tname):
+                    cal = methods.get(impl, {}).get(method)
+                    if cal is not None:
+                        add_call(fn.qualname, cal.qualname, evidence)
     analysis.calls.extend(new_calls)
