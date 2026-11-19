@@ -79,8 +79,10 @@ def close(svc=Depends(get_service)):
     fid = function_id("app.top_items")
     reads = _edges(graph, "reads", fid, "order_items")
     assert reads, [e.id for e in graph.edges.values() if e.from_id == fid]
-    assert all(e.confidence.value == "inferred" for e in reads)
-    assert all(e.attrs.get("via") == "sql_reference" for e in reads)
+    # Either the call-site detector already treats the argument as executed
+    # SQL (exact, no via) or the reference pass adds it (inferred) — never both.
+    for e in reads:
+        assert (e.confidence.value == "exact") == ("via" not in e.attrs), (e.id, e.attrs)
     assert reads[0].evidence is not None and reads[0].evidence.file == "app.py"
     ep = "entrypoint:http:GET:/dash/top-items"
     assert _edges(graph, "reads", ep, "order_items"), [
