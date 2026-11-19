@@ -50,6 +50,14 @@
 
 ### Added
 
+- **TS path helpers**: pure helpers that return a path template or
+  concatenation (`const site = (id) => `/sites/${id}``,
+  `function seg(id) { return '/teams/' + id }`), in the same file or
+  imported, are evaluated inside client URLs with the caller's argument names:
+  `` `/client${site(siteId)}/orders` `` → `/client/sites/:siteId/orders`.
+  A call segment that cannot be evaluated makes the unresolved reason
+  `path_dynamic` instead of `base_unknown`.
+
 - **Python function tables**: a call through a dict/list of functions
   (`BUILDERS[kind](conn)`, `BUILDERS.get(kind)(...)`, `b = BUILDERS[k]; b()`,
   `for f in BUILDERS.values(): f()`, imported or `module.BUILDERS`,
