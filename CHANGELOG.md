@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **TS base helpers and namespace imports**: helpers whose template starts
+  with an env/base placeholder (`base = () => `${API_URL}/api/v1/client``)
+  are evaluated, so `` `${base()}${site(id)}/orders` `` composes the full URL;
+  `import * as P from '@/lib/paths'` + `P.site(id)` resolves; helpers built
+  from imported helpers (`siteStock = (id) => `${base()}/sites/${id}/stock``)
+  resolve after imports. Helpers are never `calls_http` origins.
+
 - **Route-literal origin**: a function that only returns a path
   (`const site = (id) => `/sites/${id}``) is never the origin of
   `calls_http`; a call to such a helper at an HTTP call site
