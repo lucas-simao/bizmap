@@ -2860,6 +2860,16 @@ def _collect_route_literals(
     for node in walk(tree):
         if node.type in {"string", "template_string"}:
             pass
+        elif (
+            node.type == "identifier"
+            and node.parent is not None
+            and node.parent.type not in {"variable_declarator", "import_specifier", "export_specifier"}
+            and _looks_like_http_path(consts.get(text(node)))
+            and not _enclosing_symbol(node, module).endswith(".module")
+        ):
+            # `get(window.base + REPORT)`: a path const used inside a function
+            # starts a literal there (the expression may hold no string node)
+            pass
         elif node.type == "call_expression" and _apply_path_helper(node, consts) is not None:
             # `api.get(site(id))`: the helper call is the path at this call
             # site — only when it is the whole argument. Inside a larger URL
@@ -3107,19 +3117,20 @@ def _import_path_helpers(
                 found = _helper_source(consts_by_mod, src_mod, orig)
                 if found:
                     src_consts, real = found
-                    if f"{real}()" in src_consts and f"{local}()" not in consts:
+                    if f"{real}()" in src_consts:
+                        # overwrite: a later round may have completed the value
                         consts[f"{local}()"] = src_consts[f"{real}()"]
                         consts[f"{local}()#params"] = src_consts.get(f"{real}()#params", "")
                     for skey, sval in src_consts.items():
                         if skey.startswith(f"{real}.") and (skey.endswith("()") or skey.endswith("()#params")):
-                            consts.setdefault(f"{local}.{skey[len(real) + 1:]}", sval)
+                            consts[f"{local}.{skey[len(real) + 1:]}"] = sval
                     continue
             src = consts_by_mod.get(src_mod) or consts_by_mod.get(f"{src_mod}.index") or {}
             if orig == "*":
                 # `import * as P from './paths'` → P.site(), P.routes.team()
                 for skey, sval in src.items():
                     if skey.endswith("()") or skey.endswith("()#params"):
-                        consts.setdefault(f"{local}.{skey}", sval)
+                        consts[f"{local}.{skey}"] = sval
                 continue
             key = f"{orig}()"
             if key in src and f"{local}()" not in consts:
