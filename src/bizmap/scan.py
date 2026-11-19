@@ -12,6 +12,7 @@ from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer
 from bizmap.detect.rules import load_rules
 from bizmap.files import discover_sql_files, iter_files
 from bizmap.graph import (
+    GRAPH_VERSION,
     Confidence,
     Evidence,
     Graph,
@@ -22,8 +23,14 @@ from bizmap.graph import (
     queue_id,
     table_id,
     trigger_id,
+    view_id,
 )
-from bizmap.http_match import match_http
+from bizmap.http_match import (
+    match_http,
+    path_without_placeholders,
+    strip_service_base,
+    unresolved_http_keys,
+)
 from bizmap.overrides import ScanConfig, apply_overrides, load_scan_config
 from bizmap.registry import merge_graphs
 from bizmap.schema_replay import Schema, replay_files
@@ -64,6 +71,8 @@ def _merge_schema(base: Schema, extra: Schema) -> None:
         base.functions.setdefault(name, fn)
     for name, trig in extra.triggers.items():
         base.triggers.setdefault(name, trig)
+    for name, view in extra.views.items():
+        base.views.setdefault(name, view)
 
 
 def _add_schema_nodes(graph: Graph, schema: Schema) -> None:
@@ -85,6 +94,38 @@ def _add_schema_nodes(graph: Graph, schema: Schema) -> None:
                 data_type=col.data_type,
                 nullable=col.nullable,
             )
+    for vname, view in schema.views.items():
+        vid = view_id(vname)
+        graph.add_node(
+            vid,
+            "view",
+            name=vname,
+            kind="view",
+            materialized=view.materialized,
+            evidence=view.evidence.to_dict() if view.evidence else None,
+        )
+        for tname in view.tables:
+            if tname in schema.views:
+                graph.add_edge(
+                    "derives_from",
+                    vid,
+                    view_id(tname),
+                    confidence=Confidence.EXACT,
+                    evidence=view.evidence,
+                )
+            else:
+                tid = table_id(tname)
+                if tid not in graph.nodes and tname not in schema.tables:
+                    graph.add_node(tid, "table", name=tname)
+                elif tid not in graph.nodes:
+                    graph.add_node(tid, "table", name=tname)
+                graph.add_edge(
+                    "derives_from",
+                    vid,
+                    tid,
+                    confidence=Confidence.EXACT,
+                    evidence=view.evidence,
+                )
 
 
 def _ensure_access_target(graph: Graph, schema: Schema, access: SqlAccess) -> str | None:
@@ -106,8 +147,24 @@ def _ensure_access_target(graph: Graph, schema: Schema, access: SqlAccess) -> st
     tname = access.table.lower()
     if is_skipped_table_name(tname):
         return None
-    ddl_known = {t.lower() for t in schema.tables}
-    known = tname in ddl_known
+    if tname in schema.views:
+        vid = view_id(tname)
+        view = schema.views[tname]
+        graph.add_node(
+            vid,
+            "view",
+            name=tname,
+            kind="view",
+            materialized=view.materialized,
+        )
+        if access.column:
+            cid = column_id(tname, access.column)
+            if cid not in graph.nodes:
+                graph.add_node(cid, "column", table=tname, name=access.column.lower())
+            return cid
+        return vid
+    ddl_known = {t.lower() for t in schema.tables} | {t.lower() for t in schema.views}
+    known = tname in schema.tables or tname in schema.views
     external = access.external or is_external_table(tname)
     if external:
         tid = table_id(tname)
@@ -117,10 +174,18 @@ def _ensure_access_target(graph: Graph, schema: Schema, access: SqlAccess) -> st
             graph.add_node(cid, "column", table=tname, name=access.column.lower(), external=True)
             return cid
         return tid
-    # With DDL, only schema tables become nodes. Alias phantoms (l, r, ...)
-    # and other unknown identifiers are dropped. Without DDL, real-looking
-    # names are still allowed so schemaless scans keep their tables.
+    # With DDL, only schema tables/views become nodes (plus schema-qualified
+    # names). Unknown identifiers are unresolved attributes, not nodes.
     if ddl_known and not known:
+        if getattr(access, "schema_qualified", False):
+            tid = table_id(tname)
+            graph.add_node(tid, "table", name=tname)
+            if access.column:
+                cid = column_id(tname, access.column)
+                if cid not in graph.nodes:
+                    graph.add_node(cid, "column", table=tname, name=access.column.lower())
+                return cid
+            return tid
         return None
     tid = table_id(tname)
     if not known:
@@ -252,7 +317,7 @@ def _apply_go(
     expand_star: bool = False,
 ) -> tuple[float, float]:
     colmap = schema.column_names()
-    known = set(colmap)
+    known = set(colmap) | set(schema.views)
     evidence_by_fn: dict[str, Evidence] = {}
     for fn in analysis.functions.values():
         _add_function_node_go(graph, fn)
@@ -451,7 +516,7 @@ def _apply_python(
     expand_star: bool = False,
 ) -> tuple[float, float]:
     colmap = schema.column_names()
-    known = set(colmap)
+    known = set(colmap) | set(schema.views)
     evidence_by_fn: dict[str, Evidence] = {}
     reverse: dict[str, set[str]] = defaultdict(set)
     job_functions: set[str] = set()
@@ -642,6 +707,138 @@ def _apply_queues(graph: Graph, analysis: PyAnalysis, entrypoints_by_handler: di
         )
 
 
+def _queue_hints(raw: dict | None) -> dict[str, str]:
+    """Flatten bizmap.yaml ``queues:`` to key → consumer hint (path or symbol)."""
+    out: dict[str, str] = {}
+    for key, spec in (raw or {}).items():
+        if isinstance(spec, str):
+            out[str(key)] = spec
+            continue
+        if not isinstance(spec, dict):
+            continue
+        hint = spec.get("consumer") or spec.get("entrypoint") or spec.get("path") or spec.get("url")
+        if hint:
+            out[str(key)] = str(hint)
+        path = spec.get("path") or spec.get("url")
+        if path:
+            out[str(path)] = str(hint or path)
+    return out
+
+
+def _match_queue_consumer(
+    graph: Graph,
+    *,
+    url: str | None,
+    topic: str | None,
+    kind: str,
+    services: dict,
+    hints: dict[str, str],
+) -> list[str]:
+    """Entrypoint ids that should consume this enqueue."""
+    hits: list[str] = []
+    suffix = ""
+    last = ""
+    if url:
+        suffix = path_without_placeholders(strip_service_base(url, services))
+        last = suffix.rstrip("/").split("/")[-1] if suffix else ""
+    if topic:
+        last = last or topic.split("/")[-1]
+    candidates = [last, suffix, url or "", topic or ""]
+    for key in list(candidates):
+        if key and key in hints:
+            candidates.append(hints[key])
+        if key:
+            for hkey, hint in hints.items():
+                if str(hkey).rstrip("/") == str(key).rstrip("/") or str(hkey).endswith("/" + last):
+                    candidates.append(hint)
+    wanted = {c.lower().rstrip("/") for c in candidates if c}
+    for node in graph.nodes.values():
+        if node.type != "entrypoint":
+            continue
+        kind_n = str(node.attrs.get("kind") or "")
+        if kind == "cloud_tasks" and kind_n not in {
+            "http",
+            "firebase_http",
+            "firebase_call",
+            "cloud_task",
+        }:
+            continue
+        if kind == "pubsub" and kind_n not in {"pubsub", "cloud_event"}:
+            continue
+        path = str(node.attrs.get("path") or "")
+        symbol = str(node.attrs.get("symbol") or "")
+        name = symbol.split(".")[-1]
+        topic_n = str(node.attrs.get("topic") or "")
+        checks = {
+            path.lower().rstrip("/"),
+            path_without_placeholders(path).lower().rstrip("/"),
+            name.lower(),
+            symbol.lower(),
+            topic_n.lower(),
+            (path.rstrip("/").split("/")[-1] if path else "").lower(),
+        }
+        if checks & wanted:
+            hits.append(node.id)
+    return hits
+
+
+def _link_queue_consumers(graph: Graph, analysis: PyAnalysis, cfg: ScanConfig) -> None:
+    hints = _queue_hints((cfg.raw or {}).get("queues") if cfg else None)
+    services = cfg.services if cfg else {}
+    for ev in analysis.queue_events:
+        if ev.role != "produce":
+            continue
+        if ev.queue_kind not in {"cloud_tasks", "pubsub"}:
+            continue
+        url = ev.http_url
+        topic = ev.name if ev.queue_kind == "pubsub" else None
+        if ev.queue_kind == "cloud_tasks" and not url:
+            continue
+        consumers = _match_queue_consumer(
+            graph,
+            url=url,
+            topic=topic,
+            kind=ev.queue_kind,
+            services=services,
+            hints=hints,
+        )
+        produce_qid = None
+        for edge in graph.outgoing(function_id(ev.function.qualname), "enqueues"):
+            produce_qid = edge.to_id
+            break
+        if produce_qid is None:
+            produce_qid = queue_id(ev.queue_kind, ev.name)
+            graph.add_node(produce_qid, "queue", kind=ev.queue_kind, name=ev.name)
+        for eid in consumers:
+            graph.add_edge(
+                "triggers",
+                produce_qid,
+                eid,
+                confidence=Confidence.INFERRED,
+                evidence=ev.evidence,
+            )
+            # Share the consumer queue id when one already exists for that handler.
+            node = graph.get(eid)
+            symbol = str((node.attrs if node else {}).get("symbol") or "")
+            for qid, qnode in list(graph.nodes.items()):
+                if qnode.type != "queue":
+                    continue
+                if qnode.attrs.get("kind") != ev.queue_kind:
+                    continue
+                if symbol and (
+                    qnode.attrs.get("name") == symbol
+                    or str(qnode.attrs.get("name") or "").endswith("." + symbol.split(".")[-1])
+                    or str(qnode.attrs.get("name") or "") == symbol.split(".")[-1]
+                ):
+                    graph.add_edge(
+                        "enqueues",
+                        function_id(ev.function.qualname),
+                        qid,
+                        confidence=Confidence.INFERRED,
+                        evidence=ev.evidence,
+                    )
+
+
 def _apply_rpc(graph: Graph, analysis: PyAnalysis, schema: Schema) -> None:
     for rpc in analysis.rpc_calls:
         fname = rpc.name.split(".")[-1].lower()
@@ -727,7 +924,8 @@ def _link_http(
     py: PyAnalysis | None,
     js: JsAnalysis | None,
     services: dict[str, str],
-) -> None:
+) -> list[dict]:
+    """Match HTTP client calls to routes. Return unmatched calls for the scan summary."""
     routes: list[tuple[str, str, str]] = []
     for node in graph.nodes.values():
         if node.type != "entrypoint":
@@ -754,10 +952,18 @@ def _link_http(
         for c in js.http_calls:
             ev = Evidence(file=c.file, line=c.line, symbol=c.symbol)
             calls.append((function_id(c.symbol), c.method, c.url, ev, Confidence.INFERRED))
+    unmatched: list[dict] = []
     for fid, method, url, ev, conf in calls:
         hits = match_http(method, url, routes, services)
-        for eid in hits:
-            graph.add_edge("calls_http", fid, eid, confidence=conf, evidence=ev)
+        if hits:
+            for eid in hits:
+                graph.add_edge("calls_http", fid, eid, confidence=conf, evidence=ev)
+            continue
+        keys = unresolved_http_keys(url)
+        if keys:
+            unmatched.append({"url": url, "method": method, "keys": keys, "from": fid})
+    graph.attrs["unresolved_http"] = unmatched
+    return unmatched
 
 
 def _link_firestore_triggers(graph: Graph) -> None:
@@ -782,6 +988,9 @@ def _link_firestore_triggers(graph: Graph) -> None:
 def _apply_sql_functions(graph: Graph, schema: Schema) -> None:
     for fn in schema.functions.values():
         fid = function_id(f"sql.{fn.name}")
+        extra: dict = {}
+        if fn.unresolved:
+            extra["unresolved"] = list(fn.unresolved)
         graph.add_node(
             fid,
             "function",
@@ -789,23 +998,19 @@ def _apply_sql_functions(graph: Graph, schema: Schema) -> None:
             language=fn.language,
             why=None,
             evidence=fn.evidence.to_dict() if fn.evidence else None,
+            **extra,
         )
         for access in fn.accesses:
             target = _ensure_access_target(graph, schema, access)
-            if not target and access.table and not access.unknown_table:
-                tid = table_id(access.table)
-                graph.add_node(tid, "table", name=access.table.lower())
-                if access.column:
-                    target = column_id(access.table, access.column)
-                    graph.add_node(
-                        target,
-                        "column",
-                        table=access.table.lower(),
-                        name=access.column.lower(),
-                    )
-                else:
-                    target = tid
             if not target:
+                if access.table and not access.unknown_table:
+                    node = graph.get(fid)
+                    if node is not None:
+                        refs = list(node.attrs.get("unresolved") or [])
+                        leaf = access.table.lower()
+                        if leaf not in refs:
+                            refs.append(leaf)
+                        node.attrs["unresolved"] = refs
                 continue
             graph.add_edge(
                 _kind_edge(access.kind),
@@ -994,6 +1199,7 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
         and n.attrs.get("method")
         and n.attrs.get("path")
     ]
+    unmatched: list[dict] = []
     for node in graph.nodes.values():
         pending = node.attrs.get("http_calls") or []
         if not pending:
@@ -1002,8 +1208,19 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
             method = str(item.get("method") or "GET")
             url = str(item.get("url") or "")
             ev = Evidence.from_dict(item.get("evidence")) if item.get("evidence") else None
-            for eid in match_http(method, url, routes, services):
-                graph.add_edge("calls_http", node.id, eid, confidence=Confidence.INFERRED, evidence=ev)
+            hits = match_http(method, url, routes, services)
+            if hits:
+                for eid in hits:
+                    graph.add_edge(
+                        "calls_http", node.id, eid, confidence=Confidence.INFERRED, evidence=ev
+                    )
+                continue
+            keys = unresolved_http_keys(url)
+            if keys:
+                unmatched.append(
+                    {"url": url, "method": method, "keys": keys, "from": node.id}
+                )
+    graph.attrs["unresolved_http"] = unmatched
 
 
 def _scan_one(
@@ -1029,7 +1246,7 @@ def _scan_one(
     graph.attrs["repo"] = graph.repo
     graph.attrs["database"] = graph.database
     graph.attrs["services"] = cfg.services
-    graph.version = "0.2.0"
+    graph.version = GRAPH_VERSION
 
     t0 = time.perf_counter()
     sql_files = discover_sql_files(root, exclude=exclude_pats)
@@ -1056,6 +1273,7 @@ def _scan_one(
     _apply_sql_functions(graph, schema)
     _apply_db_triggers(graph, schema)
     _link_http(graph, py_analysis, js_analysis, cfg.services)
+    _link_queue_consumers(graph, py_analysis, cfg)
     # stash client calls on function nodes so merge can re-match cross-repo
     for call in py_analysis.http_calls:
         fid = function_id(call.function.qualname)

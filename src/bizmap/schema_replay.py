@@ -11,28 +11,51 @@ from sqlglot.errors import ErrorLevel
 
 from bizmap.files import rel
 from bizmap.graph import Evidence
-from bizmap.sql_analyze import SqlAccess, analyze_sql
+from bizmap.sql_analyze import (
+    PLPGSQL_KEYWORDS,
+    QUAL_IDENT,
+    SqlAccess,
+    analyze_sql,
+    ident_leaf,
+    is_skipped_table_name,
+)
 
 logging.getLogger("sqlglot").setLevel(logging.ERROR)
 
 DOLLAR_TAG = re.compile(r"\$[A-Za-z0-9_]*\$")
 CREATE_FN = re.compile(
-    r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([A-Za-z_][A-Za-z0-9_.]*)",
+    rf"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+({QUAL_IDENT})",
     re.IGNORECASE,
 )
-RETURNS = re.compile(r"RETURNS\s+([A-Za-z_][A-Za-z0-9_.\[\]]*)", re.IGNORECASE)
+RETURNS = re.compile(
+    rf"RETURNS\s+({QUAL_IDENT}(?:\s*\[\s*\])?)",
+    re.IGNORECASE,
+)
 CREATE_TRG = re.compile(
-    r"CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+([A-Za-z_][A-Za-z0-9_.]*)",
+    rf"CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+({QUAL_IDENT})",
+    re.IGNORECASE,
+)
+CREATE_VIEW = re.compile(
+    rf"CREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?({QUAL_IDENT})",
+    re.IGNORECASE,
+)
+CREATE_TABLE_HEAD = re.compile(
+    rf"CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?({QUAL_IDENT})",
     re.IGNORECASE,
 )
 CREATE_POLICY = re.compile(
-    r"""CREATE\s+POLICY\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))\s+ON\s+([A-Za-z_][A-Za-z0-9_.]*)""",
+    rf"""CREATE\s+POLICY\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))\s+ON\s+({QUAL_IDENT})""",
     re.IGNORECASE,
 )
 POLICY_FOR = re.compile(r"\bFOR\s+(ALL|SELECT|INSERT|UPDATE|DELETE)\b", re.IGNORECASE)
 POLICY_TO = re.compile(r"\bTO\s+([A-Za-z_][A-Za-z0-9_, ]*)", re.IGNORECASE)
 ENABLE_RLS = re.compile(
-    r"ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_.]*)\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY",
+    rf"ALTER\s+TABLE\s+({QUAL_IDENT})\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY",
+    re.IGNORECASE,
+)
+ON_TABLE = re.compile(rf"\bON\s+({QUAL_IDENT})", re.IGNORECASE)
+EXECUTE_FN = re.compile(
+    rf"EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+({QUAL_IDENT})",
     re.IGNORECASE,
 )
 SQL_VERB = re.compile(
@@ -79,12 +102,23 @@ class Table:
 
 
 @dataclass
+class DbView:
+    name: str
+    materialized: bool = False
+    query: str = ""
+    tables: list[str] = field(default_factory=list)
+    accesses: list[SqlAccess] = field(default_factory=list)
+    evidence: Evidence | None = None
+
+
+@dataclass
 class DbFunction:
     name: str
     returns: str = ""
     language: str = "plpgsql"
     body: str = ""
     accesses: list[SqlAccess] = field(default_factory=list)
+    unresolved: list[str] = field(default_factory=list)
     evidence: Evidence | None = None
 
 
@@ -104,6 +138,7 @@ class Schema:
     tables: dict[str, Table] = field(default_factory=dict)
     functions: dict[str, DbFunction] = field(default_factory=dict)
     triggers: dict[str, DbTrigger] = field(default_factory=dict)
+    views: dict[str, DbView] = field(default_factory=dict)
 
     def column_names(self) -> dict[str, list[str]]:
         return {t.lower(): [c for c in table.columns] for t, table in self.tables.items()}
@@ -143,7 +178,16 @@ class Schema:
                 ]
             if table.rls:
                 tables[name]["rls"] = True
-        return {"tables": tables}
+        payload: dict = {"tables": tables}
+        if self.views:
+            payload["views"] = {
+                name: {
+                    "materialized": view.materialized,
+                    "tables": list(view.tables),
+                }
+                for name, view in sorted(self.views.items())
+            }
+        return payload
 
 
 def split_sql_statements(sql: str) -> list[tuple[int, str]]:
@@ -291,7 +335,7 @@ def _ident(node: exp.Expression | str | None) -> str:
 
 
 def _table(schema: Schema, name: str) -> Table:
-    key = name.lower()
+    key = ident_leaf(name) or name.lower()
     table = schema.tables.get(key)
     if not table:
         table = Table(name=key)
@@ -403,7 +447,7 @@ def _apply_create_table(schema: Schema, stmt: exp.Create) -> None:
         table_name = _ident(this)
     if not table_name:
         return
-    table = _table(schema, table_name)
+    table = _table(schema, ident_leaf(table_name) or table_name)
     for expr in coldefs:
         if isinstance(expr, exp.ColumnDef):
             _apply_column_def(table, expr)
@@ -467,12 +511,12 @@ def _apply_trigger_create(schema: Schema, stmt: exp.Create, evidence: Evidence) 
             function = _ident(execute.this if hasattr(execute, "this") else execute)
         for_each = str(props.args.get("for_each") or "ROW").upper()
     if name:
-        schema.triggers[name.lower()] = DbTrigger(
-            name=name.lower(),
-            table=table.lower(),
+        schema.triggers[ident_leaf(name)] = DbTrigger(
+            name=ident_leaf(name),
+            table=ident_leaf(table) if table else "",
             timing=timing,
             events=events or ["INSERT"],
-            function=function.lower(),
+            function=ident_leaf(function) if function else "",
             for_each=for_each,
             evidence=evidence,
         )
@@ -491,27 +535,170 @@ def _extract_dollar_body(sql: str) -> tuple[str | None, str]:
 
 
 def _function_language(sql: str) -> str:
-    m = re.search(r"LANGUAGE\s+([A-Za-z0-9_]+)", sql, re.IGNORECASE)
-    return m.group(1).lower() if m else "plpgsql"
+    m = re.search(rf"LANGUAGE\s+({QUAL_IDENT})", sql, re.IGNORECASE)
+    return ident_leaf(m.group(1)) if m else "plpgsql"
+
+
+def mask_sql_trivia(sql: str) -> str:
+    """Replace comments and single-quoted / dollar-quoted strings with spaces.
+
+    Double-quoted identifiers are kept so quoted table names survive analysis.
+    Newlines are preserved.
+    """
+    chars = list(sql)
+    i = 0
+    n = len(sql)
+    in_line = False
+    in_block = False
+    in_single = False
+    dollar: str | None = None
+
+    def blank(start: int, end: int) -> None:
+        for j in range(start, min(end, n)):
+            if chars[j] != "\n":
+                chars[j] = " "
+
+    while i < n:
+        c = sql[i]
+        if dollar:
+            if sql.startswith(dollar, i):
+                blank(i, i + len(dollar))
+                i += len(dollar)
+                dollar = None
+                continue
+            if c != "\n":
+                chars[i] = " "
+            i += 1
+            continue
+        if in_line:
+            if c == "\n":
+                in_line = False
+            else:
+                chars[i] = " "
+            i += 1
+            continue
+        if in_block:
+            if c == "*" and i + 1 < n and sql[i + 1] == "/":
+                chars[i] = " "
+                chars[i + 1] = " "
+                in_block = False
+                i += 2
+                continue
+            if c != "\n":
+                chars[i] = " "
+            i += 1
+            continue
+        if in_single:
+            if c == "'" and i + 1 < n and sql[i + 1] == "'":
+                chars[i] = " "
+                chars[i + 1] = " "
+                i += 2
+                continue
+            if c == "'":
+                chars[i] = " "
+                in_single = False
+                i += 1
+                continue
+            if c != "\n":
+                chars[i] = " "
+            i += 1
+            continue
+        if c == "-" and i + 1 < n and sql[i + 1] == "-":
+            in_line = True
+            chars[i] = " "
+            chars[i + 1] = " "
+            i += 2
+            continue
+        if c == "/" and i + 1 < n and sql[i + 1] == "*":
+            in_block = True
+            chars[i] = " "
+            chars[i + 1] = " "
+            i += 2
+            continue
+        if c == "'":
+            in_single = True
+            chars[i] = " "
+            i += 1
+            continue
+        if c == "$":
+            m = DOLLAR_TAG.match(sql, i)
+            if m:
+                dollar = m.group(0)
+                blank(i, m.end())
+                i = m.end()
+                continue
+        i += 1
+    return "".join(chars)
+
+
+def _blank_declare_section(sql: str) -> str:
+    m = re.search(r"(?is)\bDECLARE\b(.*?)\bBEGIN\b", sql)
+    if not m:
+        return sql
+    inner = m.group(1)
+    blanked = "".join("\n" if ch == "\n" else " " for ch in inner)
+    return sql[: m.start(1)] + blanked + sql[m.end(1) :]
+
+
+def plpgsql_declared_names(body: str) -> set[str]:
+    """Variable names from a PL/pgSQL DECLARE section."""
+    masked = mask_sql_trivia(body)
+    m = re.search(r"(?is)\bDECLARE\b(.*?)\bBEGIN\b", masked)
+    if not m:
+        return set()
+    names: set[str] = set()
+    for stmt in m.group(1).split(";"):
+        stmt = stmt.strip()
+        if not stmt:
+            continue
+        mm = re.match(rf"({QUAL_IDENT})", stmt)
+        if mm:
+            names.add(ident_leaf(mm.group(1)))
+    return names
+
+
+def strip_plpgsql_into(sql: str) -> str:
+    """Remove PL/pgSQL ``INTO var`` targets (not ``INSERT INTO`` / ``COPY``)."""
+    pieces: list[str] = []
+    last = 0
+    for m in re.finditer(r"(?is)\bINTO\b", sql):
+        before = sql[: m.start()].rstrip()
+        if re.search(r"(?i)INSERT$", before) or re.search(r"(?i)\bCOPY$", before):
+            continue
+        rest = sql[m.end() :]
+        mm = re.match(
+            rf"(?is)\s+(?:STRICT\s+)?({QUAL_IDENT})(?:\s*,\s*{QUAL_IDENT})*",
+            rest,
+        )
+        if not mm:
+            continue
+        pieces.append(sql[last : m.start()])
+        last = m.end() + mm.end()
+    pieces.append(sql[last:])
+    return "".join(pieces)
 
 
 def extract_sql_from_plpgsql(body: str) -> list[str]:
-    """Pull SQL verbs out of a plpgsql / DO body."""
+    """Pull SQL verbs out of a plpgsql / DO body.
+
+    Comments and string literals are masked first so ``-- SELECT * FROM any``
+    and quoted prose never become table names.
+    """
+    search = _blank_declare_section(mask_sql_trivia(body))
     found: list[str] = []
     i = 0
-    upper = body
     while True:
-        m = SQL_VERB.search(upper, i)
+        m = SQL_VERB.search(search, i)
         if not m:
             break
         start = m.start()
-        # scan to semicolon respecting quotes / dollars
-        chunk = body[start:]
+        chunk = search[start:]
         parts = split_sql_statements(chunk)
         if parts:
-            stmt = parts[0][1]
-            found.append(stmt)
-            i = start + max(len(stmt), 1)
+            stmt = strip_plpgsql_into(parts[0][1])
+            if stmt.strip():
+                found.append(stmt)
+            i = start + max(len(parts[0][1]), 1)
         else:
             i = m.end()
     return found
@@ -521,21 +708,39 @@ def _apply_function(schema: Schema, sql: str, evidence: Evidence) -> None:
     m = CREATE_FN.search(sql)
     if not m:
         return
-    name = m.group(1).split(".")[-1].lower()
+    name = ident_leaf(m.group(1))
     ret = RETURNS.search(sql)
     _, body = _extract_dollar_body(sql)
     fn = DbFunction(
         name=name,
-        returns=ret.group(1) if ret else "",
+        returns=ident_leaf(ret.group(1)) if ret else "",
         language=_function_language(sql),
         body=body.strip(),
         evidence=evidence,
     )
     colmap = schema.column_names()
+    known = set(colmap) | set(schema.views)
+    declared = plpgsql_declared_names(fn.body)
+    skip = declared | {k.lower() for k in PLPGSQL_KEYWORDS}
     for inner in extract_sql_from_plpgsql(fn.body):
-        fn.accesses.extend(
-            analyze_sql(inner, schema_columns=colmap, require_known=False)
+        raw = analyze_sql(
+            inner,
+            schema_columns=colmap,
+            require_known=False,
+            skip_names=skip,
         )
+        for access in raw:
+            tname = ident_leaf(access.table) if access.table else ""
+            if not tname or access.unknown_table:
+                if access.unknown_table:
+                    fn.accesses.append(access)
+                continue
+            if tname in skip or is_skipped_table_name(tname, skip):
+                continue
+            if not known or tname in known or access.schema_qualified:
+                fn.accesses.append(access)
+            elif tname not in fn.unresolved:
+                fn.unresolved.append(tname)
     schema.functions[name] = fn
 
 
@@ -555,22 +760,90 @@ def _apply_trigger_regex(schema: Schema, sql: str, evidence: Evidence) -> None:
     m = CREATE_TRG.search(sql)
     if not m:
         return
-    name = m.group(1).lower()
+    name = ident_leaf(m.group(1))
     timing_m = re.search(r"\b(BEFORE|AFTER|INSTEAD\s+OF)\b", sql, re.I)
-    table_m = re.search(r"\bON\s+([A-Za-z_][A-Za-z0-9_.]*)", sql, re.I)
-    fn_m = re.search(
-        r"EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+([A-Za-z_][A-Za-z0-9_.]*)",
-        sql,
-        re.I,
-    )
+    table_m = ON_TABLE.search(sql)
+    fn_m = EXECUTE_FN.search(sql)
     events = [e.upper() for e in re.findall(r"\b(INSERT|UPDATE|DELETE|TRUNCATE)\b", sql, re.I)]
-    # first event keywords after timing, skip those in function name
+    table = ident_leaf(table_m.group(1)) if table_m else ""
+    function = ident_leaf(fn_m.group(1)) if fn_m else ""
+    existing = schema.triggers.get(name)
+    if existing is not None:
+        if not existing.table and table:
+            existing.table = table
+        if not existing.function and function:
+            existing.function = function
+        if timing_m and (not existing.timing or existing.timing == "AFTER"):
+            existing.timing = timing_m.group(1).upper()
+        if events and existing.events == ["INSERT"]:
+            existing.events = events
+        if evidence and existing.evidence is None:
+            existing.evidence = evidence
+        return
     schema.triggers[name] = DbTrigger(
         name=name,
-        table=(table_m.group(1).split(".")[-1].lower() if table_m else ""),
+        table=table,
         timing=(timing_m.group(1).upper() if timing_m else "AFTER"),
         events=events or ["INSERT"],
-        function=(fn_m.group(1).split(".")[-1].lower() if fn_m else ""),
+        function=function,
+        evidence=evidence,
+    )
+
+
+def _apply_create_view(
+    schema: Schema,
+    sql: str,
+    evidence: Evidence,
+    stmt: exp.Create | None = None,
+) -> None:
+    name = ""
+    materialized = bool(re.search(r"(?is)MATERIALIZED\s+VIEW", sql))
+    if stmt is not None:
+        this = stmt.this
+        if isinstance(this, exp.Schema):
+            name = ident_leaf(_ident(this.this) or _ident(this))
+        else:
+            name = ident_leaf(_ident(this))
+        kind = str(stmt.args.get("kind") or "").upper()
+        if "MATERIALIZED" in kind:
+            materialized = True
+    if not name:
+        m = CREATE_VIEW.search(sql)
+        if m:
+            name = ident_leaf(m.group(1))
+    if not name:
+        return
+    query = ""
+    as_m = re.search(r"(?is)\bAS\b", sql)
+    if as_m:
+        query = sql[as_m.end() :].strip().rstrip(";").strip()
+    colmap = schema.column_names()
+    accesses = (
+        analyze_sql(
+            query,
+            schema_columns=colmap,
+            require_known=False,
+            skip_names={k.lower() for k in PLPGSQL_KEYWORDS},
+        )
+        if query
+        else []
+    )
+    tables: list[str] = []
+    seen: set[str] = set()
+    for access in accesses:
+        tname = ident_leaf(access.table) if access.table else ""
+        if not tname or access.unknown_table or tname in seen:
+            continue
+        if is_skipped_table_name(tname):
+            continue
+        seen.add(tname)
+        tables.append(tname)
+    schema.views[name] = DbView(
+        name=name,
+        materialized=materialized,
+        query=query,
+        tables=tables,
+        accesses=accesses,
         evidence=evidence,
     )
 
@@ -598,7 +871,7 @@ def _apply_policy(schema: Schema, sql: str, evidence: Evidence) -> None:
     if not m:
         return
     name = next(g for g in m.groups()[:3] if g)
-    table_name = m.group(4).split(".")[-1].lower()
+    table_name = ident_leaf(m.group(4))
     command_m = POLICY_FOR.search(sql)
     role_m = POLICY_TO.search(sql)
     table = _table(schema, table_name)
@@ -636,30 +909,43 @@ def apply_statement(schema: Schema, sql: str, evidence: Evidence) -> None:
                 handled = True
             elif kind == "TRIGGER":
                 _apply_trigger_create(schema, stmt, evidence)
+                _apply_trigger_regex(schema, stripped, evidence)
                 handled = True
             elif kind == "FUNCTION":
                 _apply_function(schema, stripped, evidence)
+                handled = True
+            elif "VIEW" in kind:
+                _apply_create_view(schema, stripped, evidence, stmt)
                 handled = True
         elif isinstance(stmt, exp.Alter):
             _apply_alter(schema, stmt)
             handled = True
             m_rls = ENABLE_RLS.search(stripped)
             if m_rls:
-                _table(schema, m_rls.group(1).split(".")[-1]).rls = True
+                _table(schema, ident_leaf(m_rls.group(1))).rls = True
         elif isinstance(stmt, exp.Command):
             cmd = str(stmt.this or "").upper()
+            expr = str(stmt.args.get("expression") or stripped)
             if cmd == "DO":
                 _apply_do_block(schema, stripped, evidence)
                 handled = True
-            elif cmd == "CREATE" and re.search(r"(?is)FUNCTION", str(stmt.args.get("expression") or stripped)):
+            elif cmd == "CREATE" and re.search(r"(?is)FUNCTION", expr):
                 _apply_function(schema, stripped, evidence)
                 handled = True
-            elif cmd == "CREATE" and re.search(r"(?is)TRIGGER", str(stmt.args.get("expression") or stripped)):
+            elif cmd == "CREATE" and re.search(r"(?is)TRIGGER", expr):
                 _apply_trigger_regex(schema, stripped, evidence)
                 handled = True
-            elif cmd == "CREATE" and re.search(r"(?is)POLICY", str(stmt.args.get("expression") or stripped)):
+            elif cmd == "CREATE" and re.search(r"(?is)POLICY", expr):
                 _apply_policy(schema, stripped, evidence)
                 handled = True
+            elif cmd == "CREATE" and re.search(r"(?is)VIEW", expr):
+                _apply_create_view(schema, stripped, evidence)
+                handled = True
+            elif cmd == "CREATE" and re.search(r"(?is)\bTABLE\b", expr):
+                m_tbl = CREATE_TABLE_HEAD.search(stripped)
+                if m_tbl:
+                    _table(schema, ident_leaf(m_tbl.group(1)))
+                    handled = True
 
     if handled:
         return
@@ -672,22 +958,32 @@ def apply_statement(schema: Schema, sql: str, evidence: Evidence) -> None:
     if CREATE_TRG.search(stripped):
         _apply_trigger_regex(schema, stripped, evidence)
         return
+    if CREATE_VIEW.search(stripped):
+        _apply_create_view(schema, stripped, evidence)
+        return
     if CREATE_POLICY.search(stripped):
         _apply_policy(schema, stripped, evidence)
         return
+    m_tbl = CREATE_TABLE_HEAD.match(stripped)
+    if m_tbl and re.search(r"(?is)^CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\b", stripped):
+        _table(schema, ident_leaf(m_tbl.group(1)))
+        return
     m_rls = ENABLE_RLS.search(stripped)
     if m_rls:
-        table = _table(schema, m_rls.group(1).split(".")[-1])
+        table = _table(schema, ident_leaf(m_rls.group(1)))
         table.rls = True
 
 
 def _stmt_symbol(stmt: str) -> str:
     m = CREATE_FN.search(stmt)
     if m:
-        return m.group(1).split(".")[-1]
+        return ident_leaf(m.group(1))
     m = CREATE_TRG.search(stmt)
     if m:
-        return m.group(1)
+        return ident_leaf(m.group(1))
+    m = CREATE_VIEW.search(stmt)
+    if m:
+        return ident_leaf(m.group(1))
     tokens = stmt.split()
     if not tokens:
         return "sql"

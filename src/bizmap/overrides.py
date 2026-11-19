@@ -24,7 +24,7 @@ class ScanConfig:
     raw: dict[str, Any] = field(default_factory=dict)
     name: str | None = None
     database: str | None = None
-    services: dict[str, str] = field(default_factory=dict)
+    services: dict[str, Any] = field(default_factory=dict)
     repos: list[str] = field(default_factory=list)
 
 
@@ -99,7 +99,7 @@ def load_scan_config(root: Path, config: Path | None = None) -> ScanConfig:
         raw=data,
         name=str(name) if name else None,
         database=str(database) if database else None,
-        services={str(k): str(v) for k, v in services.items()},
+        services={str(k): v for k, v in services.items() if v is not None},
         repos=[str(x) for x in repos],
     )
 

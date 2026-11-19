@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections import deque
 
-from bizmap.graph import Graph, Node, table_id
+from bizmap.graph import Graph, Node, table_id, view_id
 
 _SAFE = re.compile(r"[^A-Za-z0-9_]")
 
@@ -42,6 +42,9 @@ def _label(node: Node) -> str:
         return f"{a.get('table')}.{a.get('name')}"
     if t == "table":
         return str(a.get("name") or node.id.removeprefix("table:"))
+    if t == "view":
+        prefix = "mat " if a.get("materialized") else "view "
+        return prefix + str(a.get("name") or node.id.removeprefix("view:"))
     if t == "db_trigger":
         return str(a.get("name") or node.id.removeprefix("db_trigger:"))
     if t == "collection":
@@ -62,6 +65,8 @@ def _table_id_of(node_id: str) -> str | None:
     if leaf.startswith("table:"):
         return node_id
     if leaf.startswith("collection:"):
+        return node_id
+    if leaf.startswith("view:"):
         return node_id
     if leaf.startswith("column:"):
         table = leaf.split(":", 1)[1].split(".", 1)[0]
@@ -123,7 +128,7 @@ def _emit(
     extra_note: str | None = None,
 ) -> None:
     entrypoints = [n for n in nodes if n.type == "entrypoint"]
-    data = [n for n in nodes if n.type in {"table", "column", "collection", "queue"}]
+    data = [n for n in nodes if n.type in {"table", "column", "collection", "queue", "view"}]
     functions = [n for n in nodes if n.type == "function"]
     triggers = [n for n in nodes if n.type == "db_trigger"]
 
@@ -211,12 +216,28 @@ def _render_rollup(graph: Graph, lines: list[str], limit: int) -> None:
 
 def _render_focus(graph: Graph, focus: str, lines: list[str], limit: int) -> None:
     focus = focus.lower()
-    tid = table_id(focus) if not focus.startswith("table:") else focus
+    if focus.startswith("view:"):
+        tid = focus
+    elif focus.startswith("table:"):
+        tid = focus
+    elif view_id(focus) in graph.nodes:
+        tid = view_id(focus)
+    else:
+        tid = table_id(focus)
     table_name = tid.split(":", 1)[1]
     keep: set[str] = {tid}
+    if tid in graph.nodes and graph.nodes[tid].type == "view":
+        for edge in graph.outgoing(tid, "derives_from"):
+            keep.add(edge.to_id)
     for node in graph.nodes.values():
         if node.type == "column" and str(node.attrs.get("table", "")).lower() == table_name:
             keep.add(node.id)
+        if node.type == "view":
+            if any(
+                e.to_id == tid or e.to_id.endswith("/" + tid)
+                for e in graph.outgoing(node.id, "derives_from")
+            ):
+                keep.add(node.id)
     # functions / triggers that read/write this table or its columns
     fns: set[str] = set()
     for edge in graph.edges.values():
@@ -235,7 +256,15 @@ def _render_focus(graph: Graph, focus: str, lines: list[str], limit: int) -> Non
     edges: list[tuple[str, str, str, str]] = []
     for edge in graph.edges.values():
         if edge.from_id in keep and edge.to_id in keep:
-            if edge.type in {"reads", "writes", "triggers", "calls", "calls_http", "enqueues"}:
+            if edge.type in {
+                "reads",
+                "writes",
+                "triggers",
+                "calls",
+                "calls_http",
+                "enqueues",
+                "derives_from",
+            }:
                 edges.append((edge.from_id, edge.type, edge.to_id, edge.confidence.value))
     _emit(
         lines,

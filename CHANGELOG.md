@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.2.1 — 2026-11-19
+
+Precision fixes for SQL functions, views, and service links after a private
+evaluation of v0.2.0. Behavior is generic; tests and fixtures are synthetic
+only (`orders`, `users`, `tenants`, `documents`, `jobs`).
+
+### Fixed
+
+- **Quoted / schema-qualified DDL** (pg_dump style): `CREATE FUNCTION`,
+  `CREATE TRIGGER`, `CREATE TABLE`, `CREATE VIEW`, and `EXECUTE FUNCTION`
+  accept `"public"."fn"` and `"trg"` identifiers; quotes are stripped.
+- **PL/pgSQL junk table nodes**: comments and string literals are masked
+  before body analysis; DECLARE'd variables, INTO targets, and PL/pgSQL
+  keywords (`FOUND`, `PERFORM`, `ANY`, `IF`, `RETURN`, `RAISE`, …) are
+  never table nodes. With DDL present, unknown names become an
+  `unresolved` attribute on the SQL function, not a `table:` node.
+- **SQL dicts and injected runners**: module-level dict/constant SQL
+  (`QUERIES = {"a": "SELECT … FROM orders"}` then `run_query(QUERIES[key])`)
+  is expanded. A function that receives a callable (`run_query`) and calls
+  it with SQL attributes tables to that function. Entrypoints link to
+  functions passed as arguments, dataclass fields, or aliases.
+- **Views**: `CREATE VIEW` / `CREATE MATERIALIZED VIEW` (and Alembic
+  `op.execute` of the same) are `view` nodes with `derives_from` edges to
+  base tables. `bizmap why` on a base table shows through readers of the
+  view.
+- **Firestore document refs**: `ref = db.collection(X).document(id)` then
+  `ref.set/update/delete/get()`, `doc_ref = col.document()`,
+  `transaction.update(ref, …)`, and `batch.set(ref, …)` resolve to the
+  collection.
+- **Queue consumer link**: Cloud Tasks / Pub/Sub enqueue edges connect to
+  the consumer entrypoint by matching the task URL path suffix (including
+  when the base comes from env) to an HTTP/Firebase route, or via a
+  `queues:` mapping in `bizmap.yaml`.
+- **Cross-repo HTTP env bases**: `services:` entries match by env var name
+  (`os.environ["BILLING_URL"]`, `settings.billing_url`) or hostname.
+  `bizmap scan` prints `N unresolved HTTP calls` (with the env/host keys
+  seen) so missing `services:` declarations are obvious.
+
+### Changed
+
+- Graph format **0.2.1**: node type `view`; edge type `derives_from`.
+
 ## 0.2.0 — 2026-11-19
 
 Python stacks, Firestore/queues, PL/pgSQL + RLS, and a cross-repo registry.

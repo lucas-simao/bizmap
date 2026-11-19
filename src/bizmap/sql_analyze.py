@@ -16,9 +16,12 @@ SQL_START = re.compile(
     r"^\s*\(?\s*(WITH|SELECT|INSERT|UPDATE|DELETE|MERGE)\b",
     re.IGNORECASE,
 )
+# Bare or quoted identifier, optionally schema-qualified (pg_dump style).
+IDENT_ATOM = r'(?:"[^"]+"|`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)'
+QUAL_IDENT = rf"{IDENT_ATOM}(?:\s*\.\s*{IDENT_ATOM})*"
 TABLE_FROM_PREFIX = re.compile(
     r"(?is)\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|FROM|JOIN(?:\s+(?:INNER|LEFT|RIGHT|FULL|CROSS))?(?:\s+OUTER)?(?:\s+LATERAL)?)\s+"
-    r"(?:ONLY\s+)?([A-Za-z_][A-Za-z0-9_.]*)"
+    rf"(?:ONLY\s+)?({QUAL_IDENT})"
 )
 DYNAMIC_PLACEHOLDER = re.compile(r"\{[^{}]+\}")
 _CTE_HEAD = re.compile(r"(?is)\bWITH\s+(?:RECURSIVE\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+AS\b")
@@ -120,6 +123,119 @@ SQL_KEYWORDS = {
     "filter",
     "within",
     "unknown",
+    # PL/pgSQL / type words that leak from function bodies
+    "any",
+    "if",
+    "elsif",
+    "elseif",
+    "return",
+    "raise",
+    "begin",
+    "declare",
+    "exception",
+    "loop",
+    "while",
+    "foreach",
+    "exit",
+    "continue",
+    "notice",
+    "warning",
+    "debug",
+    "info",
+    "assert",
+    "strict",
+    "next",
+    "perform",
+    "found",
+    "timestamp",
+    "the",
+    "void",
+    "trigger",
+    "record",
+    "coalesce",
+    "nullif",
+    "greatest",
+    "least",
+    "integer",
+    "bigint",
+    "varchar",
+    "boolean",
+    "numeric",
+    "jsonb",
+    "bytea",
+    "serial",
+    "bigserial",
+    "tg_op",
+    "tg_name",
+    "tg_when",
+    "tg_level",
+    "tg_relid",
+    "tg_table_name",
+    "tg_table_schema",
+    "tg_nargs",
+    "tg_argv",
+    "sqlstate",
+    "sqlerrm",
+}
+
+# Extra PL/pgSQL names never treated as tables (also merged into SQL_KEYWORDS).
+PLPGSQL_KEYWORDS = {
+    "found",
+    "perform",
+    "any",
+    "if",
+    "then",
+    "else",
+    "elsif",
+    "elseif",
+    "return",
+    "raise",
+    "begin",
+    "end",
+    "declare",
+    "exception",
+    "loop",
+    "while",
+    "foreach",
+    "exit",
+    "continue",
+    "notice",
+    "warning",
+    "debug",
+    "info",
+    "assert",
+    "strict",
+    "next",
+    "timestamp",
+    "the",
+    "void",
+    "trigger",
+    "record",
+    "coalesce",
+    "nullif",
+    "greatest",
+    "least",
+    "now",
+    "integer",
+    "bigint",
+    "varchar",
+    "boolean",
+    "numeric",
+    "jsonb",
+    "bytea",
+    "serial",
+    "bigserial",
+    "tg_op",
+    "tg_name",
+    "tg_when",
+    "tg_level",
+    "tg_relid",
+    "tg_table_name",
+    "tg_table_schema",
+    "tg_nargs",
+    "tg_argv",
+    "sqlstate",
+    "sqlerrm",
 }
 
 PG_CATALOG_TABLES = {
@@ -198,6 +314,32 @@ class SqlAccess:
     external: bool = False
     unknown_table: bool = False
     candidates: list[str] = field(default_factory=list)
+    schema_qualified: bool = False
+    unresolved: bool = False
+
+
+def ident_parts(raw: str | None) -> list[str]:
+    """Split a possibly quoted, schema-qualified identifier into components."""
+    if not raw:
+        return []
+    parts = [
+        a or b or c
+        for a, b, c in re.findall(r'"([^"]+)"|`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*)', raw)
+    ]
+    return [p for p in parts if p]
+
+
+def ident_leaf(raw: str | None) -> str:
+    """Last component of a quoted/schema-qualified identifier, unquoted, lowercased."""
+    parts = ident_parts(raw)
+    if parts:
+        return parts[-1].lower()
+    return (raw or "").strip().strip('"').strip("`").lower()
+
+
+def ident_is_qualified(raw: str | None) -> bool:
+    """True when the identifier has a schema/catalog qualifier (dot)."""
+    return len(ident_parts(raw)) >= 2 or ("." in (raw or ""))
 
 
 def looks_like_sql(text: str | None) -> bool:
@@ -227,11 +369,13 @@ def is_external_table(name: str | None) -> bool:
     return False
 
 
-def is_skipped_table_name(name: str | None) -> bool:
+def is_skipped_table_name(name: str | None, extra: set[str] | None = None) -> bool:
     if not name:
         return True
-    leaf = name.lower().split(".")[-1]
-    if leaf in SKIP_TABLES or leaf in SQL_KEYWORDS:
+    leaf = ident_leaf(name)
+    if extra and (leaf in extra or name.lower() in extra):
+        return True
+    if leaf in SKIP_TABLES or leaf in SQL_KEYWORDS or leaf in PLPGSQL_KEYWORDS:
         return True
     if leaf.startswith("{") or "}" in leaf:
         return True
@@ -258,7 +402,7 @@ def _table_name(table: exp.Table | exp.Expression | None) -> str:
     if isinstance(table, exp.Table):
         name = table.name or ""
         db = _ident(table.args.get("db"))
-        if db in {"pg_catalog", "information_schema"}:
+        if db:
             return f"{db}.{name}" if name else db
         return name
     return _ident(table)
@@ -470,6 +614,7 @@ def _add(
     *,
     unknown_table: bool = False,
     candidates: list[str] | None = None,
+    skip_names: set[str] | None = None,
 ) -> None:
     if unknown_table:
         key = (kind, "unknown", (column or "").lower(), confidence.value, dynamic, True)
@@ -489,16 +634,19 @@ def _add(
             )
         )
         return
-    if not table or is_skipped_table_name(table):
+    if not table or is_skipped_table_name(table, skip_names):
         return
+    qualified = ident_is_qualified(table)
     external = is_external_table(table)
     if not external:
-        table = table.split(".")[-1]
+        table = ident_leaf(table)
         external = is_external_table(table)
     else:
         # Keep catalog schema qualification to avoid colliding with app tables
         # such as ``columns``.
         pass
+    if skip_names and ident_leaf(table) in skip_names:
+        return
     key = (kind, table.lower(), (column or "").lower(), confidence.value, dynamic, external)
     if key in seen:
         return
@@ -512,6 +660,7 @@ def _add(
             raw_sql=sql,
             dynamic=dynamic,
             external=external,
+            schema_qualified=qualified,
         )
     )
 
@@ -530,24 +679,32 @@ def _table_allowed(
     table: str | None,
     known_tables: set[str] | None,
     phantoms: set[str] | None = None,
+    *,
+    schema_qualified: bool = False,
+    skip_names: set[str] | None = None,
 ) -> bool:
     """Whether ``table`` may become a table/column access.
 
-    With a non-empty DDL set, only those tables (plus catalogs) are kept.
-    Without DDL, any real-looking identifier is kept except phantoms.
+    With a non-empty DDL set, only those tables (plus catalogs) are kept,
+    except schema-qualified names which are allowed through. Without DDL,
+    any real-looking identifier is kept except phantoms.
     """
     if not table:
         return False
-    leaf = table.lower().split(".")[-1]
+    leaf = ident_leaf(table)
     if phantoms and (leaf in phantoms or table.lower() in phantoms):
         return False
-    if is_skipped_table_name(leaf):
+    if skip_names and (leaf in skip_names or table.lower() in skip_names):
+        return False
+    if is_skipped_table_name(leaf, skip_names):
         return False
     if is_external_table(table):
         return True
     known = {t.lower() for t in (known_tables or ())}
     if known:
-        return leaf in known or table.lower() in known
+        if leaf in known or table.lower() in known:
+            return True
+        return bool(schema_qualified or ident_is_qualified(table))
     return True
 
 
@@ -561,9 +718,12 @@ def _analyze_statement(
     seen: set[tuple],
     extra_phantoms: set[str] | None = None,
     known_tables: set[str] | None = None,
+    skip_names: set[str] | None = None,
 ) -> None:
     aliases = _alias_map(stmt, extra_phantoms)
     phantoms = _phantom_names(stmt, extra_phantoms)
+    if skip_names:
+        phantoms = set(phantoms) | {s.lower() for s in skip_names}
     conf = Confidence.UNKNOWN if dynamic else Confidence.EXACT
 
     def known_cols(table: str) -> list[str]:
@@ -573,16 +733,25 @@ def _analyze_statement(
 
     if isinstance(stmt, exp.Insert):
         table = _table_name(stmt.this.this if isinstance(stmt.this, exp.Schema) else stmt.this)
-        if is_skipped_table_name(table):
-            _add(out, "write", None, None, Confidence.UNKNOWN, sql, True, seen, unknown_table=True)
+        if is_skipped_table_name(table, skip_names):
             return
         cols = _column_writes_from_schema(stmt)
         if cols:
             for col in cols:
-                _add(out, "write", table, col, conf, sql, dynamic, seen)
+                _add(out, "write", table, col, conf, sql, dynamic, seen, skip_names=skip_names)
         else:
             # Column-less INSERT stays table-level (no schema explosion).
-            _add(out, "write", table, None, Confidence.INFERRED if not dynamic else Confidence.UNKNOWN, sql, dynamic, seen)
+            _add(
+                out,
+                "write",
+                table,
+                None,
+                Confidence.INFERRED if not dynamic else Confidence.UNKNOWN,
+                sql,
+                dynamic,
+                seen,
+                skip_names=skip_names,
+            )
         for inner in stmt.find_all(exp.Select):
             if inner is stmt:
                 continue
@@ -594,20 +763,29 @@ def _analyze_statement(
 
     if isinstance(stmt, exp.Update):
         table = _table_name(stmt.this)
-        if is_skipped_table_name(table):
-            _add(out, "write", None, None, Confidence.UNKNOWN, sql, True, seen, unknown_table=True)
+        if is_skipped_table_name(table, skip_names):
             return
         cols = _set_columns(stmt)
         if cols:
             for col in cols:
-                _add(out, "write", table, col, conf, sql, dynamic, seen)
+                _add(out, "write", table, col, conf, sql, dynamic, seen, skip_names=skip_names)
         else:
-            _add(out, "write", table, None, Confidence.UNKNOWN, sql, dynamic, seen)
+            _add(
+                out,
+                "write",
+                table,
+                None,
+                Confidence.UNKNOWN,
+                sql,
+                dynamic,
+                seen,
+                skip_names=skip_names,
+            )
         where = stmt.args.get("where")
         if where:
             for col in where.find_all(exp.Column):
                 t = _resolve_table(col.table, aliases, table, phantoms)
-                _add(out, "read", t, col.name, conf, sql, dynamic, seen)
+                _add(out, "read", t, col.name, conf, sql, dynamic, seen, skip_names=skip_names)
         for inner in stmt.find_all(exp.Select):
             _analyze_select(
                 inner, sql, schema_columns, dynamic, expand_star, out, seen, aliases, phantoms,
@@ -617,15 +795,14 @@ def _analyze_statement(
 
     if isinstance(stmt, exp.Delete):
         table = _table_name(stmt.this)
-        if is_skipped_table_name(table):
-            _add(out, "write", None, None, Confidence.UNKNOWN, sql, True, seen, unknown_table=True)
+        if is_skipped_table_name(table, skip_names):
             return
-        _add(out, "write", table, None, conf, sql, dynamic, seen)
+        _add(out, "write", table, None, conf, sql, dynamic, seen, skip_names=skip_names)
         where = stmt.args.get("where")
         if where:
             for col in where.find_all(exp.Column):
                 t = _resolve_table(col.table, aliases, table, phantoms)
-                _add(out, "read", t, col.name, conf, sql, dynamic, seen)
+                _add(out, "read", t, col.name, conf, sql, dynamic, seen, skip_names=skip_names)
         return
 
     if isinstance(stmt, exp.Select) or stmt.find(exp.Select):
@@ -749,6 +926,7 @@ def _fallback_table_accesses(
     dynamic: bool,
     known_tables: set[str] | None = None,
     phantoms: set[str] | None = None,
+    skip_names: set[str] | None = None,
 ) -> list[SqlAccess]:
     out: list[SqlAccess] = []
     seen: set[tuple] = set()
@@ -758,26 +936,35 @@ def _fallback_table_accesses(
     phantoms = set(phantoms or ()) | text_phantom_aliases(sql)
     found_real = False
     for match in TABLE_FROM_PREFIX.finditer(sql):
-        table = match.group(1).split(".")[-1]
-        if is_skipped_table_name(table):
+        raw = match.group(1)
+        qualified = ident_is_qualified(raw)
+        if is_skipped_table_name(raw, skip_names):
             continue
-        if not _table_allowed(table, known or None, phantoms):
+        if not _table_allowed(
+            raw, known or None, phantoms, schema_qualified=qualified, skip_names=skip_names
+        ):
             continue
         prefix = sql[: match.start()].upper()
         edge_kind = kind
         if "JOIN" in prefix[-20:] or re.search(r"FROM\s*$", prefix.strip()):
-            if kind == "write" and not re.search(
-                r"(?is)INSERT\s+INTO\s+" + re.escape(match.group(1)), sql
-            ):
-                edge_kind = "read"
-        _add(out, edge_kind, table, None, conf, sql, True, seen)
+            if kind == "write":
+                ahead = sql[max(0, match.start() - 32) : match.start()].upper()
+                if not re.search(r"INSERT\s+INTO\s*$", ahead):
+                    edge_kind = "read"
+        _add(out, edge_kind, raw, None, conf, sql, True, seen, skip_names=skip_names)
         found_real = True
     if not found_real:
-        match = re.search(r"(?is)\b(?:INTO|UPDATE|FROM)\s+([A-Za-z_][A-Za-z0-9_.]*)", sql)
+        match = re.search(rf"(?is)\b(?:INTO|UPDATE|FROM)\s+({QUAL_IDENT})", sql)
         if match:
-            table = match.group(1).split(".")[-1]
-            if _table_allowed(table, known or None, phantoms):
-                _add(out, kind, match.group(1), None, conf, sql, True, seen)
+            raw = match.group(1)
+            if _table_allowed(
+                raw,
+                known or None,
+                phantoms,
+                schema_qualified=ident_is_qualified(raw),
+                skip_names=skip_names,
+            ):
+                _add(out, kind, raw, None, conf, sql, True, seen, skip_names=skip_names)
                 found_real = True
     if found_real:
         return out
@@ -808,6 +995,7 @@ def analyze_sql(
     expand_star: bool = False,
     known_tables: set[str] | None = None,
     require_known: bool = True,
+    skip_names: set[str] | None = None,
 ) -> list[SqlAccess]:
     """Parse a SQL string (postgres dialect) into per-column or table-level accesses.
 
@@ -815,7 +1003,7 @@ def analyze_sql(
     INSERT without a column list stay table-level unless ``expand_star`` is set
     (SELECT * only). CTE / subquery / LATERAL aliases and SQL keywords never
     become tables. When ``known_tables`` (DDL) is non-empty, only those tables
-    (plus catalogs) are emitted.
+    (plus catalogs) are emitted, except schema-qualified names.
     """
     if not sql or not sql.strip():
         return []
@@ -824,7 +1012,8 @@ def analyze_sql(
         known.update(k.lower() for k in schema_columns.keys())
     if not require_known:
         known = set()
-    phantoms = text_phantom_aliases(sql)
+    skip = {s.lower() for s in (skip_names or ())}
+    phantoms = text_phantom_aliases(sql) | skip
     if DYNAMIC_PLACEHOLDER.search(sql) and not re.search(
         r"(?is)\b(?:FROM|INTO|UPDATE|JOIN)\s+[A-Za-z_]", sql
     ):
@@ -848,7 +1037,7 @@ def analyze_sql(
         stmts = sqlglot.parse(normalized, read="postgres", error_level=ErrorLevel.IGNORE)
     except Exception:
         return _fallback_table_accesses(
-            sql, dynamic=True, known_tables=known, phantoms=phantoms
+            sql, dynamic=True, known_tables=known, phantoms=phantoms, skip_names=skip
         )
 
     out: list[SqlAccess] = []
@@ -872,11 +1061,19 @@ def analyze_sql(
             seen,
             extra_phantoms=phantoms,
             known_tables=known,
+            skip_names=skip,
         )
     out = [
         a
         for a in out
-        if a.unknown_table or _table_allowed(a.table, known or None, phantoms)
+        if a.unknown_table
+        or _table_allowed(
+            a.table,
+            known or None,
+            phantoms,
+            schema_qualified=a.schema_qualified,
+            skip_names=skip,
+        )
     ]
     if not parsed_any or not out:
         # FROM-less SELECT (set_config, now(), SELECT 1) touches no table.
@@ -889,7 +1086,7 @@ def analyze_sql(
         if parsed_any and not out and _sql_looks_fromless_select(sql):
             return []
         return _fallback_table_accesses(
-            sql, dynamic=True, known_tables=known, phantoms=phantoms
+            sql, dynamic=True, known_tables=known, phantoms=phantoms, skip_names=skip
         )
     if dynamic:
         for access in out:

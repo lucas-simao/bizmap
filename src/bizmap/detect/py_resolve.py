@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from tree_sitter import Node
 
 from bizmap.detect.tsutil import call_args, call_callee_name, text, walk
+
+_ENV_SUB = re.compile(
+    r"""(?:os\.)?environ\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]"""
+)
 
 
 @dataclass
@@ -226,9 +231,13 @@ def resolve_expr(
     module_consts: dict[str, ResolvedString],
     imap: ImportMap | None = None,
     consts_by_module: dict[str, dict[str, ResolvedString]] | None = None,
+    dicts: dict[str, dict[str, ResolvedString]] | None = None,
+    dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]] | None = None,
 ) -> ResolvedString:
     imap = imap or ImportMap()
     consts_by_module = consts_by_module or {}
+    dicts = dicts or {}
+    dicts_by_module = dicts_by_module or {}
     if node is None:
         return ResolvedString(None, False, True)
     if node.type == "string":
@@ -294,9 +303,33 @@ def resolve_expr(
         inner = next((c for c in node.named_children if c.type != "type"), None)
         return resolve_expr(inner, env, module_consts, imap, consts_by_module)
     if node.type == "subscript":
-        return _placeholder_for(text(node)[:48])
+        raw = text(node)
+        env_m = _ENV_SUB.search(raw)
+        if env_m:
+            return _placeholder_for(env_m.group(1))
+        found = _resolve_dict_subscript(
+            node, env, module_consts, imap, consts_by_module, dicts, dicts_by_module
+        )
+        if found is not None:
+            return found
+        return _placeholder_for(raw[:48])
     if node.type == "call":
-        # os.environ.get("X", "/fallback") — unresolved env, keep placeholder
+        qual = call_qualname(node)
+        leaf = qual.rsplit(".", 1)[-1]
+        if leaf in {"getenv", "get"} and (
+            "environ" in qual or qual in {"os.getenv", "getenv"} or qual.endswith("os.getenv")
+        ):
+            pos = call_posargs(node)
+            if pos:
+                key = resolve_expr(
+                    pos[0], env, module_consts, imap, consts_by_module, dicts, dicts_by_module
+                )
+                if key.fully_static and key.text:
+                    return _placeholder_for(key.text)
+                if key.placeholder:
+                    inner = key.placeholder.strip("{}")
+                    if inner:
+                        return _placeholder_for(inner)
         return _placeholder_for(text(node)[:48])
     if node.type in {"integer", "float", "true", "false", "none"}:
         return ResolvedString(text(node), True, False)
@@ -368,6 +401,109 @@ def assignment_target_name(node: Node) -> str | None:
     if node.type != "assignment":
         return _assignment_name(node) if node.type else None
     return _assignment_name(node)
+
+
+def _subscript_index(node: Node) -> Node | None:
+    idx = node.child_by_field_name("subscript")
+    if idx is not None:
+        return idx
+    named = node.named_children
+    if len(named) >= 2:
+        return named[1]
+    return None
+
+
+def dict_literal_map(
+    node: Node | None,
+    resolve: Callable[[Node | None], ResolvedString],
+) -> dict[str, ResolvedString]:
+    out: dict[str, ResolvedString] = {}
+    for key_n, val_n in dict_pairs(node):
+        if key_n.type == "string":
+            key = unquote(text(key_n))
+        elif key_n.type in {"integer", "float"}:
+            key = text(key_n)
+        else:
+            resolved = resolve(key_n)
+            key = resolved.path_text if resolved.fully_static else ""
+        if not key:
+            continue
+        out[key] = resolve(val_n)
+    return out
+
+
+def collect_module_dicts(
+    assignments: list[tuple[str, Node]],
+    imap: ImportMap,
+    consts_by_module: dict[str, dict[str, ResolvedString]] | None = None,
+    dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]] | None = None,
+) -> dict[str, dict[str, ResolvedString]]:
+    env: dict[str, ResolvedString] = {}
+    consts_by_module = consts_by_module or {}
+    dicts_by_module = dicts_by_module or {}
+    dicts: dict[str, dict[str, ResolvedString]] = {}
+
+    def resolve(node: Node | None) -> ResolvedString:
+        return resolve_expr(node, env, env, imap, consts_by_module, dicts, dicts_by_module)
+
+    for name, value in assignments:
+        env[name] = resolve(value)
+        if value.type == "dictionary":
+            dicts[name] = dict_literal_map(value, resolve)
+        elif value.type == "identifier" and text(value) in dicts:
+            dicts[name] = dicts[text(value)]
+    return dicts
+
+
+def lookup_dict(
+    name: str,
+    imap: ImportMap,
+    dicts: dict[str, dict[str, ResolvedString]],
+    dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]],
+) -> dict[str, ResolvedString] | None:
+    if name in dicts:
+        return dicts[name]
+    if name in imap.from_names:
+        mod, orig = imap.from_names[name]
+        found = (dicts_by_module.get(mod) or {}).get(orig)
+        if found:
+            return found
+        found = (dicts_by_module.get(mod) or {}).get(name)
+        if found:
+            return found
+    if name in imap.modules:
+        return None
+    return None
+
+
+def _resolve_dict_subscript(
+    node: Node,
+    env: dict[str, ResolvedString],
+    module_consts: dict[str, ResolvedString],
+    imap: ImportMap,
+    consts_by_module: dict[str, dict[str, ResolvedString]],
+    dicts: dict[str, dict[str, ResolvedString]],
+    dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]],
+) -> ResolvedString | None:
+    obj = node.child_by_field_name("value") or (
+        node.named_children[0] if node.named_children else None
+    )
+    idx = _subscript_index(node)
+    if obj is None or obj.type != "identifier":
+        return None
+    dmap = lookup_dict(text(obj), imap, dicts, dicts_by_module)
+    if not dmap:
+        return None
+    key = resolve_expr(idx, env, module_consts, imap, consts_by_module, dicts, dicts_by_module)
+    if key.fully_static and key.text is not None and key.text in dmap:
+        return dmap[key.text]
+    # Dynamic key: placeholder listing that the caller may expand to all values.
+    return ResolvedString(
+        None,
+        False,
+        True,
+        placeholder="{" + text(obj) + "[*]}",
+    )
 
 
 def dict_pairs(node: Node | None) -> list[tuple[Node, Node]]:

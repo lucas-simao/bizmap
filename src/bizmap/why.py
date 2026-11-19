@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 
-from bizmap.graph import Graph, collection_id, column_id, table_id
+from bizmap.graph import Graph, collection_id, column_id, table_id, view_id
 
 
 def _label(graph: Graph, node_id: str) -> str:
@@ -42,6 +42,9 @@ def _label(graph: Graph, node_id: str) -> str:
         return f"db trigger {a.get('name')} on {a.get('table')}"
     if node.type == "collection":
         return f"collection {a.get('name') or node_id.removeprefix('collection:')}"
+    if node.type == "view":
+        kind = "materialized view" if a.get("materialized") else "view"
+        return f"{kind} {a.get('name') or node_id.removeprefix('view:')}"
     if node.type == "queue":
         return f"queue {a.get('kind')} {a.get('name')}"
     return node_id
@@ -104,10 +107,15 @@ def _resolve_target(graph: Graph, spec: str) -> tuple[str, str, str]:
         [
             table_id(table),
             collection_id(table),
+            view_id(table),
         ]
     )
     for nid in graph.nodes:
-        if nid.endswith(f"/table:{table.lower()}") or nid.endswith(f"/collection:{table.lower()}"):
+        if (
+            nid.endswith(f"/table:{table.lower()}")
+            or nid.endswith(f"/collection:{table.lower()}")
+            or nid.endswith(f"/view:{table.lower()}")
+        ):
             candidates.append(nid)
     seen: set[str] = set()
     for cid in candidates:
@@ -130,6 +138,11 @@ def _resolve_target(graph: Graph, spec: str) -> tuple[str, str, str]:
         if node.type == "collection":
             heading = f"collection: {node.attrs.get('name') or table}"
             return cid, heading, "collection"
+        if node.type == "view":
+            heading = f"view: {node.attrs.get('name') or table}"
+            if node.attrs.get("materialized"):
+                heading = f"materialized {heading}"
+            return cid, heading, "view"
     return "", "", ""
 
 
@@ -146,9 +159,39 @@ def format_why(graph: Graph, table_dot_column: str) -> str:
         lines.append(f"why: {node.attrs['why']}")
     if node and node.type == "table" and node.attrs.get("policies"):
         lines.append(f"policies: {', '.join(str(p) for p in node.attrs['policies'])}")
+    if kind == "view":
+        bases: list[str] = []
+        for edge in graph.outgoing(cid, "derives_from"):
+            b = graph.get(edge.to_id)
+            bases.append(str((b.attrs.get("name") if b else None) or edge.to_id))
+        if bases:
+            lines.append(f"derives from: {', '.join(bases)}")
 
     writers = list(graph.incoming(cid, "writes"))
     readers = list(graph.incoming(cid, "reads"))
+    if kind in {"table", "column"}:
+        table_name = ""
+        if kind == "column" and node:
+            table_name = str(node.attrs.get("table") or "")
+        elif node:
+            table_name = str(node.attrs.get("name") or "")
+        table_nid = table_id(table_name) if table_name else cid
+        for vnode in graph.nodes.values():
+            if vnode.type != "view":
+                continue
+            if not any(
+                e.to_id == table_nid or e.to_id.endswith("/" + table_nid)
+                for e in graph.outgoing(vnode.id, "derives_from")
+            ):
+                continue
+            readers.extend(graph.incoming(vnode.id, "reads"))
+            writers.extend(graph.incoming(vnode.id, "writes"))
+            vname = str(vnode.attrs.get("name") or "")
+            if vname:
+                for coln in graph.nodes.values():
+                    if coln.type == "column" and str(coln.attrs.get("table") or "") == vname:
+                        readers.extend(graph.incoming(coln.id, "reads"))
+                        writers.extend(graph.incoming(coln.id, "writes"))
     if kind == "column":
         table = node.attrs.get("table") if node else spec.split(".", 1)[0]
         tid = table_id(str(table))
