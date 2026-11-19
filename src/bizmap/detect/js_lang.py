@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,7 +18,7 @@ from bizmap.detect.tsutil import (
     unwrap_callee_expr,
     walk,
 )
-from bizmap.files import rel
+from bizmap.files import SKIP_DIR_NAMES, rel
 from bizmap.sql_analyze import looks_like_sql
 
 try:
@@ -589,6 +591,80 @@ def _fn_param_names(node: Node | None) -> list[str]:
     return names
 
 
+def _fn_param_entries(node: Node | None) -> list[tuple[str, str]]:
+    """Return (name, type_text) for each parameter, including TS annotations."""
+    if node is None:
+        return []
+    params = node.child_by_field_name("parameters")
+    if params is None:
+        for child in node.named_children:
+            if child.type in {"formal_parameters", "parameters"}:
+                params = child
+                break
+    entries: list[tuple[str, str]] = []
+
+    def _one(child: Node) -> tuple[str, str]:
+        ident = child.child_by_field_name("pattern") or child.child_by_field_name("name")
+        name = ""
+        if ident is not None and ident.type == "identifier":
+            name = text(ident)
+        else:
+            for inner in child.named_children:
+                if inner.type == "identifier":
+                    name = text(inner)
+                    break
+                if inner.type in {"required_parameter", "optional_parameter"}:
+                    found_name, _t = _one(inner)
+                    if found_name:
+                        return found_name, _t
+        type_n = child.child_by_field_name("type")
+        type_txt = text(type_n).lstrip(": ").strip() if type_n is not None else ""
+        return name, type_txt
+
+    if params is None:
+        for child in node.named_children:
+            if child.type == "identifier":
+                entries.append((text(child), ""))
+                break
+            if child.type in {"required_parameter", "optional_parameter"}:
+                name, typ = _one(child)
+                if name:
+                    entries.append((name, typ))
+                break
+        return entries
+    for child in params.named_children:
+        if child.type == "identifier":
+            entries.append((text(child), ""))
+        elif child.type in {"required_parameter", "optional_parameter", "rest_parameter"}:
+            name, typ = _one(child)
+            if name:
+                entries.append((name, typ))
+    return entries
+
+
+_HTTP_CLIENT_TYPE = re.compile(
+    r"\b(AxiosInstance|KyInstance|AxiosStatic|Axios)\b"
+)
+_TYPEOF_CLIENT = re.compile(r"\btypeof\s+([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _type_is_http_client(type_text: str, clients: dict[str, str] | None = None) -> bool:
+    """True for AxiosInstance, Pick/Partial of it, KyInstance, or typeof a client."""
+    if not type_text:
+        return False
+    compact = re.sub(r"\s+", "", type_text)
+    if _HTTP_CLIENT_TYPE.search(compact) or _HTTP_CLIENT_TYPE.search(type_text):
+        return True
+    m = _TYPEOF_CLIENT.search(type_text)
+    if m:
+        ident = m.group(1)
+        if clients is not None and ident in clients:
+            return True
+        if ident.lower() in CLIENT_LIBS:
+            return True
+    return False
+
+
 def _assigned_name(node: Node | None) -> str:
     """Identifier of ``const r = <node>`` / ``export const r = <node>``."""
     cur = node
@@ -691,6 +767,12 @@ class JsHttpWrapper:
 
 
 @dataclass
+class JsClientFactory:
+    base: str
+    params: list[str] = field(default_factory=list)
+
+
+@dataclass
 class JsRpcCall:
     name: str
     file: str
@@ -768,6 +850,7 @@ class JsAnalyzer:
     ) -> JsAnalysis:
         analysis = JsAnalysis()
         yaml_constants = constants or {}
+        path_aliases = _ts_path_aliases(root)
         parsed: list[tuple[Path, str, str, Node, bytes]] = []
         for path in files:
             parser = _parser_for(path)
@@ -788,7 +871,7 @@ class JsAnalyzer:
         imports_by_mod: dict[str, dict[str, str]] = {}
         import_specs_by_mod: dict[str, dict[str, tuple[str, str]]] = {}
         exports_by_mod: dict[str, dict[str, str]] = {}
-        factories_by_mod: dict[str, dict[str, str]] = {}
+        factories_by_mod: dict[str, dict[str, JsClientFactory]] = {}
         class_ctors_by_mod: dict[str, dict[str, list[str]]] = {}
         trees_by_mod: dict[str, Node] = {}
         mounts: list[tuple[str, str, str, str, str]] = []
@@ -801,7 +884,7 @@ class JsAnalyzer:
             routers_by_mod[module] = routers
             base_routers_by_mod[module] = dict(routers)
             clients_by_mod[module] = clients
-            imports, specs = _collect_imports(tree, module)
+            imports, specs = _collect_imports(tree, module, path_aliases)
             imports_by_mod[module] = imports
             import_specs_by_mod[module] = specs
             exports_by_mod[module] = _collect_exports(tree)
@@ -1161,10 +1244,15 @@ class JsAnalyzer:
         param_names = _enclosing_js_params(node)
         if path_val and _url_uses_enclosing_path_param(path_val, param_names):
             return True
+        typed_http = _enclosing_typed_http_param(node, recv, clients)
         param_client = bool(
-            recv and recv in param_names and _looks_like_http_path(path_val)
+            recv
+            and (
+                (recv in param_names and _looks_like_http_path(path_val))
+                or typed_http
+            )
         )
-        known = _is_known_http_client(recv, clients, node)
+        known = _is_known_http_client(recv, clients, node) or typed_http
         client_unknown = False
         if not known and not param_client:
             if method in CLIENT_REQUEST_METHODS and recv and _looks_like_http_path(path_val):
@@ -1615,7 +1703,11 @@ def _receiver_is_non_http(call: Node) -> bool:
     return False
 
 
-def _collect_imports(tree: Node, module: str) -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
+def _collect_imports(
+    tree: Node,
+    module: str,
+    path_aliases: list[tuple[str, list[str]]] | None = None,
+) -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
     """Return (local→qualname, local→(src_module, orig_name))."""
     out: dict[str, str] = {}
     specs: dict[str, tuple[str, str]] = {}
@@ -1635,7 +1727,7 @@ def _collect_imports(tree: Node, module: str) -> tuple[dict[str, str], dict[str,
                 src = m.group(1)
         if not src:
             continue
-        src_mod = _spec_to_module(src, module)
+        src_mod = _spec_to_module(src, module, path_aliases)
         head = raw.split("from")[0] if "from" in raw else raw
         mixed = re.search(
             r"import\s+([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\{([^}]+)\}",
@@ -1732,7 +1824,7 @@ def _resolve_imported_name(
         if mapped:
             return src_mod, mapped
         if len(exports) == 1:
-            return src_mod, next(iter(exports.values()))
+            return src_mod, exports[sorted(exports)[0]]
         return src_mod, local
     mapped = exports.get(orig) or orig
     return src_mod, mapped
@@ -1847,13 +1939,14 @@ def _collect_class_ctors(tree: Node) -> dict[str, list[str]]:
     return out
 
 
-def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, str]:
+def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, JsClientFactory]:
     """Functions that return ``axios.create({baseURL})`` / a local instance with interceptors."""
-    factories: dict[str, str] = {}
+    factories: dict[str, JsClientFactory] = {}
 
     def consider(name: str, fn_node: Node) -> None:
         if not name:
             return
+        params = _fn_param_names(fn_node)
         local_bases: dict[str, str] = {}
         for node in walk(fn_node):
             if node.type != "variable_declarator":
@@ -1869,10 +1962,10 @@ def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, s
         if body is not None:
             implicit = _create_call_base(body, consts)
             if implicit:
-                factories[name] = implicit
+                factories[name] = JsClientFactory(base=implicit, params=params)
                 return
             if body.type == "identifier" and text(body) in local_bases:
-                factories[name] = local_bases[text(body)]
+                factories[name] = JsClientFactory(base=local_bases[text(body)], params=params)
                 return
         for node in walk(fn_node):
             if node.type not in {"return_statement", "return"}:
@@ -1883,10 +1976,10 @@ def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, s
             expr = unwrap_callee_expr(expr) or expr
             base = _create_call_base(expr, consts)
             if base:
-                factories[name] = base
+                factories[name] = JsClientFactory(base=base, params=params)
                 return
             if expr.type == "identifier" and text(expr) in local_bases:
-                factories[name] = local_bases[text(expr)]
+                factories[name] = JsClientFactory(base=local_bases[text(expr)], params=params)
                 return
 
     for node in walk(tree):
@@ -2001,7 +2094,7 @@ def _propagate_client_bases(
                 if base is None and orig != "default":
                     base = src_clients.get(orig)
                 if base is None and orig == "default" and len(src_clients) == 1:
-                    base = next(iter(src_clients.values()))
+                    base = src_clients[sorted(src_clients)[0]]
                 if base is not None and dest.get(local) != base:
                     dest[local] = base
                     changed = True
@@ -2015,6 +2108,28 @@ def _propagate_client_bases(
         for module, tree in trees_by_mod.items():
             clients = clients_by_mod.setdefault(module, {})
             factories = factories_by_mod.get(module) or {}
+            consts = consts_by_mod.get(module) or {}
+            for node in walk(tree):
+                if node.type in {
+                    "function_declaration",
+                    "function",
+                    "function_expression",
+                    "arrow_function",
+                    "method_definition",
+                }:
+                    for pname, typ in _fn_param_entries(node):
+                        if not _type_is_http_client(typ, clients):
+                            continue
+                        base = ""
+                        m = _TYPEOF_CLIENT.search(typ or "")
+                        if m and m.group(1) in clients:
+                            base = clients[m.group(1)]
+                        if pname not in clients:
+                            clients[pname] = base
+                            changed = True
+                        elif base and clients.get(pname) != base:
+                            clients[pname] = base
+                            changed = True
             for node in walk(tree):
                 if node.type != "variable_declarator":
                     continue
@@ -2023,14 +2138,14 @@ def _propagate_client_bases(
                 if not name or value is None or value.type != "call_expression":
                     continue
                 callee = call_callee_name(value)
-                if callee in factories:
-                    if clients.get(name) != factories[callee]:
-                        clients[name] = factories[callee]
-                        changed = True
-                else:
+                factory = factories.get(callee)
+                if factory is None:
                     recv = _receiver_ident(value)
-                    if recv in factories and clients.get(name) != factories[recv]:
-                        clients[name] = factories[recv]
+                    factory = factories.get(recv)
+                if factory is not None:
+                    base = _instantiate_factory(factory, value, consts)
+                    if clients.get(name) != base:
+                        clients[name] = base
                         changed = True
             for node in walk(tree):
                 if node.type == "call_expression":
@@ -2044,7 +2159,11 @@ def _propagate_client_bases(
 
 
 
-def _spec_to_module(spec: str, current: str) -> str:
+def _spec_to_module(
+    spec: str,
+    current: str,
+    path_aliases: list[tuple[str, list[str]]] | None = None,
+) -> str:
     spec = spec.strip()
     if spec.startswith("."):
         parts = current.split(".")
@@ -2054,10 +2173,238 @@ def _spec_to_module(spec: str, current: str) -> str:
             rest = rest[3:]
         if rest.startswith("./"):
             rest = rest[2:]
-        rest = rest.rsplit(".", 1)[0]
+        rest = _strip_js_ext(rest)
         bits = [p for p in rest.split("/") if p and p != "."]
         return ".".join([*parts[:-1], *bits]) if bits else ".".join(parts[:-1]) or current
+    mapped = _map_ts_alias(spec, path_aliases or [])
+    if mapped:
+        return mapped
+    if spec.startswith("@/"):
+        rest = _strip_js_ext(spec[2:])
+        bits = [p for p in rest.split("/") if p]
+        return ".".join(["src", *bits]) if bits else "src"
     return spec.replace("/", ".")
+
+
+_JS_EXTS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
+
+
+def _strip_js_ext(path: str) -> str:
+    raw = path.replace("\\", "/")
+    for ext in _JS_EXTS:
+        if raw.endswith(ext):
+            return raw[: -len(ext)]
+    return raw
+
+
+def _path_to_module(rel_posix: str) -> str:
+    rel_posix = _strip_js_ext(rel_posix.replace("\\", "/").lstrip("./"))
+    bits = [p for p in rel_posix.split("/") if p and p != "."]
+    return ".".join(bits)
+
+
+def _apply_ts_pattern(spec: str, pattern: str, target: str) -> str | None:
+    if "*" not in pattern:
+        return target if spec == pattern else None
+    pre, _, post = pattern.partition("*")
+    if not spec.startswith(pre):
+        return None
+    if post and not spec.endswith(post):
+        return None
+    star = spec[len(pre) : len(spec) - len(post) if post else None]
+    if "*" in target:
+        tpre, _, tpost = target.partition("*")
+        return tpre + star + tpost
+    return target
+
+
+def _map_ts_alias(spec: str, aliases: list[tuple[str, list[str]]]) -> str | None:
+    if not aliases:
+        return None
+    for pattern, targets in sorted(aliases, key=lambda item: -len(item[0])):
+        for target in targets:
+            mapped = _apply_ts_pattern(spec, pattern, target)
+            if mapped:
+                return _path_to_module(mapped)
+    return None
+
+
+def _parse_jsonc(raw: str) -> object:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    text = re.sub(r"/\*.*?\*/", "", raw, flags=re.S)
+    lines: list[str] = []
+    for line in text.splitlines():
+        buf: list[str] = []
+        in_str = False
+        escaped = False
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if escaped:
+                buf.append(ch)
+                escaped = False
+                i += 1
+                continue
+            if in_str and ch == "\\":
+                buf.append(ch)
+                escaped = True
+                i += 1
+                continue
+            if ch == '"':
+                in_str = not in_str
+                buf.append(ch)
+                i += 1
+                continue
+            if not in_str and ch == "/" and i + 1 < len(line) and line[i + 1] == "/":
+                break
+            buf.append(ch)
+            i += 1
+        lines.append("".join(buf))
+    text = "\n".join(lines)
+    text = re.sub(r",(\s*[}\]])", r"\1", text)
+    return json.loads(text)
+
+
+def _merge_tsconfig(base: dict, overlay: dict) -> dict:
+    out = dict(base)
+    for key, val in overlay.items():
+        if key == "compilerOptions" and isinstance(val, dict):
+            opts = dict(out.get("compilerOptions") or {})
+            overlay_opts = dict(val)
+            paths = dict(opts.get("paths") or {})
+            paths.update(overlay_opts.get("paths") or {})
+            opts.update(overlay_opts)
+            if paths:
+                opts["paths"] = paths
+            out["compilerOptions"] = opts
+        else:
+            out[key] = val
+    return out
+
+
+def _load_tsconfig(path: Path, seen: set[Path] | None = None) -> dict:
+    seen = seen or set()
+    path = path.resolve()
+    if path in seen or not path.is_file():
+        return {}
+    seen.add(path)
+    try:
+        data = _parse_jsonc(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    merged: dict = {}
+    ext = data.get("extends")
+    exts = ext if isinstance(ext, list) else ([ext] if ext else [])
+    for item in exts:
+        if not item:
+            continue
+        raw = str(item)
+        if raw.startswith("@"):
+            continue
+        parent = (path.parent / raw).resolve()
+        if not parent.exists() and not raw.endswith(".json"):
+            parent = (path.parent / (raw + ".json")).resolve()
+        if parent.exists():
+            merged = _merge_tsconfig(merged, _load_tsconfig(parent, seen))
+    return _merge_tsconfig(merged, data)
+
+
+def _join_ts_base(base_url: str, target: str) -> str:
+    target = target.replace("\\", "/").lstrip("/")
+    base = (base_url or ".").replace("\\", "/").rstrip("/")
+    if base in {".", "", "./"}:
+        return target
+    if target.startswith("./"):
+        target = target[2:]
+    return base + "/" + target
+
+
+def _ts_path_aliases(root: Path) -> list[tuple[str, list[str]]]:
+    """compilerOptions.paths from tsconfig.json / jsconfig.json (with extends)."""
+    configs: list[Path] = []
+    root = root.resolve()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
+        for name in filenames:
+            if name in {"tsconfig.json", "jsconfig.json"} or (
+                name.startswith("tsconfig.") and name.endswith(".json")
+            ):
+                configs.append(Path(dirpath) / name)
+    aliases: list[tuple[str, list[str]]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for cfg_path in sorted(configs):
+        data = _load_tsconfig(cfg_path)
+        opts = data.get("compilerOptions") if isinstance(data, dict) else None
+        if not isinstance(opts, dict):
+            continue
+        base_url = str(opts.get("baseUrl") or ".")
+        paths = opts.get("paths") or {}
+        if not isinstance(paths, dict):
+            continue
+        for pattern, targets in paths.items():
+            if isinstance(targets, str):
+                target_list = [targets]
+            elif isinstance(targets, list):
+                target_list = [str(t) for t in targets if t]
+            else:
+                continue
+            joined = [_join_ts_base(base_url, t) for t in target_list]
+            key = (str(pattern), tuple(joined))
+            if key in seen:
+                continue
+            seen.add(key)
+            aliases.append((str(pattern), joined))
+    return aliases
+
+
+def _instantiate_factory(
+    factory: JsClientFactory,
+    call: Node,
+    consts: dict[str, str],
+) -> str:
+    """Substitute call-site args into a factory's ``{param}`` baseURL template."""
+    base = factory.base or ""
+    args = call_args(call)
+    for i, pname in enumerate(factory.params):
+        if i >= len(args):
+            break
+        val, _u = _resolve_js_string(args[i], consts)
+        if not val:
+            continue
+        hole = "{" + pname + "}"
+        if hole in base:
+            base = base.replace(hole, val.rstrip("/"))
+    return base
+
+
+def _enclosing_typed_http_param(
+    node: Node | None,
+    recv: str,
+    clients: dict[str, str],
+) -> bool:
+    if not recv:
+        return False
+    cur = node.parent if node is not None else None
+    depth = 0
+    while cur is not None and depth < 48:
+        if cur.type in {
+            "function_declaration",
+            "function",
+            "function_expression",
+            "arrow_function",
+            "method_definition",
+        }:
+            for name, typ in _fn_param_entries(cur):
+                if name == recv and _type_is_http_client(typ, clients):
+                    return True
+        cur = cur.parent
+        depth += 1
+    return False
 
 
 def _supabase_table(call: Node, consts: dict[str, str]) -> str | None:

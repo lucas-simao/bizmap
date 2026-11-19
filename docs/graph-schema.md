@@ -1,4 +1,4 @@
-# BizMap graph schema (v0.2.8)
+# BizMap graph schema (v0.2.9)
 
 `bizmap scan` writes `bizmap.graph.json`. The graph is fully deterministic: every
 node and edge is produced from source text (SQL, tree-sitter ASTs, comments, or
@@ -11,7 +11,7 @@ values except `generated_at`.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | string | Graph format version (`"0.2.8"`). |
+| `version` | string | Graph format version (`"0.2.9"`). |
 | `generated_at` | string | UTC timestamp. |
 | `schema` | object | Reconstructed database schema (`schema.tables`). |
 | `nodes` | array | Graph nodes (see below). |
@@ -201,8 +201,11 @@ overrides:
 ## Mermaid
 
 `bizmap scan --mermaid` writes an **entrypoint → table** rollup (readable on
-large graphs). `--mermaid-focus TABLE` shows functions, columns, views, and
-entrypoints around one table or view. `--mermaid-limit N` caps node count.
+large graphs). A multi-repo / joint scan also draws `calls_http` edges
+between services (function or entrypoint in repo A → entrypoint in repo B),
+one subgraph per repo. `--mermaid-focus TABLE` shows functions, columns,
+views, and entrypoints around one table or view. `--mermaid-limit N` caps
+node count.
 
 `bizmap scan` prints `HTTP unmatched by reason: …` then
 `N unresolved HTTP calls (ENV, host, …)` after the graph write when client

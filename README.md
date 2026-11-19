@@ -44,7 +44,9 @@ uv run bizmap why orders.status
 `why TABLE.COLUMN` prints writers, readers, and the entrypoints that trigger them.
 
 `--mermaid` is an **entrypoint → table** rollup (readable on large apps).
-Use `--mermaid-focus orders` for the neighborhood of one table, and
+A joint / multi-repo scan also draws **`calls_http` between services**,
+one subgraph per repo. Use `--mermaid-focus orders` for the neighborhood
+of one table, and
 `--expand-star` only if you want `SELECT *` expanded to schema columns at the
 SQL origin.
 
@@ -106,7 +108,7 @@ flowchart LR
   GET_stock -->|reads inferred| inventory
 ```
 
-## How it works (v0.2.8)
+## How it works (v0.2.9)
 
 1. **Schema replayer** — applies `schema.sql` / migration folders in order
    (`CREATE TABLE IF NOT EXISTS`, quoted/schema-qualified pg_dump identifiers,
@@ -125,9 +127,11 @@ flowchart LR
    prefixes, cross-package consts (including `const X = shared.X` aliases),
    factory handlers, and wrappers such as
    `wrap(h.Version)`). Method names must be exactly `GET`/`POST`/…/`Any`/`Match`
-   with a string-like path. pgx v5 `tx.Exec|Query|QueryRow(ctx, sql, args)`,
-   including range-over-literal-slice SQL and helpers that take a `query`/`q`
-   string (tables attributed to the caller). Outbound `net/http`
+   with a string-like path. SQL is taken from the argument that looks like
+   SQL, so pgx `tx.Exec(ctx, sql)`, `database/sql` `db.Exec(sql, args…)`,
+   `Query`/`QueryRow`, `ExecContext`/`QueryContext`/`QueryRowContext`, and
+   sqlx `Get`/`Select`/`NamedExec` all match without duplicates. Helpers
+   that take a `query`/`q` string attribute tables to the caller. Outbound `net/http`
    `NewRequest` / `NewRequestWithContext`, `client.Do`, and `http.Get`/`Post`
    (const, env, `fmt.Sprintf`, concat, `url.PathEscape`) become `calls_http`.
    Dynamic segments (`"/items/" + url.PathEscape(id) + "/approve"`) match
@@ -207,7 +211,13 @@ flowchart LR
    Local wrappers `const get = <T>(url) => api.get<T>(BASE + url)` and
    `request(method, url, body)` that call `api.request({ method, url: \`${BASE}${url}\` })`
    emit the **call-site** path (`get('/orders/' + id)` → `/orders/:id`),
-   not `base:url`.
+   not `base:url`. `tsconfig.json` / `jsconfig.json` `compilerOptions.paths`
+   (plus `baseUrl` and `extends`) resolve `@/*` → `src/*`; without a config
+   `@/` still maps to `src/`. A factory `createApi(baseUrl)` used as
+   `createApi(API_URL)` substitutes the call-site argument
+   (`import.meta.env.X` → `{X}`). Parameters typed `AxiosInstance`,
+   `Pick`/`Partial` of it, `typeof instance`, or `KyInstance` inherit that
+   instance's base.
    Chained Hono routes (any length) and statement-style sub-apps
    (`const s = new Hono(); s.get('/x'); app.route('/', s)` inside a
    chained export) keep the composed mount prefix.
@@ -325,7 +335,11 @@ table and collection names (`orders`, `users`, `tenants`, `notifications`,
 - **v0.2.8** — TS factory-returned axios/ky instances and local path
   wrappers, Python SQL dicts derived in another module, unscanned
   transport `unresolved_http`, `constants:` in `bizmap.yaml`,
-  `reason` on every unmatched HTTP call. **This release.**
+  `reason` on every unmatched HTTP call.
+- **v0.2.9** — Route decorators are not outbound HTTP, stable
+  `unresolved_calls` labels, TS `tsconfig` paths + factory-arg bases +
+  AxiosInstance/KyInstance params, Go `database/sql`/sqlx SQL-arg picking,
+  joint-scan mermaid `calls_http`. **This release.**
 - **v0.3** — GitHub Action that warns when a PR changes a writer of a column
   that another in-flight PR also touches (“lineage conflict”).
 - **v0.4** — MCP server so agents can query `why orders.status` without

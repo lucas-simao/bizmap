@@ -37,7 +37,7 @@ def main() -> None:
     "--mermaid",
     "mermaid_flag",
     is_flag=True,
-    help="Also write a Mermaid flowchart next to the JSON (entrypoint→table rollup).",
+    help="Also write a Mermaid flowchart next to the JSON (entrypoint→table rollup; joint scans include cross-service calls_http).",
 )
 @click.option(
     "--mermaid-focus",

@@ -81,6 +81,8 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `APIRouter()` / `Flask()` (and apps imported from another module) keep
   their `@app.get` / `@app.route` / `@app.api_route`. Otherwise a
   module-level `@name.get("/path")` is accepted; `@patch("x.y")` is not.
+  Route decorators and app/router registrations are never outbound
+  `calls_http`.
 - SQLAlchemy models (`__tablename__`, `mapped_column`, `Table(...)`) and
   Alembic `op.create_table` / `add_column` / `drop_*` feed the schema
   replayer. Alembic `upgrade` functions are tagged `role: schema`.
@@ -151,6 +153,9 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
 - **Dynamic SQL**: `for _, q := range []string{"UPDATE a ...", ...}` expands
   to one SQL site per element. Helpers with a `query`/`q`/`sql` string param
   bind literals/consts at the call site and attribute tables to the caller.
+  `Exec`/`Query`/`QueryRow` pick the argument that is a SQL literal or const
+  (pgx `Exec(ctx, sql)` and `database/sql` `Exec(sql, args…)` /
+  `*Context` / sqlx `Get`/`Select`/`NamedExec`) without duplicating sites.
 - A handler argument that is a **call** unwraps to an inner func/method
   (`wrap(h.Version)`, `mw(handler)`). Factories that take data
   (`profile.StaffPhoto(cfg)`) still resolve to the factory.
@@ -165,7 +170,7 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `--exclude GLOB` (repeatable) merges with YAML `exclude`. `--profile`
   prints parse / resolve / sql / propagate timings to stderr.
 
-## JavaScript / TypeScript resolution (v0.2.8)
+## JavaScript / TypeScript resolution (v0.2.9)
 
 - `.js` / `.mjs` / `.cjs` use tree-sitter-javascript; `.ts` / `.tsx` use
   tree-sitter-typescript (`language_typescript` / `language_tsx`).
@@ -200,6 +205,12 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `fetch('/x')` matches only the same repo; constructor/config `{base}`
   URLs may match across repos when the path has 2+ literal segments or a
   `services:` mapping.
+  `tsconfig.json` / `jsconfig.json` `compilerOptions.paths` (`baseUrl`,
+  `extends`) resolve aliases such as `@/*` → `src/*`; without a config
+  `@/` still maps to `src/`. Factory parameters in `baseURL` templates are
+  bound from the call-site argument (`createApi(API_URL)`). Parameters typed
+  `AxiosInstance`, `Pick<AxiosInstance, …>`, `Partial<AxiosInstance>`,
+  `typeof someInstance`, or `KyInstance` are HTTP clients.
   Inline-arrow handlers attribute `supabase.from('t')` access to the route.
 - Supabase JS: `supabase.from('t').select|insert|update|delete|upsert`
   emits table reads/writes; `.rpc('fn')` calls `function:sql.fn` when
@@ -211,12 +222,12 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `entrypoint:http:POST:/functions/v1/<name>`, with call edges from the
   handler body into imported helpers.
 
-## Bundled rules (v0.2.8)
+## Bundled rules (v0.2.9)
 
 | File | Status | What it detects |
 | --- | --- | --- |
 | `echo.yaml` | active | Echo v4 `group.POST("/path", handler)` (literals, consts, factories, wrappers; `Any`/`Match`) |
-| `pgx.yaml` | active | pgx v5 `Exec` / `Query` / `QueryRow` SQL |
+| `pgx.yaml` | active | pgx / `database/sql` / sqlx SQL (`Exec`/`Query`/`QueryRow`/`*Context`/`Get`/`Select`/`NamedExec`; SQL arg picked by content) |
 | `go_ticker.yaml` | active | Any `go` statement whose target uses ticker/cron patterns |
 | `fastapi.yaml` | active | FastAPI `@app.get` / `APIRouter` / `include_router` |
 | `flask.yaml` | active | Flask `@app.route` / `Blueprint(url_prefix=)` |

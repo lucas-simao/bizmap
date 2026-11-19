@@ -119,6 +119,146 @@ def _rollup_edges(graph: Graph) -> dict[tuple[str, str, str], str]:
     return rolled
 
 
+def _is_multi_repo(graph: Graph) -> bool:
+    repos = [str(r) for r in (graph.attrs.get("repos") or []) if r]
+    if len(set(repos)) >= 2:
+        return True
+    seen = {
+        str(n.attrs.get("repo") or "")
+        for n in graph.nodes.values()
+        if n.attrs.get("repo")
+    }
+    return len(seen) >= 2
+
+
+def _node_repo(node: Node, graph: Graph) -> str:
+    repo = str(node.attrs.get("repo") or "")
+    if repo:
+        return repo
+    nid = node.id
+    if "/" in nid:
+        prefix, rest = nid.split("/", 1)
+        leaf = rest.split(":", 1)[0] if ":" in rest else rest
+        if leaf in {
+            "entrypoint",
+            "function",
+            "queue",
+            "table",
+            "column",
+            "collection",
+            "view",
+            "db_trigger",
+        }:
+            return prefix
+    return str(graph.repo or graph.attrs.get("repo") or "")
+
+
+def _handler_entrypoints(graph: Graph) -> dict[str, list[str]]:
+    """function id → HTTP entrypoints that trigger it."""
+    out: dict[str, list[str]] = {}
+    for edge in graph.edges.values():
+        if edge.type != "triggers":
+            continue
+        src = graph.get(edge.from_id)
+        dst = graph.get(edge.to_id)
+        if src is None or dst is None:
+            continue
+        if src.type == "entrypoint" and dst.type == "function":
+            out.setdefault(edge.to_id, []).append(edge.from_id)
+    for fid in out:
+        out[fid] = sorted(out[fid])
+    return out
+
+
+def _rollup_http_edges(graph: Graph) -> tuple[set[str], list[tuple[str, str, str, str]]]:
+    """calls_http from a function or entrypoint to another entrypoint.
+
+    Handler functions roll up to their HTTP entrypoint so a joint scan shows
+    ``web.checkout → api POST /orders → billing POST /invoices``.
+    """
+    handlers = _handler_entrypoints(graph)
+    node_ids: set[str] = set()
+    edges: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for edge in graph.edges.values():
+        if edge.type != "calls_http":
+            continue
+        frm = edge.from_id
+        eps = handlers.get(frm) or []
+        if len(eps) == 1:
+            frm = eps[0]
+        node_ids.add(frm)
+        node_ids.add(edge.to_id)
+        key = (frm, edge.to_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append((frm, "calls_http", edge.to_id, edge.confidence.value))
+    return node_ids, edges
+
+
+def _subgraph_title(name: str) -> str:
+    cleaned = _SAFE.sub("_", name or "repo")
+    if cleaned and cleaned[0].isdigit():
+        cleaned = "r_" + cleaned
+    return cleaned or "repo"
+
+
+def _emit_by_repo(
+    lines: list[str],
+    nodes: list[Node],
+    edges: list[tuple[str, str, str, str]],
+    graph: Graph,
+    *,
+    limit: int,
+    extra_note: str | None = None,
+) -> None:
+    by_repo: dict[str, list[Node]] = {}
+    for node in nodes:
+        by_repo.setdefault(_node_repo(node, graph) or "shared", []).append(node)
+
+    def take(group: list[Node], remaining: int) -> list[Node]:
+        group = sorted(group, key=lambda n: n.id)
+        if len(group) <= remaining:
+            return group
+        return group[: max(0, remaining)]
+
+    selected: list[Node] = []
+    remaining = limit
+    for repo in sorted(by_repo):
+        chunk = take(by_repo[repo], remaining)
+        selected.extend(chunk)
+        remaining -= len(chunk)
+        if remaining <= 0:
+            break
+    selected_ids = {n.id for n in selected}
+    truncated = len(nodes) > len(selected) or len(edges) > limit * 4
+
+    for repo in sorted(by_repo):
+        present = [n for n in by_repo[repo] if n.id in selected_ids]
+        if not present:
+            continue
+        title = _subgraph_title(repo)
+        lines.append(f"  subgraph {title}")
+        for node in sorted(present, key=lambda n: n.id):
+            lines.append(f'    {_mid(node.id)}["{_escape(_label(node))}"]')
+        lines.append("  end")
+
+    shown = 0
+    for frm, kind, to, conf in sorted(edges, key=lambda e: (e[2], e[0], e[1])):
+        if frm not in selected_ids or to not in selected_ids:
+            continue
+        if shown >= limit * 3:
+            truncated = True
+            break
+        lines.append(f"  {_mid(frm)} -->|{_escape(f'{kind} {conf}')}| {_mid(to)}")
+        shown += 1
+    if truncated:
+        lines.append("  %% truncated — use --mermaid-focus TABLE or --mermaid-limit N")
+    if extra_note:
+        lines.append(f"  %% {extra_note}")
+
+
 def _emit(
     lines: list[str],
     nodes: list[Node],
@@ -187,6 +327,9 @@ def render_mermaid(
     """Render a readable mermaid flowchart.
 
     Default is entrypoint → table rollup (no per-column / per-function explosion).
+    A multi-repo / joint scan also draws ``calls_http`` edges between services
+    (function or entrypoint in repo A → entrypoint in repo B), grouped in one
+    subgraph per repo.
     ``focus`` restricts the diagram to one table, its columns, writers/readers,
     and the entrypoints that reach them.
     """
@@ -210,6 +353,20 @@ def _render_rollup(graph: Graph, lines: list[str], limit: int) -> None:
     for node in graph.nodes.values():
         if node.type == "entrypoint":
             node_ids.add(node.id)
+    if _is_multi_repo(graph):
+        http_ids, http_edges = _rollup_http_edges(graph)
+        node_ids.update(http_ids)
+        edges.extend(http_edges)
+        nodes = [graph.nodes[i] for i in node_ids if i in graph.nodes]
+        _emit_by_repo(
+            lines,
+            nodes,
+            edges,
+            graph,
+            limit=limit,
+            extra_note="cross-service calls_http + entrypoint→table rollup",
+        )
+        return
     nodes = [graph.nodes[i] for i in node_ids if i in graph.nodes]
     _emit(lines, nodes, edges, limit=limit, extra_note="entrypoint→table rollup")
 
