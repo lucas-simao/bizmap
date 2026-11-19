@@ -256,3 +256,102 @@ export const getStock = (siteId: string) => http.get(siteStock(siteId));
         assert _unresolved(graph, fn) == [], (fn, _unresolved(graph, fn))
     for helper in ("src.lib.base.base", "src.lib.paths.site", "src.lib.paths.siteStock"):
         assert _calls(graph, helper) == set(), helper
+
+
+def test_transparent_seg_barrels_and_param_bases(tmp_path: Path) -> None:
+    web, api = tmp_path / "web", tmp_path / "api"
+    _write(tmp_path, "bizmap.yaml", "services:\n  api:\n    env: VITE_API_URL\n")
+    _write(
+        api,
+        "server.ts",
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.get('/v1/items/:id', h);
+app.get('/sites/:id/orders', h);
+app.get('/v1/reports/:id', h);
+""",
+    )
+    _write(web, "tsconfig.json", '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }\n')
+    _write(
+        web,
+        "src/lib/segments.ts",
+        """
+export const seg = (s: string) => encodeURIComponent(s);
+export const itemPath = (id: string) => `/v1/items/${seg(id)}`;
+""",
+    )
+    _write(web, "src/lib/sites.ts", "export const site = (id: string) => `/sites/${id}`;\n")
+    _write(
+        web,
+        "src/lib/index.ts",
+        """
+export * from './segments';
+export { site as sitePath } from './sites';
+""",
+    )
+    _write(
+        web,
+        "src/api.ts",
+        """
+import axios from 'axios';
+import { itemPath, sitePath } from '@/lib';
+
+const http = axios.create({ baseURL: import.meta.env.VITE_API_URL });
+
+export const getItem = (id: string) => http.get(itemPath(id));
+
+export async function siteOrders(client: string, siteId: string) {
+  return fetch(`${client}${sitePath(siteId)}/orders`);
+}
+
+export async function report(baseUrl: string, id: string) {
+  return fetch(`${baseUrl}/v1/reports/${id}`);
+}
+""",
+    )
+    _write(
+        web,
+        "src/screens.ts",
+        """
+import { siteOrders, report } from './api';
+
+export const a = (id: string) => siteOrders(import.meta.env.VITE_API_URL, id);
+export const b = (id: string) => siteOrders(import.meta.env.VITE_API_URL, id);
+export const c = (id: string) => report(import.meta.env.VITE_API_URL, id);
+""",
+    )
+    graph = scan_paths([web, api], config=tmp_path / "bizmap.yaml")
+    expected = {
+        "src.api.getItem": "api/entrypoint:http:GET:/v1/items/:id",
+        "src.api.siteOrders": "api/entrypoint:http:GET:/sites/:id/orders",
+        "src.api.report": "api/entrypoint:http:GET:/v1/reports/:id",
+    }
+    for fn, ep in expected.items():
+        assert _calls(graph, fn) == {ep}, (fn, _calls(graph, fn), _unresolved(graph, fn))
+        assert _unresolved(graph, fn) == [], (fn, _unresolved(graph, fn))
+    for fn in ("src.api.siteOrders", "src.api.report"):
+        edge = next(e for e in graph.edges.values() if e.type == "calls_http" and e.from_id.endswith(fn))
+        assert edge.confidence.value == "inferred" and edge.attrs.get("via") != "route_literal", (fn, edge.attrs)
+
+
+def test_known_client_with_opaque_path_is_never_dropped(tmp_path: Path) -> None:
+    """`http.get(buildUrl(x))` with an opaque `buildUrl`: recorded as path_dynamic."""
+    web, api = tmp_path / "web", tmp_path / "api"
+    _write(api, "app.py", API)
+    _write(
+        web,
+        "src/opaque.ts",
+        """
+import axios from 'axios';
+import { buildUrl } from 'external-sdk';
+
+const http = axios.create({ baseURL: import.meta.env.VITE_API_URL });
+
+export const load = (x: string) => http.get(buildUrl(x));
+""",
+    )
+    graph = scan_paths([web, api])
+    notes = _unresolved(graph, "src.opaque.load")
+    assert notes and notes[0]["reason"] == "path_dynamic", notes
