@@ -849,6 +849,20 @@ class JsRouteLiteral:
     line: int
     symbol: str
     same_repo: bool = False
+    # the literal is the whole return value of a path helper; scan moves it to
+    # the helper's callers (`helper_calls`) or keeps it with origin=path_helper
+    helper: bool = False
+
+
+@dataclass
+class JsHelperCall:
+    """A call site `getItem → itemPath(id)` (callee qualname resolved via imports)."""
+
+    caller: str
+    callee: str
+    file: str
+    line: int
+    method: str | None = None
 
 
 @dataclass
@@ -856,6 +870,7 @@ class JsAnalysis:
     routes: list[JsRoute] = field(default_factory=list)
     http_calls: list[JsHttpCall] = field(default_factory=list)
     route_literals: list[JsRouteLiteral] = field(default_factory=list)
+    helper_calls: list[JsHelperCall] = field(default_factory=list)
     rpc_calls: list[JsRpcCall] = field(default_factory=list)
     functions: dict[str, tuple[str, int]] = field(default_factory=dict)
     accesses: list[JsAccess] = field(default_factory=list)
@@ -1002,7 +1017,9 @@ class JsAnalyzer:
                 imports,
                 fn_nodes,
             )
-            _collect_route_literals(analysis, tree, rel_file, module, consts, routers)
+            _collect_route_literals(
+                analysis, tree, rel_file, module, consts, routers, imports_by_mod.get(module) or {}
+            )
         return analysis
 
     def _scan_file(
@@ -2717,6 +2734,26 @@ def _is_helper_return(top: Node) -> bool:
     return expr is not None and (expr.start_byte, expr.end_byte) == (top.start_byte, top.end_byte)
 
 
+def _call_target_qual(call: Node, module: str, imports: dict[str, str], functions: dict) -> str | None:
+    func = call.child_by_field_name("function")
+    if func is None:
+        return None
+    if func.type == "identifier":
+        name = text(func)
+        local = f"{module}.{name}"
+        if local in functions:
+            return local
+        return imports.get(name)
+    if func.type == "member_expression":
+        obj = func.child_by_field_name("object")
+        prop = func.child_by_field_name("property")
+        if obj is not None and prop is not None and obj.type == "identifier":
+            target = imports.get(text(obj))
+            if target and target.endswith(".*"):
+                return f"{target[:-2]}.{text(prop)}"
+    return None
+
+
 def _collect_route_literals(
     analysis: JsAnalysis,
     tree: Node,
@@ -2724,9 +2761,24 @@ def _collect_route_literals(
     module: str,
     consts: dict[str, str],
     routers: dict[str, str],
+    imports: dict[str, str] | None = None,
 ) -> None:
     seen_tops: set[tuple[int, int]] = set()
     seen: set[tuple[str, str, str | None]] = set()
+    imports = imports or {}
+    for node in walk(tree):
+        if node.type == "call_expression":
+            target = _call_target_qual(node, module, imports, analysis.functions)
+            if target:
+                analysis.helper_calls.append(
+                    JsHelperCall(
+                        caller=_enclosing_symbol(node, module),
+                        callee=target,
+                        file=rel_file,
+                        line=line_of(node),
+                        method=_literal_method_hint(_literal_top(node), consts),
+                    )
+                )
     for node in walk(tree):
         if node.type in {"string", "template_string"}:
             pass
@@ -2742,10 +2794,9 @@ def _collect_route_literals(
         seen_tops.add(key)
         if _literal_is_excluded(top, routers):
             continue
-        if _is_helper_return(top):
-            # A function that only returns a path never sends a request: the
-            # origin is whoever calls the client with it.
-            continue
+        # A function that only returns a path never sends a request: scan moves
+        # this literal to whoever calls the helper (never silently dropped).
+        is_helper = _is_helper_return(top)
         value, _unresolved = _resolve_js_string(top, consts)
         path = _clean_route_literal(value)
         if path is None:
@@ -2773,6 +2824,7 @@ def _collect_route_literals(
                 line=line_of(top),
                 symbol=symbol,
                 same_repo=same_repo,
+                helper=is_helper,
             )
         )
 
@@ -2867,7 +2919,8 @@ def _collect_path_helpers(tree: Node, consts: dict[str, str]) -> dict[str, str]:
         if not value or any(ch.isspace() for ch in value):
             continue
         lead = _HOLE.match(value)
-        base_hole = lead.group(1) if lead and _ENV_LIKE.match(lead.group(1)) else None
+        # a leading base placeholder (`{VITE_API_URL}`, `{base}`) is allowed
+        base_hole = lead.group(1) if lead and "/" in value[lead.end():] else None
         if not (value.startswith("/") or base_hole or value.startswith(("http://", "https://"))):
             continue
         # Pure: the only holes are the helper's own parameters (plus a leading

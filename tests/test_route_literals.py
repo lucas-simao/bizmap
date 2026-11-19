@@ -512,3 +512,113 @@ def test_literal_with_base_resolved_to_scanned_service_is_inferred() -> None:
     assert [(e.to_id, e.confidence.value, e.attrs.get("via")) for e in edges] == [
         ("api/entrypoint:http:GET:/v1/items/:id", "inferred", "route_literal")
     ]
+
+
+def test_helper_in_other_file_with_unresolvable_base_moves_to_caller(tmp_path: Path) -> None:
+    """Regression (#31): `getItem → http.get(itemPath(id))`, itemPath in another file
+    building `${base}/v1/items/${id}` with an unresolvable base. The link must
+    survive and leave `getItem`, not `itemPath`."""
+    web, api = _project(
+        tmp_path,
+        {
+            "src/paths.ts": """
+import { getBase } from './config';
+const base = getBase();
+export const itemPath = (id: string) => `${base}/v1/items/${id}`;
+""",
+            "src/items.ts": """
+import { itemPath } from './paths';
+import { container } from './container';
+
+export async function getItem(id: string) {
+  return container.resolve('http').get(itemPath(id));
+}
+""",
+        },
+    )
+    _write(
+        api,
+        "items.py",
+        """
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/api/v1/items/{item_id}")
+def item(item_id: str):
+    return {}
+""",
+    )
+    graph = scan_paths([web, api])
+    assert _calls_http_from(graph, function_id("src.paths.itemPath")) == set()
+    hits = _calls_http_from(graph, function_id("src.items.getItem"))
+    assert hits == {"api/entrypoint:http:GET:/api/v1/items/{item_id}"}, hits
+    edge = next(e for e in graph.edges.values() if e.type == "calls_http" and e.from_id.endswith("getItem"))
+    assert edge.attrs.get("via_helper") == "src.paths.itemPath"
+
+
+def test_uncalled_helper_keeps_its_literal(tmp_path: Path) -> None:
+    """No caller found → the link stays on the helper (origin: path_helper)."""
+    web, api = _project(
+        tmp_path,
+        {"src/orphan.ts": "export const orderPath = (id: string) => `${window.base}/api/v1/orders/${id}`;\n"},
+    )
+    graph = scan_paths([web, api])
+    edges = [e for e in graph.edges.values() if e.type == "calls_http" and e.from_id.endswith("orderPath")]
+    assert len(edges) == 1 and edges[0].attrs.get("origin") == "path_helper", [(e.id, e.attrs) for e in edges]
+
+
+def test_unmapped_env_base_self_call_is_kept_cross_repo_is_not(tmp_path: Path) -> None:
+    """Regression (#31 c): a route in service A fetches `${otherApiUrl}/v1/report-video`
+    which exists in A. The env base is not in `services:`: keep the self-call
+    (heuristic), never link to another repo on that basis."""
+    a = tmp_path / "svc_a"
+    b = tmp_path / "svc_b"
+    _write(
+        a,
+        "server.ts",
+        """
+import express from 'express';
+const app = express();
+const otherApiUrl = process.env.OTHER_API_URL;
+
+export async function proxyReport(req: any, res: any) {
+  const r = await fetch(`${otherApiUrl}/v1/report-video?x=${req.query.x}`);
+  res.json(await r.json());
+}
+
+export function reportVideo(req: any, res: any) { res.json({}); }
+
+export async function proxyInvoice(req: any, res: any) {
+  const r = await fetch(`${otherApiUrl}/v1/invoices/${req.params.id}`);
+  res.json(await r.json());
+}
+
+app.get('/proxy/report', proxyReport);
+app.get('/v1/report-video', reportVideo);
+app.get('/proxy/invoice/:id', proxyInvoice);
+""",
+    )
+    _write(
+        b,
+        "app.py",
+        """
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/v1/invoices/{invoice_id}")
+def invoice(invoice_id: str):
+    return {}
+""",
+    )
+    graph = scan_paths([a, b])
+    report = _calls_http_from(graph, function_id("server.proxyReport"))
+    assert report == {"svc_a/entrypoint:http:GET:/v1/report-video"}, report
+    assert _calls_http_from(graph, function_id("server.proxyInvoice")) == set()
+    unresolved = [
+        u for u in graph.attrs.get("unresolved_http") or [] if str(u.get("from", "")).endswith("proxyInvoice")
+    ]
+    assert unresolved, "an unmatched call is never dropped silently"

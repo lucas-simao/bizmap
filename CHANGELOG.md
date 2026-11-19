@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **Route-literal links lost after the origin fix**: a path helper's literal
+  is no longer dropped. It moves to every call site of the helper (resolved
+  through imports, any file; edge `via_helper: <helper>`), with the method of
+  the surrounding HTTP call; if no caller is found it stays on the helper with
+  `origin: path_helper`. Helpers whose template starts with any base
+  placeholder (`${base}/v1/...`) are evaluated at call sites too. An env base
+  that is not declared in `services:` may still link a literal to a single
+  route in the caller's own repo (self-call, `heuristic`); other repos stay
+  out. New test: every traced HTTP call in the examples ends linked or in
+  `unresolved_http`.
+
 - **TS base helpers and namespace imports**: helpers whose template starts
   with an env/base placeholder (`base = () => `${API_URL}/api/v1/client``)
   are evaluated, so `` `${base()}${site(id)}/orders` `` composes the full URL;
