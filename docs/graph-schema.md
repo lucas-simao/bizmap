@@ -1,4 +1,4 @@
-# BizMap graph schema (v0.2.4)
+# BizMap graph schema (v0.2.5)
 
 `bizmap scan` writes `bizmap.graph.json`. The graph is fully deterministic: every
 node and edge is produced from source text (SQL, tree-sitter ASTs, comments, or
@@ -8,7 +8,7 @@ an explicit `bizmap.yaml` override). There is no LLM in the loop.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | string | Graph format version (`"0.2.4"`). |
+| `version` | string | Graph format version (`"0.2.5"`). |
 | `generated_at` | string | UTC timestamp. |
 | `schema` | object | Reconstructed database schema (`schema.tables`). |
 | `nodes` | array | Graph nodes (see below). |
@@ -19,6 +19,7 @@ an explicit `bizmap.yaml` override). There is no LLM in the loop.
 | `services` | object? | Service name → base URL, used to match HTTP client calls. |
 | `queues` | object? | Queue name → consumer hint, copied from `bizmap.yaml` for rematch. |
 | `unresolved_http` | array? | Unmatched outbound HTTP calls (`url`, `method`, `keys`, `from`). Stderr counts this list. |
+| `warnings` | array? | Non-fatal scan notes (for example Go import-path suffix fallback when `go.mod` is missing). Printed by `bizmap scan`. |
 
 ### `schema.tables.<name>`
 
@@ -43,7 +44,7 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 
 | `type` | `id` pattern | Extra fields |
 | --- | --- | --- |
-| `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:<kind>:<key>` | `kind` (`http` \| `scheduled_job` \| `firestore` \| `celery_task` \| `worker` \| `pubsub` \| `cloud_task` \| `firebase_http` \| `firebase_call`), `method`, `path`, `symbol`, `why`, `evidence`, optional `confidence`, `candidates`, `unresolved` (const path not in the scan), optional `unresolved_calls`, optional `collection` / `event` |
+| `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:<kind>:<key>` | `kind` (`http` \| `scheduled_job` \| `firestore` \| `celery_task` \| `worker` \| `pubsub` \| `cloud_task` \| `firebase_http` \| `firebase_call`), `method`, `path`, `symbol`, `why`, `evidence`, optional `confidence`, `candidates`, `unresolved` (const path not in the scan), optional `unresolved_calls`, optional `collection` / `event`, optional `dynamic_table` / `dynamic_table_unknown` (flag/count when a reachable origin writes `table:unknown`; never a reach edge) |
 | `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http` |
 | `table` | `table:<name>` | `name`; optional `external` (system catalogs / `storage.*` / `vault.*` / `auth.*`), `kind` (`external_relation` \| `unresolved_relation`), `dropped` (still referenced after `DROP TABLE`), `candidates` (dynamic/`unknown`), `rls`, `policies` |
 | `view` | `view:<name>` | `name`, `kind` (`view` \| `unresolved_relation`), optional `materialized` |
@@ -148,7 +149,10 @@ a route still shows `reads view X`. CTE / subquery / LATERAL aliases
 DECLARE'd variables are never tables. FROM-less SELECT (`SELECT now()`)
 touches no table. Dynamic table names (`"UPDATE "+t+" SET"`, `%I` holes)
 always become `table:unknown` with confidence `unknown` and `candidates`
-when determinable, and stay on the origin function only.
+when determinable, and stay on the origin function only. HTTP/job
+entrypoints that can reach that origin get `dynamic_table: true` and
+`dynamic_table_unknown` (count), never a `reads`/`writes` edge to
+`table:unknown`. Concat/helper holes (`{helper(o)}`) are not columns.
 
 ## Overrides (`bizmap.yaml`)
 

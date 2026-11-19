@@ -35,6 +35,15 @@ ROUTER_FACTORIES = {"express", "Router", "fastify", "Fastify", "Hono", "Koa", "c
 ROUTER_CTORS = {"Hono", "Koa", "Express"}
 CLIENT_LIBS = {"axios", "fetch", "got", "ky", "ofetch", "superagent", "http", "https", "request"}
 CLIENT_CREATE_KEYS = ("baseURL", "baseUrl", "prefixUrl", "prefix", "base")
+NON_HTTP_RECEIVERS = {
+    "map",
+    "set",
+    "weakmap",
+    "weakset",
+    "headers",
+    "urlsearchparams",
+    "searchparams",
+}
 SUPABASE_WRITE = {"insert", "upsert", "update", "delete"}
 SUPABASE_READ = {"select", "maybeSingle", "single"}
 PG_QUERY_METHODS = {"query", "exec", "execute"}
@@ -547,18 +556,30 @@ class JsAnalyzer:
 
         consts_by_mod: dict[str, dict[str, str]] = {}
         routers_by_mod: dict[str, dict[str, str]] = {}
+        base_routers_by_mod: dict[str, dict[str, str]] = {}
         clients_by_mod: dict[str, dict[str, str]] = {}
         wrappers_by_mod: dict[str, dict[str, tuple[str, str]]] = {}
         fn_nodes: dict[str, Node] = {}
         imports_by_mod: dict[str, dict[str, str]] = {}
+        import_specs_by_mod: dict[str, dict[str, tuple[str, str]]] = {}
+        exports_by_mod: dict[str, dict[str, str]] = {}
+        factories_by_mod: dict[str, dict[str, str]] = {}
+        trees_by_mod: dict[str, Node] = {}
+        mounts: list[tuple[str, str, str, str, str]] = []
 
         for _path, rel_file, module, tree, _src in parsed:
             consts = _collect_consts(tree)
             consts_by_mod[module] = consts
             routers, clients = _collect_receivers(tree, consts)
             routers_by_mod[module] = routers
+            base_routers_by_mod[module] = dict(routers)
             clients_by_mod[module] = clients
-            imports_by_mod[module] = _collect_imports(tree, module)
+            imports, specs = _collect_imports(tree, module)
+            imports_by_mod[module] = imports
+            import_specs_by_mod[module] = specs
+            exports_by_mod[module] = _collect_exports(tree)
+            factories_by_mod[module] = _collect_client_factories(tree, consts)
+            trees_by_mod[module] = tree
             for node in walk(tree):
                 if node.type in {"function_declaration", "method_definition", "function"}:
                     name_n = node.child_by_field_name("name")
@@ -579,6 +600,31 @@ class JsAnalyzer:
                         analysis.functions[qual] = (rel_file, line_of(node))
                         fn_nodes[qual] = value
             wrappers_by_mod[module] = _collect_wrappers(tree, consts, clients)
+
+        for _path, _rel_file, module, tree, _src in parsed:
+            mounts.extend(
+                _collect_cross_mounts(
+                    tree,
+                    module,
+                    consts_by_mod.get(module) or {},
+                    routers_by_mod.get(module) or {},
+                    import_specs_by_mod.get(module) or {},
+                    exports_by_mod,
+                )
+            )
+        _propagate_router_mounts(routers_by_mod, base_routers_by_mod, mounts)
+        _propagate_client_bases(
+            clients_by_mod,
+            import_specs_by_mod,
+            exports_by_mod,
+            factories_by_mod,
+            trees_by_mod,
+            consts_by_mod,
+        )
+        for module, tree in trees_by_mod.items():
+            wrappers_by_mod[module] = _collect_wrappers(
+                tree, consts_by_mod.get(module) or {}, clients_by_mod.get(module) or {}
+            )
 
         for _path, rel_file, module, tree, _src in parsed:
             consts = consts_by_mod.get(module) or {}
@@ -664,9 +710,9 @@ class JsAnalyzer:
                         fn_nodes,
                     )
                     continue
-                # Outbound client call (axios.get, client.get, api.post, …)
+                # Outbound client call — only known HTTP clients / wrappers.
                 if method in CLIENT_HTTP_METHODS:
-                    if recv.lower() in {"map", "set", "weakmap", "weakset"}:
+                    if not _is_known_http_client(recv, clients, node):
                         continue
                     if is_router:
                         continue
@@ -1124,9 +1170,43 @@ def _collect_wrappers(
     return wrappers
 
 
-def _collect_imports(tree: Node, module: str) -> dict[str, str]:
-    """local name → module.original (best-effort ES import)."""
+def _is_known_http_client(recv: str, clients: dict[str, str], call: Node | None = None) -> bool:
+    """True for fetch/axios/ky/ofetch/got/superagent (and instances), not Headers/Map."""
+    if call is not None and _receiver_is_non_http(call):
+        return False
+    if not recv:
+        return False
+    low = recv.lower()
+    if low in NON_HTTP_RECEIVERS:
+        return False
+    if recv in clients:
+        return True
+    return low in CLIENT_LIBS
+
+
+def _receiver_is_non_http(call: Node) -> bool:
+    func = call.child_by_field_name("function")
+    raw = text(func).lower() if func is not None else ""
+    if any(
+        token in raw
+        for token in (
+            ".headers.",
+            ".searchparams.",
+            ".params.",
+            "headers.",
+            "searchparams.",
+        )
+    ):
+        return True
+    if raw.endswith(".headers") or raw.endswith(".searchparams") or raw.endswith(".params"):
+        return True
+    return False
+
+
+def _collect_imports(tree: Node, module: str) -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
+    """Return (local→qualname, local→(src_module, orig_name))."""
     out: dict[str, str] = {}
+    specs: dict[str, tuple[str, str]] = {}
     for node in walk(tree):
         if node.type not in {"import_statement", "lexical_declaration"}:
             continue
@@ -1144,11 +1224,288 @@ def _collect_imports(tree: Node, module: str) -> dict[str, str]:
         if not src:
             continue
         src_mod = _spec_to_module(src, module)
-        for ident in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", raw.split("from")[0] if "from" in raw else raw):
-            if ident in {"import", "const", "let", "var", "from", "as", "require"}:
+        head = raw.split("from")[0] if "from" in raw else raw
+        mixed = re.search(
+            r"import\s+([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\{([^}]+)\}",
+            head,
+        )
+        named = re.search(r"import\s*\{([^}]+)\}", head)
+        default = re.search(r"import\s+([A-Za-z_][A-Za-z0-9_]*)\s*$", head.strip())
+        if not default:
+            default = re.search(r"import\s+([A-Za-z_][A-Za-z0-9_]*)\s+from", raw)
+        if mixed:
+            local = mixed.group(1)
+            specs[local] = (src_mod, "default")
+            out[local] = f"{src_mod}.default"
+            named_blob = mixed.group(2)
+        else:
+            named_blob = named.group(1) if named else ""
+            if default and not named:
+                local = default.group(1)
+                if local not in {"import", "type"}:
+                    specs[local] = (src_mod, "default")
+                    out[local] = f"{src_mod}.{local}"
+        if named_blob:
+            for part in named_blob.split(","):
+                part = part.strip()
+                if not part or part == "type":
+                    continue
+                if " as " in part:
+                    orig, alias = re.split(r"\s+as\s+", part, maxsplit=1)
+                    orig, alias = orig.strip(), alias.strip()
+                    if orig.startswith("type "):
+                        orig = orig[5:].strip()
+                    specs[alias] = (src_mod, orig)
+                    out[alias] = f"{src_mod}.{orig}"
+                else:
+                    orig = part.replace("type ", "").strip()
+                    specs[orig] = (src_mod, orig)
+                    out[orig] = f"{src_mod}.{orig}"
+        if "require(" in raw:
+            mreq = re.search(r"(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=", raw)
+            if mreq:
+                local = mreq.group(1)
+                specs.setdefault(local, (src_mod, "default"))
+                out.setdefault(local, f"{src_mod}.{local}")
+    return out, specs
+
+
+def _collect_exports(tree: Node) -> dict[str, str]:
+    """exported name → local identifier (``default`` for default export)."""
+    out: dict[str, str] = {}
+    for node in walk(tree):
+        raw = text(node)
+        if node.type not in {"export_statement", "expression_statement", "lexical_declaration"}:
+            if not raw.strip().startswith("export ") and "module.exports" not in raw:
                 continue
-            out[ident] = f"{src_mod}.{ident}"
+        m = re.search(r"export\s+default\s+([A-Za-z_][A-Za-z0-9_]*)", raw)
+        if m:
+            out["default"] = m.group(1)
+            out.setdefault(m.group(1), m.group(1))
+        m = re.search(
+            r"export\s+(?:const|let|var|function|class|async\s+function)\s+([A-Za-z_][A-Za-z0-9_]*)",
+            raw,
+        )
+        if m:
+            out[m.group(1)] = m.group(1)
+        m = re.search(r"export\s*\{([^}]+)\}", raw)
+        if m:
+            for part in m.group(1).split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if " as " in part:
+                    orig, alias = re.split(r"\s+as\s+", part, maxsplit=1)
+                    out[alias.strip()] = orig.strip()
+                else:
+                    out[part] = part
+        m = re.search(r"module\.exports\s*=\s*([A-Za-z_][A-Za-z0-9_]*)", raw)
+        if m:
+            out["default"] = m.group(1)
+            out.setdefault(m.group(1), m.group(1))
     return out
+
+
+def _resolve_imported_name(
+    local: str,
+    specs: dict[str, tuple[str, str]],
+    exports_by_mod: dict[str, dict[str, str]],
+) -> tuple[str, str] | None:
+    if local not in specs:
+        return None
+    src_mod, orig = specs[local]
+    exports = exports_by_mod.get(src_mod) or {}
+    if orig == "default":
+        mapped = exports.get("default") or exports.get(local)
+        if mapped:
+            return src_mod, mapped
+        if len(exports) == 1:
+            return src_mod, next(iter(exports.values()))
+        return src_mod, local
+    mapped = exports.get(orig) or orig
+    return src_mod, mapped
+
+
+def _collect_cross_mounts(
+    tree: Node,
+    module: str,
+    consts: dict[str, str],
+    routers: dict[str, str],
+    specs: dict[str, tuple[str, str]],
+    exports_by_mod: dict[str, dict[str, str]],
+) -> list[tuple[str, str, str, str, str]]:
+    """(parent_mod, parent_recv, prefix, child_mod, child_router_name)."""
+    mounts: list[tuple[str, str, str, str, str]] = []
+    for node in walk(tree):
+        if node.type != "call_expression":
+            continue
+        method = call_callee_name(node).lower()
+        recv = _receiver_ident(node)
+        if recv not in routers or method not in {"route", "use", "group"}:
+            continue
+        args = call_args(node)
+        if len(args) < 2:
+            continue
+        prefix, _u = _resolve_js_string(args[0], consts)
+        if not prefix or prefix in {"*", "/*"}:
+            continue
+        sub = args[1]
+        sub_name = text(sub) if sub.type == "identifier" else ""
+        if not sub_name:
+            continue
+        resolved = _resolve_imported_name(sub_name, specs, exports_by_mod)
+        if resolved:
+            child_mod, child_name = resolved
+        elif sub_name in routers:
+            child_mod, child_name = module, sub_name
+        else:
+            child_mod, child_name = module, sub_name
+        if child_mod == module:
+            continue
+        mounts.append((module, recv, prefix, child_mod, child_name))
+    return mounts
+
+
+def _propagate_router_mounts(
+    routers_by_mod: dict[str, dict[str, str]],
+    base_routers_by_mod: dict[str, dict[str, str]],
+    mounts: list[tuple[str, str, str, str, str]],
+) -> None:
+    if not mounts:
+        return
+    for _ in range(16):
+        changed = False
+        for parent_mod, parent_recv, prefix, child_mod, child_name in mounts:
+            parent_prefix = (routers_by_mod.get(parent_mod) or {}).get(parent_recv) or ""
+            local_prefix = (base_routers_by_mod.get(child_mod) or {}).get(child_name) or ""
+            new = _join_route(_join_route(parent_prefix, prefix), local_prefix)
+            child_map = routers_by_mod.setdefault(child_mod, {})
+            cur = child_map.get(child_name) or ""
+            if new and new != cur:
+                child_map[child_name] = new
+                changed = True
+        if not changed:
+            break
+
+
+def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, str]:
+    """Functions that ``return axios.create({baseURL})`` / ky.create / ofetch.create."""
+    factories: dict[str, str] = {}
+
+    def consider(name: str, fn_node: Node) -> None:
+        if not name:
+            return
+        for node in walk(fn_node):
+            if node.type not in {"return_statement", "return"}:
+                continue
+            expr = node.named_children[0] if node.named_children else None
+            if expr is None or expr.type != "call_expression":
+                continue
+            callee = call_callee_name(expr)
+            recv = _receiver_ident(expr)
+            if callee == "create" and recv.lower() in CLIENT_LIBS:
+                args = call_args(expr)
+                base, _u = _object_prop(args[0] if args else None, CLIENT_CREATE_KEYS, consts)
+                if base:
+                    factories[name] = base
+                    return
+
+    for node in walk(tree):
+        if node.type in {"function_declaration", "function", "method_definition"}:
+            name_n = node.child_by_field_name("name")
+            consider(text(name_n) if name_n else "", node)
+        if node.type == "variable_declarator":
+            value = node.child_by_field_name("value")
+            name = _declarator_name(node)
+            if name and value is not None and value.type in {"arrow_function", "function"}:
+                consider(name, value)
+    return factories
+
+
+def _propagate_client_bases(
+    clients_by_mod: dict[str, dict[str, str]],
+    import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
+    exports_by_mod: dict[str, dict[str, str]],
+    factories_by_mod: dict[str, dict[str, str]],
+    trees_by_mod: dict[str, Node],
+    consts_by_mod: dict[str, dict[str, str]],
+) -> None:
+    for _ in range(8):
+        changed = False
+        for module, specs in import_specs_by_mod.items():
+            dest = clients_by_mod.setdefault(module, {})
+            for local, (src_mod, orig) in specs.items():
+                src_clients = clients_by_mod.get(src_mod) or {}
+                exports = exports_by_mod.get(src_mod) or {}
+                key = exports.get("default") if orig == "default" else exports.get(orig, orig)
+                if orig == "default" and not key:
+                    key = local
+                base = src_clients.get(key or "") if key else None
+                if base is None and orig != "default":
+                    base = src_clients.get(orig)
+                if base is None and orig == "default" and len(src_clients) == 1:
+                    base = next(iter(src_clients.values()))
+                if base is not None and dest.get(local) != base:
+                    dest[local] = base
+                    changed = True
+            for local, (src_mod, orig) in specs.items():
+                src_factories = factories_by_mod.get(src_mod) or {}
+                key = orig if orig != "default" else (exports_by_mod.get(src_mod) or {}).get(
+                    "default", local
+                )
+                if key in src_factories:
+                    factories_by_mod.setdefault(module, {})[local] = src_factories[key]
+        if not changed:
+            break
+
+    for module, tree in trees_by_mod.items():
+        consts = consts_by_mod.get(module) or {}
+        clients = clients_by_mod.setdefault(module, {})
+        factories = factories_by_mod.get(module) or {}
+        for node in walk(tree):
+            if node.type != "variable_declarator":
+                continue
+            name = _declarator_name(node)
+            value = node.child_by_field_name("value")
+            if not name or value is None or value.type != "call_expression":
+                continue
+            callee = call_callee_name(value)
+            if callee in factories:
+                clients[name] = factories[callee]
+            elif value.named_children:
+                recv = _receiver_ident(value)
+                if recv in factories:
+                    clients[name] = factories[recv]
+
+        fn_params: dict[str, list[str]] = {}
+        for node in walk(tree):
+            if node.type in {"function_declaration", "function", "method_definition"}:
+                name_n = node.child_by_field_name("name")
+                name = text(name_n) if name_n else ""
+                if name:
+                    fn_params[name] = _fn_param_names(node)
+            if node.type == "variable_declarator":
+                value = node.child_by_field_name("value")
+                name = _declarator_name(node)
+                if name and value is not None and value.type in {"arrow_function", "function"}:
+                    fn_params[name] = _fn_param_names(value)
+        for node in walk(tree):
+            if node.type != "call_expression":
+                continue
+            callee = call_callee_name(node)
+            params = fn_params.get(callee)
+            if not params:
+                continue
+            args = call_args(node)
+            for i, arg in enumerate(args):
+                if i >= len(params) or arg.type != "identifier":
+                    continue
+                src = text(arg)
+                if src in clients:
+                    clients[params[i]] = clients[src]
+
+        _ = consts  # reserved for future const-based bases
+
 
 
 def _spec_to_module(spec: str, current: str) -> str:

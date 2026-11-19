@@ -467,7 +467,13 @@ def _apply_go(
         origin_accesses.append((site.function.qualname, accesses, site.evidence))
     sql_s = time.perf_counter() - t_sql
     t_prop = time.perf_counter()
+    origin_unknown: dict[str, int] = defaultdict(int)
     for origin_fn, accesses, _ev in origin_accesses:
+        unknown_n = sum(
+            1 for a in accesses if a.unknown_table or (a.table or "").lower() == "unknown"
+        )
+        if unknown_n:
+            origin_unknown[origin_fn] += unknown_n
         _propagate(
             graph,
             origin_fn,
@@ -479,6 +485,7 @@ def _apply_go(
             job_functions,
         )
     _copy_unresolved_to_entrypoints(graph, entrypoints_by_handler)
+    _copy_dynamic_table_to_entrypoints(graph, origin_unknown, reverse, entrypoints_by_handler)
     prop_s = time.perf_counter() - t_prop
     return sql_s, prop_s
 
@@ -668,7 +675,13 @@ def _apply_python(
         origin_accesses.append((access.function.qualname, [rolled]))
     sql_s = time.perf_counter() - t_sql
     t_prop = time.perf_counter()
+    origin_unknown: dict[str, int] = defaultdict(int)
     for origin_fn, accesses in origin_accesses:
+        unknown_n = sum(
+            1 for a in accesses if a.unknown_table or (a.table or "").lower() == "unknown"
+        )
+        if unknown_n:
+            origin_unknown[origin_fn] += unknown_n
         _propagate(
             graph,
             origin_fn,
@@ -683,6 +696,7 @@ def _apply_python(
     _apply_queues(graph, analysis, entrypoints_by_handler)
     _apply_rpc(graph, analysis, schema)
     _copy_unresolved_to_entrypoints(graph, entrypoints_by_handler)
+    _copy_dynamic_table_to_entrypoints(graph, origin_unknown, reverse, entrypoints_by_handler)
     return sql_s, time.perf_counter() - t_prop
 
 
@@ -940,6 +954,26 @@ def _attach_unresolved_calls(graph: Graph, pairs: list[tuple[str, str]]) -> None
                 existing.append(name)
         node.attrs["unresolved_calls"] = existing
         node.attrs.setdefault("confidence", Confidence.UNKNOWN.value)
+
+
+def _copy_dynamic_table_to_entrypoints(
+    graph: Graph,
+    origin_unknown: dict[str, int],
+    reverse_calls: dict[str, set[str]],
+    entrypoints_by_handler: dict[str, list[str]],
+) -> None:
+    """Expose ``table:unknown`` at entrypoints as a flag/count, never as a reach edge."""
+    if not origin_unknown:
+        return
+    for origin, count in origin_unknown.items():
+        reached = _callers_of(origin, reverse_calls) | {origin}
+        for anc in reached:
+            for eid in entrypoints_by_handler.get(anc, []):
+                ep = graph.get(eid)
+                if ep is None:
+                    continue
+                ep.attrs["dynamic_table"] = True
+                ep.attrs["dynamic_table_unknown"] = int(ep.attrs.get("dynamic_table_unknown") or 0) + count
 
 
 def _copy_unresolved_to_entrypoints(
@@ -1232,8 +1266,24 @@ def _link_http(
                 )
             )
     unmatched: list[dict] = []
+    route_repos = {
+        n.id: str(n.attrs.get("repo") or graph.repo or "")
+        for n in graph.nodes.values()
+        if n.type == "entrypoint"
+    }
     for fid, method, url, ev, conf in calls:
-        hits = match_http(method, url, routes, services)
+        caller_repo = None
+        node = graph.get(fid)
+        if node is not None:
+            caller_repo = str(node.attrs.get("repo") or graph.repo or "") or None
+        hits = match_http(
+            method,
+            url,
+            routes,
+            services,
+            caller_repo=caller_repo,
+            route_repos=route_repos,
+        )
         if hits:
             for eid in hits:
                 graph.add_edge("calls_http", fid, eid, confidence=conf, evidence=ev)
@@ -1518,6 +1568,11 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
         and n.attrs.get("path")
     ]
     unmatched: list[dict] = []
+    route_repos = {
+        n.id: str(n.attrs.get("repo") or graph.repo or "")
+        for n in graph.nodes.values()
+        if n.type == "entrypoint"
+    }
     for node in graph.nodes.values():
         pending = list(node.attrs.get("http_calls") or [])
         if not pending:
@@ -1531,7 +1586,15 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
             if not url:
                 continue
             ev = Evidence.from_dict(item.get("evidence")) if item.get("evidence") else None
-            hits = match_http(method, url, routes, services)
+            caller_repo = str(node.attrs.get("repo") or graph.repo or "") or None
+            hits = match_http(
+                method,
+                url,
+                routes,
+                services,
+                caller_repo=caller_repo,
+                route_repos=route_repos,
+            )
             if hits:
                 for eid in hits:
                     graph.add_edge(
@@ -1624,6 +1687,13 @@ def _scan_one(
     timings.parse += time.perf_counter() - t0
 
     go_analysis = GoAnalyzer(rules).analyze(go_files, root, profile=timings)
+    warnings = list(getattr(go_analysis, "warnings", None) or [])
+    if warnings:
+        existing = list(graph.attrs.get("warnings") or [])
+        for item in warnings:
+            if item not in existing:
+                existing.append(item)
+        graph.attrs["warnings"] = existing
     t_py = time.perf_counter()
     py_analysis = PythonAnalyzer(rules).analyze(py_files, root)
     timings.resolve += time.perf_counter() - t_py
