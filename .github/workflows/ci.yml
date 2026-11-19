@@ -39,3 +39,9 @@ jobs:
           bizmap report examples/shop
           bizmap report examples/pyplatform
           bizmap report examples/clinic --redact --salt ci
+      - name: Checkout demo (README)
+        run: |
+          bizmap scan examples/checkout --mermaid --out /tmp/checkout.json
+          cat /tmp/checkout*.mmd
+          bizmap why orders.status --graph /tmp/checkout.json
+          bizmap report examples/checkout
