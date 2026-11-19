@@ -132,6 +132,19 @@ matched against scanned routes, in the same repo or across a joint scan:
 - A bare `fetch('/x')` is page-relative and only links within its own repo.
 - Edges are `inferred`; the matching `unresolved_http` entry is dropped.
 
+### SQL by reference (`via: sql_reference` / `sql_key`, Python)
+
+SQL kept in a module constant or dict and handed to an executor the
+detectors cannot resolve (dependency injection, a service object, a generic
+runner) is attributed to the function that **names** it:
+`QUERIES["top"]`, `QUERIES.get("top")`, `queries.QUERIES["top"]`,
+`SALES_SQL`, `sql.SALES_SQL`. A string argument equal to the key of exactly
+one SQL dict entry (`store.named("sales_by_day")`, keys with `_`/`.`/`-`/`:`
+and 5+ characters, not inside logging calls) counts as `via: sql_key`.
+These reads/writes are `inferred` and propagate to entrypoints like any other.
+They are skipped when the function already executes that SQL, or reaches a
+function that does through the call graph, so exact edges stay exact.
+
 ## Confidence
 
 | Value | When |

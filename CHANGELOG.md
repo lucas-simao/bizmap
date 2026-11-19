@@ -15,6 +15,14 @@
   The matching `unresolved_http` entry is removed. Works after
   `registry merge` (literals are stored on function nodes as
   `route_literals`).
+- **Python SQL by reference** (`reads`/`writes`, `inferred`,
+  `via: sql_reference` or `sql_key`): a function that names a SQL constant or
+  SQL dict entry (`QUERIES["top"]`, `.get("top")`, `queries.QUERIES[...]`,
+  `SALES_SQL`, `sql.SALES_SQL`) — or passes a key that exists in exactly one
+  SQL dict (`store.named("sales_by_day")`) — reads/writes those tables even
+  when an injected or unresolved executor runs the query. Endpoints that used
+  to show 0 tables now reach them. Skipped when the function already executes
+  the SQL or reaches its executor through the call graph.
 
 - **Golden snapshots** (`tests/snapshots/*.txt`, `bizmap.snapshot.summarize`):
   one sorted line per node, edge (with confidence), and unresolved HTTP call

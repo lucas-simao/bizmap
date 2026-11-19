@@ -677,6 +677,7 @@ class PySqlSite:
     evidence: Evidence
     note: str | None = None
     confidence: Confidence | None = None
+    via: str | None = None
 
 
 @dataclass
@@ -959,6 +960,7 @@ class PythonAnalyzer:
             )
             self._detect_main_worker(analysis, tree, module, fns, enclosing, rel_file)
 
+        _link_sql_references(analysis, parsed, consts_by_module, dicts_by_module)
         unique: dict[tuple, PySqlSite] = {}
         for site in analysis.sql_sites:
             key = (site.function.qualname, site.sql, site.evidence.line)
@@ -3128,3 +3130,249 @@ def _param_protocol(fn: PyFunction, param: str, protocols: dict[str, set[str]]) 
             if leaf in protocols:
                 return leaf
     return None
+
+
+
+# ---------------------------------------------------------------------------
+# SQL by reference: a function that names a SQL constant / dict entry reads or
+# writes its tables, even when another (injected) function executes it.
+# ---------------------------------------------------------------------------
+
+_SQL_REF_NOTE = "sql referenced here; executed by another function"
+
+
+def _sql_text(value: ResolvedString | None) -> str | None:
+    if value is None or not value.fully_static or value.dynamic:
+        return None
+    raw = value.text
+    if not raw or not looks_like_sql(raw):
+        return None
+    return raw
+
+
+def _fn_range_index(fns: list[PyFunction]) -> dict[tuple[int, int], PyFunction]:
+    out: dict[tuple[int, int], PyFunction] = {}
+    for fn in fns:
+        node = fn.node
+        out[(node.start_byte, node.end_byte)] = fn
+        if node.type == "decorated_definition":
+            inner = node.child_by_field_name("definition")
+            if inner is not None:
+                out[(inner.start_byte, inner.end_byte)] = fn
+    return out
+
+
+def _sql_key_index(
+    dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]],
+) -> dict[str, str]:
+    """String key → SQL, for keys that appear in exactly one SQL dict entry."""
+    seen: dict[str, list[str]] = {}
+    for dicts in dicts_by_module.values():
+        for entries in dicts.values():
+            for key, value in entries.items():
+                sql = _sql_text(value)
+                if sql is None:
+                    continue
+                seen.setdefault(key, [])
+                if sql not in seen[key]:
+                    seen[key].append(sql)
+    return {
+        k: v[0]
+        for k, v in seen.items()
+        if len(v) == 1 and len(k) >= 5 and any(ch in k for ch in "_.-:")
+    }
+
+
+def _norm_sql(sql: str) -> str:
+    return " ".join(sql.split()).lower()
+
+
+_SQL_KEY_SKIP_CALLS = {
+    "print",
+    "debug",
+    "info",
+    "warning",
+    "warn",
+    "error",
+    "exception",
+    "critical",
+    "log",
+    "getenv",
+    "getattr",
+    "hasattr",
+    "setattr",
+}
+
+
+def _reachable_sql(
+    analysis: PyAnalysis,
+    start: str,
+    sites_by_fn: dict[str, set[str]],
+    callees: dict[str, set[str]],
+    limit: int = 8,
+) -> set[str]:
+    out: set[str] = set(sites_by_fn.get(start, set()))
+    frontier = [start]
+    seen = {start}
+    depth = 0
+    while frontier and depth < limit:
+        nxt: list[str] = []
+        for qn in frontier:
+            for callee in callees.get(qn, ()):
+                if callee in seen:
+                    continue
+                seen.add(callee)
+                out |= sites_by_fn.get(callee, set())
+                nxt.append(callee)
+        frontier = nxt
+        depth += 1
+    return out
+
+
+def _link_sql_references(
+    analysis: PyAnalysis,
+    parsed: list,
+    consts_by_module: dict[str, dict[str, ResolvedString]],
+    dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]],
+) -> None:
+    """Attribute SQL to the function that *names* it (``inferred``, ``via: sql_reference``).
+
+    Covers SQL kept in module constants or dicts (``Q["sales"]``,
+    ``queries.Q["sales"]``, ``SALES_SQL``, ``sql.SALES``) and passed to an
+    executor the detectors cannot resolve (dependency injection, a callable
+    from another module, a generic ``run(...)``). A string argument equal to a
+    key of exactly one SQL dict (``rpc("sales_by_day")``) counts as well
+    (``via: sql_key``). Skipped when the function already executes that SQL
+    itself or reaches a function that does through the call graph.
+    """
+    sites_by_fn: dict[str, set[str]] = {}
+    for site in analysis.sql_sites:
+        sites_by_fn.setdefault(site.function.qualname, set()).add(_norm_sql(site.sql))
+    callees: dict[str, set[str]] = {}
+    for caller, callee, _ev, _conf in analysis.calls:
+        callees.setdefault(caller, set()).add(callee)
+    key_index = _sql_key_index(dicts_by_module)
+    found: list[tuple[PyFunction, str, Evidence, str]] = []
+
+    for _path, rel_file, _src, tree, module, imap, fns in parsed:
+        by_range = _fn_range_index(fns)
+        local_consts = consts_by_module.get(module) or {}
+        local_dicts = dicts_by_module.get(module) or {}
+
+        def const_sql(name: str, *, imap=imap, local_consts=local_consts) -> str | None:
+            if name in imap.from_names:
+                mod, orig = imap.from_names[name]
+                hit = _sql_text((consts_by_module.get(mod) or {}).get(orig))
+                if hit:
+                    return hit
+            return _sql_text(local_consts.get(name))
+
+        def dict_entries(expr: Node, *, imap=imap, local_dicts=local_dicts):
+            if expr.type == "identifier":
+                name = text(expr)
+                if name in local_dicts:
+                    return local_dicts[name]
+                if name in imap.from_names:
+                    mod, orig = imap.from_names[name]
+                    return (dicts_by_module.get(mod) or {}).get(orig)
+                return None
+            if expr.type == "attribute":
+                obj = expr.child_by_field_name("object")
+                attr = expr.child_by_field_name("attribute")
+                if obj is None or attr is None or obj.type != "identifier":
+                    return None
+                mod = imap.modules.get(text(obj))
+                if mod is None and text(obj) in imap.from_names:
+                    src_mod, orig = imap.from_names[text(obj)]
+                    mod = f"{src_mod}.{orig}"
+                if mod is None:
+                    return None
+                return (dicts_by_module.get(mod) or {}).get(text(attr))
+            return None
+
+        for node in walk(tree):
+            sql: str | None = None
+            via = "sql_reference"
+            if node.type == "subscript":
+                value = node.child_by_field_name("value")
+                sub = node.child_by_field_name("subscript")
+                entries = dict_entries(value) if value is not None else None
+                if entries and sub is not None and sub.type == "string":
+                    sql = _sql_text(entries.get(unquote(text(sub))))
+            elif node.type == "call" and call_callee_name(node) == "get":
+                fn_node = node.child_by_field_name("function")
+                obj = fn_node.child_by_field_name("object") if fn_node is not None else None
+                args = call_args(node)
+                entries = dict_entries(obj) if obj is not None else None
+                if entries and args and args[0].type == "string":
+                    sql = _sql_text(entries.get(unquote(text(args[0]))))
+            elif node.type == "attribute":
+                obj = node.child_by_field_name("object")
+                attr = node.child_by_field_name("attribute")
+                if obj is not None and attr is not None and obj.type == "identifier":
+                    mod = imap.modules.get(text(obj))
+                    if mod is None and text(obj) in imap.from_names:
+                        src_mod, orig = imap.from_names[text(obj)]
+                        mod = f"{src_mod}.{orig}"
+                    if mod:
+                        sql = _sql_text((consts_by_module.get(mod) or {}).get(text(attr)))
+            elif node.type == "identifier":
+                parent = node.parent
+                if parent is not None and parent.type in {"attribute", "keyword_argument"}:
+                    if parent.type == "attribute" or parent.child_by_field_name("name") == node:
+                        continue
+                if parent is not None and parent.type in {
+                    "function_definition",
+                    "class_definition",
+                    "parameters",
+                    "default_parameter",
+                    "typed_parameter",
+                    "import_from_statement",
+                    "dotted_name",
+                    "aliased_import",
+                }:
+                    continue
+                if parent is not None and parent.type == "assignment" and parent.child_by_field_name("left") == node:
+                    continue
+                sql = const_sql(text(node))
+            elif (
+                node.type == "string"
+                and node.parent is not None
+                and node.parent.type == "argument_list"
+                and node.parent.parent is not None
+                and call_callee_name(node.parent.parent) not in _SQL_KEY_SKIP_CALLS
+            ):
+                key = unquote(text(node))
+                if key in key_index:
+                    sql = key_index[key]
+                    via = "sql_key"
+            if not sql:
+                continue
+            fdef = _enclosing_fn_node(node)
+            if fdef is None:
+                continue
+            fn = by_range.get((fdef.start_byte, fdef.end_byte))
+            if fn is None:
+                continue
+            ev = Evidence(file=rel_file, line=line_of(node), symbol=fn.qualname)
+            found.append((fn, sql, ev, via))
+
+    added: set[tuple[str, str]] = set()
+    for fn, sql, ev, via in found:
+        key = (fn.qualname, sql)
+        if key in added:
+            continue
+        if _norm_sql(sql) in _reachable_sql(analysis, fn.qualname, sites_by_fn, callees):
+            continue
+        added.add(key)
+        analysis.sql_sites.append(
+            PySqlSite(
+                function=fn,
+                sql=sql,
+                dynamic=False,
+                evidence=ev,
+                note=_SQL_REF_NOTE,
+                confidence=Confidence.INFERRED,
+                via=via,
+            )
+        )
