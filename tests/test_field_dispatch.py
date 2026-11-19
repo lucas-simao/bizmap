@@ -182,6 +182,7 @@ def runner(worker, conn):
 """,
     )
     graph = scan_path(tmp_path)
-    # `run` is also a method name → ambiguous, never linked by field dispatch
-    assert function_id("builders._build_sales") not in _callees(graph, "svc.runner")
+    # `self.run(...)` is a method call, never field dispatch. (An untyped
+    # `worker.run(...)` keeps the older object-dispatch behavior: every
+    # structural implementer is listed as an inferred candidate.)
     assert function_id("builders._build_sales") not in _callees(graph, "svc.Worker.go")
