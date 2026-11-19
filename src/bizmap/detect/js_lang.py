@@ -829,6 +829,7 @@ class JsRouteLiteral:
     file: str
     line: int
     symbol: str
+    same_repo: bool = False
 
 
 @dataclass
@@ -2690,6 +2691,15 @@ def _collect_route_literals(
         if path is None:
             continue
         method = _literal_method_hint(top, consts)
+        # Bare `fetch('/x')` is relative to the page origin: same repo only.
+        same_repo = bool(
+            value
+            and value.startswith("/")
+            and top.parent is not None
+            and top.parent.type == "arguments"
+            and top.parent.parent is not None
+            and call_callee_name(top.parent.parent).lower() == "fetch"
+        )
         symbol = _enclosing_symbol(top, module)
         dedupe = (symbol, path, method)
         if dedupe in seen:
@@ -2702,5 +2712,6 @@ def _collect_route_literals(
                 file=rel_file,
                 line=line_of(top),
                 symbol=symbol,
+                same_repo=same_repo,
             )
         )

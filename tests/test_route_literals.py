@@ -244,3 +244,19 @@ def test_route_literal_hits_rules() -> None:
     assert route_literal_hits("/orders", "POST", routes) == ["c"]
     assert sorted(route_literal_hits("/items/:id", "GET", routes)) == ["d", "e"]
     assert route_literal_hits("/:id", "GET", routes) == []
+
+
+def test_bare_fetch_literal_stays_same_repo(tmp_path: Path) -> None:
+    """`fetch('/x')` is page-relative: it never links to another repo's route."""
+    web, api = _project(
+        tmp_path,
+        {
+            "src/bare.ts": """
+export async function loadAll() {
+  return fetch('/api/v1/orders');
+}
+""",
+        },
+    )
+    graph = scan_paths([web, api])
+    assert _calls_http_from(graph, function_id("src.bare.loadAll")) == set()

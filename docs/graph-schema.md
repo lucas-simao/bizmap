@@ -129,6 +129,7 @@ matched against scanned routes, in the same repo or across a joint scan:
   `{ url, method }`).
 - The edge is created only when **exactly one** route matches, and never to
   a route registered in the same file. Ambiguous literals link to nothing.
+- A bare `fetch('/x')` is page-relative and only links within its own repo.
 - Edges are `inferred`; the matching `unresolved_http` entry is dropped.
 
 ## Confidence

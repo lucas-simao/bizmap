@@ -1311,6 +1311,7 @@ def _link_route_literals(graph: Graph) -> None:
                 eid
                 for eid in route_literal_hits(path, lit.get("method"), routes)
                 if route_home.get(eid) != (repo, lit_file)
+                and not (lit.get("same_repo") and route_home.get(eid, ("", ""))[0] != repo)
             ]
             if len(hits) != 1:
                 continue
@@ -1898,6 +1899,7 @@ def _scan_one(
             {
                 "path": lit.path,
                 "method": lit.method,
+                "same_repo": True if lit.same_repo else None,
                 "evidence": {"file": lit.file, "line": lit.line, "symbol": lit.symbol},
             },
             name=lit.symbol,
