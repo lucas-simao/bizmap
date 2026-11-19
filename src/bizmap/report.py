@@ -17,6 +17,14 @@ from typing import Any
 
 DATA_PREFIXES = ("table:", "column:", "view:", "collection:")
 
+REACH_DEFINITION = (
+    "an entrypoint reaches data when it has a reads/writes edge, of any confidence, to a "
+    "named table, column, view, or collection node. Edges are propagated from the functions "
+    "it triggers through the call graph (including DB-trigger side effects) but not across "
+    "calls_http. Tables missing from the scanned DDL (unresolved_relation) count; "
+    "table:unknown / collection:unknown do not (reported separately as reaching_only_unknown)."
+)
+
 
 # Fixed vocabulary that never carries a name from the code or schema.
 # Everything else that reaches the output is hashed under --redact.
@@ -81,10 +89,13 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
 
     entrypoints = [n for n in nodes.values() if n.get("type") == "entrypoint"]
     reach: dict[str, set[str]] = {n["id"]: set() for n in entrypoints}
+    unknown_reach: set[str] = set()
     for e in edges:
         if e.get("type") in {"reads", "writes"} and e["from"] in reach:
             to = _strip_repo(e["to"])[1]
-            if to.startswith(DATA_PREFIXES) and to != "table:unknown":
+            if to in {"table:unknown", "collection:unknown"}:
+                unknown_reach.add(e["from"])
+            elif to.startswith(DATA_PREFIXES):
                 reach[e["from"]].add(to.split(".", 1)[0] if to.startswith("column:") else to)
 
     by_kind: Counter[str] = Counter()
@@ -132,6 +143,7 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
     unresolved_calls = sum(len(n.get("unresolved_calls") or []) for n in nodes.values())
     total_entry = len(entrypoints)
     total_reach = sum(reaching.values())
+    unknown_only = sum(1 for n in entrypoints if not reach[n["id"]] and n["id"] in unknown_reach)
 
     return {
         "version": data.get("version"),
@@ -141,6 +153,8 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
             "total": total_entry,
             "reaching_data": total_reach,
             "reaching_data_pct": round(100.0 * total_reach / total_entry, 1) if total_entry else 0.0,
+            "reaching_only_unknown": unknown_only,
+            "definition": REACH_DEFINITION,
             "by_kind": {
                 r.kind(k): {"total": by_kind[k], "reaching_data": reaching[k]} for k in sorted(by_kind)
             },
@@ -182,6 +196,8 @@ def format_report(rep: dict[str, Any], *, limit: int = 20) -> str:
         f"entrypoints: {ep['total']}  reaching a table/collection: {ep['reaching_data']} "
         f"({ep['reaching_data_pct']}%)"
     )
+    if ep.get("reaching_only_unknown"):
+        out.append(f"  + {ep['reaching_only_unknown']} reaching only table:unknown (dynamic SQL / unscanned models)")
     for kind, row in ep["by_kind"].items():
         out.append(f"  {kind:<14} {row['reaching_data']:>5} / {row['total']}")
     if ep["without_data"]:
@@ -214,4 +230,6 @@ def format_report(rep: dict[str, Any], *, limit: int = 20) -> str:
     out.append("")
     out.append("edges by confidence: " + ", ".join(f"{k} {v}" for k, v in rep["edges_by_confidence"].items()))
     out.append(f"unresolved calls (interface/injection with no scanned target): {rep['unresolved_calls']}")
+    out.append("")
+    out.append("reach: " + ep.get("definition", REACH_DEFINITION))
     return "\n".join(out) + "\n"
