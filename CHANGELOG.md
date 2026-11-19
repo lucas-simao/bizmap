@@ -9,7 +9,10 @@
   executor is carried by the `sink_not_scanned: true` flag.
 - **Nested Python functions** get the enclosing function in their id
   (`panels.sales.compute` vs `panels.stock.compute`), so same-named inner
-  functions no longer share a node.
+  functions no longer share a node. Handlers defined inside an app factory
+  change id accordingly (`app.create_app.list_items`, mirroring Python's
+  `__qualname__`); the parent is always included so ids do not depend on
+  whether a same-named function exists elsewhere.
 
 - **TS helper composition**: transparent segment helpers
   (`seg = (s) => encodeURIComponent(s)`) inside other helpers
