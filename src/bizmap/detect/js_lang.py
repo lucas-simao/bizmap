@@ -849,9 +849,11 @@ class JsRouteLiteral:
     line: int
     symbol: str
     same_repo: bool = False
-    # the literal is the whole return value of a path helper; scan moves it to
-    # the helper's callers (`helper_calls`) or keeps it with origin=path_helper
+    # the literal is the whole return value of a path helper (or the value of a
+    # module-level const); scan moves it to direct callers / users
     helper: bool = False
+    # the literal carried its own base (`${API}/x`, `https://h/x`): match whole
+    explicit_base: bool = False
 
 
 @dataclass
@@ -864,6 +866,9 @@ class JsHelperCall:
     line: int
     method: str | None = None
     args: list[str | None] = field(default_factory=list)
+    # the call / reference is the whole argument of a call (`http.get(itemPath(id))`)
+    direct: bool = False
+    kind: str = "call"  # "call" (helper()) or "ref" (module const used by name)
 
 
 @dataclass
@@ -974,7 +979,9 @@ class JsAnalyzer:
             for _p, _rf, module, tree, _src in parsed:
                 consts = consts_by_mod.get(module) or {}
                 for key, value in _collect_path_helpers(tree, consts).items():
-                    consts.setdefault(key, value)
+                    # later rounds see imported helpers: their value is more
+                    # complete (`{base()}/x` → `{VITE_API_URL}/api/v1/client/x`)
+                    consts[key] = value
             _import_path_helpers(consts_by_mod, import_specs_by_mod)
         for _path, _rel_file, module, tree, _src in parsed:
             mounts.extend(
@@ -2727,6 +2734,42 @@ def _clean_route_literal(value: str | None) -> str | None:
     return "/" + "/".join(parts)
 
 
+def _module_level_literal_consts(tree: Node) -> set[str]:
+    """Names of top-level `const X = '<string/template/concat>'` declarations."""
+    out: set[str] = set()
+    for stmt in tree.named_children:
+        decl = stmt
+        if decl.type == "export_statement":
+            decl = next((c for c in decl.named_children if c.type == "lexical_declaration"), decl)
+        if decl.type not in {"lexical_declaration", "variable_declaration"}:
+            continue
+        for d in decl.named_children:
+            if d.type != "variable_declarator":
+                continue
+            value = d.child_by_field_name("value")
+            if value is not None and value.type in {"string", "template_string", "binary_expression"}:
+                name = _declarator_name(d)
+                if name:
+                    out.add(name)
+    return out
+
+
+def _module_const_of(top: Node) -> str | None:
+    """`X` when ``top`` is the value of a top-level `const X = ...`."""
+    parent = top.parent
+    if parent is None or parent.type != "variable_declarator":
+        return None
+    decl = parent.parent
+    if decl is None or decl.type not in {"lexical_declaration", "variable_declaration"}:
+        return None
+    holder = decl.parent
+    if holder is not None and holder.type == "export_statement":
+        holder = holder.parent
+    if holder is None or holder.type != "program":
+        return None
+    return _declarator_name(parent) or None
+
+
 def _is_helper_return(top: Node) -> bool:
     """True when ``top`` is the whole returned value of a function whose only
     job is to return it (`(id) => `/sites/${id}``, `function p() { return '/x' }`)."""
@@ -2777,26 +2820,63 @@ def _collect_route_literals(
     seen_tops: set[tuple[int, int]] = set()
     seen: set[tuple[str, str, str | None]] = set()
     imports = imports or {}
+    module_consts = _module_level_literal_consts(tree)
     for node in walk(tree):
         if node.type == "call_expression":
             target = _call_target_qual(node, module, imports, analysis.functions)
             if target:
+                top = _literal_top(node)
                 analysis.helper_calls.append(
                     JsHelperCall(
                         caller=_enclosing_symbol(node, module),
                         callee=target,
                         file=rel_file,
                         line=line_of(node),
-                        method=_literal_method_hint(_literal_top(node), consts),
+                        method=_literal_method_hint(top, consts),
                         args=[_resolve_js_string(a, consts)[0] for a in call_args(node)],
+                        direct=top is not None and top.parent is not None and top.parent.type == "arguments",
                     )
                 )
+        elif node.type == "identifier" and node.parent is not None and node.parent.type != "variable_declarator":
+            name = text(node)
+            target = f"{module}.{name}" if name in module_consts else imports.get(name)
+            if not target:
+                continue
+            caller = _enclosing_symbol(node, module)
+            if caller.endswith(".module"):
+                continue
+            top = _literal_top(node)
+            analysis.helper_calls.append(
+                JsHelperCall(
+                    caller=caller,
+                    callee=target,
+                    file=rel_file,
+                    line=line_of(node),
+                    method=_literal_method_hint(top, consts),
+                    direct=top is node and node.parent.type == "arguments",
+                    kind="ref",
+                )
+            )
     for node in walk(tree):
         if node.type in {"string", "template_string"}:
             pass
-        elif node.type == "call_expression" and _apply_path_helper(node, consts) is not None:
-            # `api.get(site(id))`: the helper call is the path at this call site
+        elif (
+            node.type == "identifier"
+            and node.parent is not None
+            and node.parent.type not in {"variable_declarator", "import_specifier", "export_specifier"}
+            and _looks_like_http_path(consts.get(text(node)))
+            and not _enclosing_symbol(node, module).endswith(".module")
+        ):
+            # `get(window.base + REPORT)`: a path const used inside a function
+            # starts a literal there (the expression may hold no string node)
             pass
+        elif node.type == "call_expression" and _apply_path_helper(node, consts) is not None:
+            # `api.get(site(id))`: the helper call is the path at this call
+            # site — only when it is the whole argument. Inside a larger URL
+            # (`${base(id)}/photos`) the composed URL is the literal instead.
+            top = _literal_top(node)
+            if top is not node or node.parent is None or node.parent.type != "arguments":
+                continue
         else:
             continue
         top = _literal_top(node)
@@ -2806,9 +2886,11 @@ def _collect_route_literals(
         seen_tops.add(key)
         if _literal_is_excluded(top, routers):
             continue
-        # A function that only returns a path never sends a request: scan moves
-        # this literal to whoever calls the helper (never silently dropped).
+        # A function that only returns a path never sends a request, and a
+        # module-level const is not a request either: scan moves these literals
+        # to their direct users (never silently dropped).
         is_helper = _is_helper_return(top)
+        const_name = _module_const_of(top)
         value, _unresolved = _resolve_js_string(top, consts)
         path = _clean_route_literal(value)
         if path is None:
@@ -2824,6 +2906,9 @@ def _collect_route_literals(
             and call_callee_name(top.parent.parent).lower() == "fetch"
         )
         symbol = _enclosing_symbol(top, module)
+        if const_name and symbol.endswith(".module"):
+            symbol = f"{module}.{const_name}"
+            is_helper = True
         dedupe = (symbol, path, method)
         if dedupe in seen:
             continue
@@ -2837,6 +2922,7 @@ def _collect_route_literals(
                 symbol=symbol,
                 same_repo=same_repo,
                 helper=is_helper,
+                explicit_base=bool(value) and (value.startswith("{") or "://" in value),
             )
         )
 
@@ -3031,19 +3117,20 @@ def _import_path_helpers(
                 found = _helper_source(consts_by_mod, src_mod, orig)
                 if found:
                     src_consts, real = found
-                    if f"{real}()" in src_consts and f"{local}()" not in consts:
+                    if f"{real}()" in src_consts:
+                        # overwrite: a later round may have completed the value
                         consts[f"{local}()"] = src_consts[f"{real}()"]
                         consts[f"{local}()#params"] = src_consts.get(f"{real}()#params", "")
                     for skey, sval in src_consts.items():
                         if skey.startswith(f"{real}.") and (skey.endswith("()") or skey.endswith("()#params")):
-                            consts.setdefault(f"{local}.{skey[len(real) + 1:]}", sval)
+                            consts[f"{local}.{skey[len(real) + 1:]}"] = sval
                     continue
             src = consts_by_mod.get(src_mod) or consts_by_mod.get(f"{src_mod}.index") or {}
             if orig == "*":
                 # `import * as P from './paths'` → P.site(), P.routes.team()
                 for skey, sval in src.items():
                     if skey.endswith("()") or skey.endswith("()#params"):
-                        consts.setdefault(f"{local}.{skey}", sval)
+                        consts[f"{local}.{skey}"] = sval
                 continue
             key = f"{orig}()"
             if key in src and f"{local}()" not in consts:
@@ -3101,7 +3188,8 @@ def _bind_param_bases(analysis: JsAnalysis, fn_nodes: dict[str, Node]) -> None:
     traced URL so the normal matcher (and `services:`) can resolve it."""
     sites: dict[str, list[JsHelperCall]] = {}
     for hc in analysis.helper_calls:
-        sites.setdefault(hc.callee, []).append(hc)
+        if hc.kind == "call":
+            sites.setdefault(hc.callee, []).append(hc)
     for call in analysis.http_calls:
         m = _HOLE.match(call.url or "")
         if not m:

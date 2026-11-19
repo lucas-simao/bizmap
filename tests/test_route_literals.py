@@ -172,10 +172,12 @@ def test_single_segment_suffix_needs_method_hint(tmp_path: Path) -> None:
         tmp_path,
         {
             "src/list.ts": """
+import { container } from './container';
+
 export const ORDERS_KEY = '/orders';
 
-export async function listOrders(client: any) {
-  return client.get('/orders');
+export async function listOrders() {
+  return container.resolve('http').get('/orders');
 }
 """,
         },
@@ -217,7 +219,7 @@ def test_literal_clears_matching_unresolved_http(tmp_path: Path) -> None:
         {
             "src/orders.ts": """
 export async function loadOrder(id: string) {
-  const res = await fetch(`${window.__CONFIG__.apiBase}/orders/${id}`);
+  const res = await fetch(`${window.__CONFIG__.apiBase}/api/v1/orders/${id}`);
   return res.json();
 }
 """,
@@ -409,8 +411,10 @@ app.get('/api/v1/items/:id', bffItem);
         web,
         "src/screens.ts",
         """
-export async function loadItem(http: any, id: string) {
-  return http.get(`/items/${id}`);
+import { container } from './container';
+
+export async function loadItem(id: string) {
+  return container.resolve('http').get(`/items/${id}`);
 }
 """,
     )
@@ -545,7 +549,7 @@ from fastapi import FastAPI
 app = FastAPI()
 
 
-@app.get("/api/v1/items/{item_id}")
+@app.get("/v1/items/{item_id}")
 def item(item_id: str):
     return {}
 """,
@@ -553,7 +557,7 @@ def item(item_id: str):
     graph = scan_paths([web, api])
     assert _calls_http_from(graph, function_id("src.paths.itemPath")) == set()
     hits = _calls_http_from(graph, function_id("src.items.getItem"))
-    assert hits == {"api/entrypoint:http:GET:/api/v1/items/{item_id}"}, hits
+    assert hits == {"api/entrypoint:http:GET:/v1/items/{item_id}"}, hits
 
 
 def test_uncalled_helper_keeps_its_literal(tmp_path: Path) -> None:
@@ -624,3 +628,140 @@ def invoice(invoice_id: str):
         if e.type == "calls_http" and e.from_id.endswith("proxyInvoice") and e.attrs.get("via") == "route_literal"
     ]
     assert cross == [], [(e.id, e.attrs) for e in cross]
+
+
+def _two_repos(tmp_path: Path, web_files: dict[str, str], server: str) -> tuple[Path, Path]:
+    web, api = tmp_path / "web", tmp_path / "api"
+    _write(api, "server.ts", server)
+    for rel, src in web_files.items():
+        _write(web, rel, src)
+    return web, api
+
+
+def test_explicit_base_requires_whole_path(tmp_path: Path) -> None:
+    """(a) POST `${API_BASE_URL}/api/v2/items/${id}/pdf-report` must not link to
+    POST /api/v1/client/items/:id/pdf-report by its tail."""
+    web, api = _two_repos(
+        tmp_path,
+        {
+            "src/pdf.ts": """
+const API_BASE_URL = window.__cfg.base;
+const itemPdf = (id: string) => `/items/${id}/pdf-report`;
+
+export async function makePdf(id: string) {
+  return fetch(`${API_BASE_URL}/api/v2/items/${id}/pdf-report`, { method: 'POST' });
+}
+
+export async function makePdf2(id: string) {
+  return fetch(`${API_BASE_URL}/api/v2${itemPdf(id)}`, { method: 'POST' });
+}
+""",
+        },
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.post('/api/v1/client/items/:id/pdf-report', h);
+""",
+    )
+    graph = scan_paths([web, api])
+    for fn in ("src.pdf.makePdf", "src.pdf.makePdf2", "src.pdf.itemPdf"):
+        assert _calls_http_from(graph, function_id(fn)) == set(), (fn, _calls_http_from(graph, function_id(fn)))
+
+
+def test_helper_intermediate_value_is_not_a_request(tmp_path: Path) -> None:
+    """(b) `${base(id)}/photos` with base(id) = `/public/docs/${id}`: only the
+    final URL links; the intermediate never links to /public/docs/:id."""
+    web, api = _two_repos(
+        tmp_path,
+        {
+            "src/docs.ts": """
+import { container } from './c';
+
+const base = (id: string) => `/public/docs/${id}`;
+
+export async function fetchPhotos(id: string) {
+  return container.resolve('http').get(`${base(id)}/photos`);
+}
+""",
+        },
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.get('/public/docs/:id', h);
+app.get('/public/docs/:id/photos', h);
+""",
+    )
+    graph = scan_paths([web, api])
+    assert _calls_http_from(graph, function_id("src.docs.fetchPhotos")) == {
+        "api/entrypoint:http:GET:/public/docs/:id/photos"
+    }
+    assert _calls_http_from(graph, function_id("src.docs.base")) == set()
+
+
+def test_get_item_through_aliased_encoding_helper(tmp_path: Path) -> None:
+    """(c) getItem → http.get(itemPath(id)), itemPath in another file via `@/`,
+    with encodeURIComponent, to GET /delivery/items/:item_id."""
+    web, api = _two_repos(
+        tmp_path,
+        {
+            "tsconfig.json": '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }\n',
+            "src/lib/paths.ts": "export const itemPath = (id: string) => `/delivery/items/${encodeURIComponent(id)}`;\n",
+            "src/items.ts": """
+import { itemPath } from '@/lib/paths';
+import { container } from '@/lib/c';
+
+export const getItem = (id: string) => container.resolve('http').get(itemPath(id));
+""",
+        },
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.get('/delivery/items/:item_id', h);
+""",
+    )
+    graph = scan_paths([web, api])
+    assert _calls_http_from(graph, function_id("src.items.getItem")) == {
+        "api/entrypoint:http:GET:/delivery/items/:item_id"
+    }
+
+
+def test_module_const_literal_origin_is_the_function(tmp_path: Path) -> None:
+    """(d) URL assembled in handle() from a module-level const: the edge leaves
+    handle, never `<module>.module`."""
+    web, api = _two_repos(
+        tmp_path,
+        {
+            "src/index.ts": """
+const REPORT = '/v1/report-video';
+const DIRECT = '/v1/reports/latest';
+
+import { container } from './c';
+
+export async function handle(req: any) {
+  const r = await container.resolve('http').get(window.__cfg.base + REPORT);
+  return r.data;
+}
+
+export async function latest(http: any) {
+  return http.get(DIRECT);
+}
+""",
+        },
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.get('/v1/report-video', h);
+app.get('/v1/reports/latest', h);
+""",
+    )
+    graph = scan_paths([web, api])
+    module_edges = [
+        e.id for e in graph.edges.values() if e.type == "calls_http" and ".module" in e.from_id
+    ]
+    assert module_edges == [], module_edges
+    assert _calls_http_from(graph, function_id("src.index.handle")) == {"api/entrypoint:http:GET:/v1/report-video"}
+    assert _calls_http_from(graph, function_id("src.index.latest")) == {"api/entrypoint:http:GET:/v1/reports/latest"}

@@ -29,6 +29,7 @@ from bizmap.http_match import (
     base_is_known,
     classify_unresolved_http,
     drop_leading_placeholders,
+    has_explicit_base,
     match_http,
     normalize_path,
     path_template_match,
@@ -1374,9 +1375,21 @@ def _link_route_literals(graph: Graph) -> None:
             path = str(lit.get("path") or "")
             ev_raw = lit.get("evidence") or {}
             lit_file = str(ev_raw.get("file") or "")
+            # Only the final URL counts: if a traced call of this function
+            # covers the literal, match its full path; an explicit base (even
+            # unknown) means the path must match whole, never by its tail.
+            covering = [u for u in traced if _literal_covers(u, path)]
+            explicit = bool(lit.get("explicit_base")) or any(has_explicit_base(u) for u in covering)
+            match_path = path
+            for u in covering:
+                full = drop_leading_placeholders(normalize_path(strip_service_base(u, graph.attrs.get("services") or {})))
+                if len(full) > len(match_path):
+                    match_path = full
             hits = [
                 eid
-                for eid in route_literal_hits(path, lit.get("method"), routes)
+                for eid in route_literal_hits(
+                    match_path, lit.get("method"), routes, allow_suffix=not explicit
+                )
                 if route_home.get(eid) != (repo, lit_file)
                 and not (lit.get("same_repo") and route_home.get(eid, ("", ""))[0] != repo)
             ]
@@ -2051,9 +2064,22 @@ def _scan_one(
             "same_repo": True if lit.same_repo else None,
             "evidence": {"file": lit.file, "line": lit.line, "symbol": lit.symbol},
         }
-        sites = callers_of.get(lit.symbol) if getattr(lit, "helper", False) else None
+        base_item["explicit_base"] = True if getattr(lit, "explicit_base", False) else None
+        is_fn = lit.symbol in js_analysis.functions
+        wanted = "call" if is_fn else "ref"
+        all_sites = (
+            [hc for hc in callers_of.get(lit.symbol) or [] if getattr(hc, "kind", "call") == wanted]
+            if getattr(lit, "helper", False)
+            else None
+        )
+        sites = [hc for hc in all_sites or [] if getattr(hc, "direct", False)]
+        if all_sites and not sites:
+            # Only used inside larger URLs (`${base(id)}/photos`): those
+            # composed URLs are literals of their own; this fragment is not a
+            # request target.
+            continue
         if sites:
-            # Path helper: the request is made by whoever calls it.
+            # Path helper / module const: the request is made by its direct user.
             for hc in sites:
                 item = dict(base_item)
                 item["method"] = hc.method or lit.method
@@ -2064,7 +2090,7 @@ def _scan_one(
                 )
             continue
         if getattr(lit, "helper", False):
-            base_item["origin"] = "path_helper"
+            base_item["origin"] = "path_helper" if is_fn else "module_const"
         _stash_route_literal(
             graph,
             function_id(lit.symbol),

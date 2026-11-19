@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **Route literals use only the final URL**:
+  - a literal covered by a traced call of the same function is matched with
+    that call's full path; a URL with an explicit base (placeholder or
+    absolute, even unknown) must match whole — no suffix match
+    (`${API_BASE_URL}/api/v2/items/:id/pdf-report` no longer links to
+    `/api/v1/client/items/:id/pdf-report`);
+  - a helper call is the request path only when it is the whole argument
+    (`http.get(itemPath(id))`); inside a larger URL (`${base(id)}/photos`) the
+    composed URL is the literal, never the intermediate `base(id)`;
+  - a literal held in a module-level const moves to the functions that pass
+    it directly to a call; when it is only part of larger URLs those URLs are
+    the literals; edges never originate from `<module>.module` for a
+    referenced const (kept with `origin: module_const` only if unreferenced).
+
 - **Namespace packages under `src/` (regression from the package-roots
   change)**: a source root now wins over a partial `__init__.py` chain, and
   any `src/` directory counts as a source root even without a `pyproject`. With
