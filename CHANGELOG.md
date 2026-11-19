@@ -168,6 +168,12 @@
 
 ### Added
 
+- **Python configuration rosters**: functions stored in nested dicts / lists of
+  dicts are dispatched through local aliases (`q = cfg["query"]; q(conn)`),
+  `cfg.get("query")(…)` and `ROSTER[k]["query"](…)`; a `lambda` value
+  contributes the scanned functions it calls. A report route whose `identity`
+  query lives in such a roster now reaches `properties`.
+
 - **Calls into unscanned first-party code** (direct, `functools.partial`,
   executors such as `run_in_executor` / `submit` / `to_thread`): the caller
   gets the qualified name in `unresolved_calls` and
