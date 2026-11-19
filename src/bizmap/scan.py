@@ -612,11 +612,17 @@ def _apply_python(
         node = graph.get(function_id(caller))
         if node is None or not node.attrs.get("unresolved_calls"):
             continue
-        # an unresolved label that names a callee we did resolve is a duplicate
+        # a `target_not_scanned` label naming a callee we did resolve is a
+        # duplicate. (Protocol/interface notes stay: a stub is not an
+        # implementation.)
+        reasons_now = node.attrs.get("unresolved_call_reasons") or {}
         kept = [
             name
             for name in node.attrs["unresolved_calls"]
-            if not any(t == name or t.endswith("." + name) for t in targets)
+            if not (
+                reasons_now.get(name) == "target_not_scanned"
+                and any(t == name or t.endswith("." + name) for t in targets)
+            )
         ]
         if len(kept) != len(node.attrs["unresolved_calls"]):
             node.attrs["unresolved_calls"] = kept
