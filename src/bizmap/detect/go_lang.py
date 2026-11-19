@@ -795,9 +795,15 @@ def _composite_string_texts(
     return out
 
 
-def _collect_package_strings(root: Node) -> tuple[dict[str, ResolvedString], set[str]]:
+def _collect_package_strings(
+    root: Node,
+    aliases: dict[str, str] | None = None,
+    consts_by_import: dict[tuple[str, str], ResolvedString] | None = None,
+) -> tuple[dict[str, ResolvedString], set[str]]:
     out: dict[str, ResolvedString] = {}
     names: set[str] = set()
+    aliases = aliases or {}
+    consts_by_import = consts_by_import or {}
     for node in root.named_children:
         if node.type == "const_declaration":
             last: ResolvedString | None = None
@@ -816,7 +822,7 @@ def _collect_package_strings(root: Node) -> tuple[dict[str, ResolvedString], set
                             break
                 resolved: ResolvedString | None = None
                 if value_node is not None:
-                    resolved = _resolve_expr(value_node, out, out)
+                    resolved = _resolve_expr(value_node, out, out, aliases, consts_by_import)
                     last = resolved
                 elif last is not None:
                     resolved = last
@@ -841,10 +847,38 @@ def _collect_package_strings(root: Node) -> tuple[dict[str, ResolvedString], set
                             value_node = child.named_children[0] if child.named_children else None
                 if name_node is None:
                     continue
-                resolved = _resolve_expr(value_node, out, out)
+                resolved = _resolve_expr(value_node, out, out, aliases, consts_by_import)
                 out[text(name_node)] = resolved
                 names.add(text(name_node))
     return out, names
+
+
+def _resolve_cross_package_consts(infos: list[_FileInfo]) -> None:
+    """Re-resolve ``const X = shared.Y`` / ``var Base = shared.Base + "/v1"``."""
+    consts_by_import: dict[tuple[str, str], ResolvedString] = {}
+    for info in infos:
+        for cname, resolved in info.consts.items():
+            consts_by_import[(info.import_path, cname)] = resolved
+    for _ in range(8):
+        changed = False
+        for info in infos:
+            consts, _names = _collect_package_strings(
+                info.tree, info.import_aliases, consts_by_import
+            )
+            for cname, resolved in consts.items():
+                prev = info.consts.get(cname)
+                if not resolved.usable:
+                    continue
+                if prev and prev.fully_static and prev.text == resolved.text:
+                    continue
+                if prev and prev.fully_static and not resolved.fully_static:
+                    continue
+                if prev is None or prev.path_text != resolved.path_text or prev.fully_static != resolved.fully_static:
+                    info.consts[cname] = resolved
+                    consts_by_import[(info.import_path, cname)] = resolved
+                    changed = True
+        if not changed:
+            break
 
 
 def _join_path(*parts: str) -> str:
@@ -1007,7 +1041,7 @@ class GoAnalyzer:
                     functions.append(
                         self._function(node, display, pkg, import_path, aliases, rel(path, root), source)
                     )
-            consts, const_names = _collect_package_strings(tree)
+            consts, const_names = _collect_package_strings(tree, aliases)
             infos.append(
                 _FileInfo(
                     path=path,
@@ -1034,6 +1068,7 @@ class GoAnalyzer:
             profile.parse += time.perf_counter() - t_parse
 
         t_resolve = time.perf_counter()
+        _resolve_cross_package_consts(infos)
         idx = self._build_indexes(infos)
         self._collect_func_field_bindings(infos, idx)
         http_helpers = self._collect_http_helpers(infos, idx)

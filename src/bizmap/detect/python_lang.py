@@ -16,8 +16,10 @@ from bizmap.detect.py_resolve import (
     collect_module_assignments,
     collect_module_dicts,
     find_dict_string,
+    imported_module_name,
     join_route_path,
     lookup_dict,
+    lookup_dict_from_node,
     parse_imports,
     resolve_expr,
     resolve_module_consts,
@@ -63,6 +65,8 @@ HTTP_CLIENT_CTORS = {
 HTTP_CLIENT_FUNCS = HTTP_METHODS | {"request", "urlopen", "urlretrieve"}
 HTTP_WRAPPER_METHODS = {"_get", "_post", "_put", "_patch", "_delete", "_request"}
 HTTP_BASE_FIELDS = {"base_url", "baseurl", "base", "host", "origin"}
+HTTP_PATH_PARAM_NAMES = {"path", "url", "endpoint", "route", "urlpath"}
+HTTP_HELPER_RECV = ("_transport", "_session", "_client", "session", "client", "transport")
 CELERY_DECORATORS = {"task", "shared_task"}
 
 
@@ -402,6 +406,149 @@ def _collect_py_http_clients(tree: Node, imap: ImportMap) -> set[str]:
     return clients
 
 
+def _lookup_py_http_helper(
+    fn: PyFunction,
+    method: str,
+    qual: str,
+    helpers: dict[str, PyHttpHelper],
+) -> PyHttpHelper | None:
+    if not helpers:
+        return None
+    for key in (
+        qual,
+        f"{fn.module}.{fn.class_name}.{method}" if fn.class_name else "",
+        f"{fn.module}.{method}",
+        f"{fn.class_name}.{method}" if fn.class_name else "",
+        method,
+    ):
+        if key and key in helpers:
+            found = helpers[key]
+            # Don't treat the helper's own body as a call of itself.
+            if found.function.qualname == fn.qualname:
+                continue
+            return found
+    return None
+
+
+def _collect_py_http_helpers(analysis: PyAnalysis) -> dict[str, PyHttpHelper]:
+    helpers: dict[str, PyHttpHelper] = {}
+    for fn in analysis.functions.values():
+        helper = _py_http_helper_of(fn)
+        if helper is None:
+            continue
+        helpers[fn.qualname] = helper
+        helpers[fn.name] = helper
+        if fn.class_name:
+            helpers[f"{fn.class_name}.{fn.name}"] = helper
+            helpers[f"{fn.module}.{fn.class_name}.{fn.name}"] = helper
+    return helpers
+
+
+def _py_http_helper_of(fn: PyFunction) -> PyHttpHelper | None:
+    params = _param_names(fn.node)
+    path_index = next(
+        (i for i, p in enumerate(params) if p.lower() in HTTP_PATH_PARAM_NAMES),
+        None,
+    )
+    wrapper = fn.name in HTTP_WRAPPER_METHODS or fn.name.lower() in HTTP_WRAPPER_METHODS
+    if path_index is None and wrapper and params:
+        path_index = 0
+    if path_index is None:
+        return None
+    path_param = params[path_index]
+    uses_http = False
+    default_method = "POST"
+    leaf = fn.name.lower().lstrip("_")
+    if leaf in HTTP_METHODS:
+        default_method = leaf.upper()
+    for node in walk(fn.node):
+        if node.type != "call":
+            continue
+        method = call_callee_name(node)
+        qual = call_qualname(node)
+        raw = text(node)
+        if path_param not in raw:
+            continue
+        method_l = method.lower()
+        httpish = (
+            method_l in HTTP_CLIENT_FUNCS
+            or method_l in HTTP_WRAPPER_METHODS
+            or method_l == "request"
+            or any(lib in qual for lib in HTTP_CLIENT_LIBS)
+            or any(token in qual for token in HTTP_HELPER_RECV)
+        )
+        if not httpish:
+            continue
+        uses_http = True
+        if method_l in HTTP_METHODS:
+            default_method = method_l.upper()
+        elif method_l == "request":
+            pos = call_posargs(node)
+            if pos and pos[0].type == "string":
+                token = unquote(text(pos[0])).upper()
+                if token in {m.upper() for m in HTTP_METHODS}:
+                    default_method = token
+        break
+    if not uses_http:
+        return None
+    return PyHttpHelper(function=fn, path_index=path_index, default_method=default_method)
+
+
+def _collect_py_sql_dict_helpers(
+    analysis: PyAnalysis,
+    dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]],
+    imaps: dict[str, ImportMap],
+) -> dict[str, PySqlDictHelper]:
+    helpers: dict[str, PySqlDictHelper] = {}
+    for fn in analysis.functions.values():
+        params = _param_names(fn.node)
+        if not params:
+            continue
+        imap = imaps.get(fn.module) or ImportMap()
+        local_dicts = dicts_by_module.get(fn.module) or {}
+        name_index = next(
+            (i for i, p in enumerate(params) if p.lower() in {"name", "key", "query", "q"}),
+            0,
+        )
+        param = params[name_index]
+        for node in walk(fn.node):
+            if node.type != "subscript":
+                continue
+            obj = node.child_by_field_name("value") or (
+                node.named_children[0] if node.named_children else None
+            )
+            idx = node.named_children[1] if len(node.named_children) > 1 else None
+            if idx is None or text(idx) != param:
+                continue
+            dmap = lookup_dict_from_node(obj, imap, local_dicts, dicts_by_module)
+            if not dmap:
+                continue
+            dict_name = ""
+            dict_mod = fn.module
+            if obj is not None and obj.type == "identifier":
+                dict_name = text(obj)
+                if dict_name in imap.from_names:
+                    dict_mod, dict_name = imap.from_names[dict_name]
+            elif obj is not None and obj.type == "attribute":
+                dict_name = text(obj.named_children[-1]) if obj.named_children else ""
+                head = obj.named_children[0] if obj.named_children else None
+                if head is not None and head.type == "identifier":
+                    dict_mod = imported_module_name(text(head), imap) or fn.module
+            if not dict_name:
+                continue
+            helper = PySqlDictHelper(
+                function=fn,
+                name_index=name_index,
+                dict_mod=dict_mod,
+                dict_name=dict_name,
+            )
+            helpers[fn.qualname] = helper
+            helpers[fn.name] = helper
+            helpers[f"{fn.module}.{fn.name}"] = helper
+            break
+    return helpers
+
+
 def _ensure_path(path: str) -> str:
     if not path:
         return "/"
@@ -476,6 +623,21 @@ class PyHttpCall:
     evidence: Evidence
     unresolved: bool = False
     confidence: Confidence = Confidence.INFERRED
+
+
+@dataclass
+class PyHttpHelper:
+    function: PyFunction
+    path_index: int
+    default_method: str = "POST"
+
+
+@dataclass
+class PySqlDictHelper:
+    function: PyFunction
+    name_index: int
+    dict_mod: str | None
+    dict_name: str
 
 
 @dataclass
@@ -673,6 +835,8 @@ class PythonAnalyzer:
                 blueprints,
                 module_names,
             )
+            http_helpers = _collect_py_http_helpers(analysis)
+            sql_helpers = _collect_py_sql_dict_helpers(analysis, dicts_by_module, imaps)
             self._detect_calls_and_usage(
                 analysis,
                 tree,
@@ -688,6 +852,8 @@ class PythonAnalyzer:
                 call_returns,
                 protocols,
                 protocol_impls,
+                http_helpers,
+                sql_helpers,
             )
             self._detect_main_worker(analysis, tree, module, fns, enclosing, rel_file)
 
@@ -1076,6 +1242,8 @@ class PythonAnalyzer:
         call_returns: dict[str, ResolvedString] | None = None,
         protocols: dict[str, set[str]] | None = None,
         protocol_impls: dict[str, list[str]] | None = None,
+        http_helpers: dict[str, PyHttpHelper] | None = None,
+        sql_helpers: dict[str, PySqlDictHelper] | None = None,
     ) -> None:
         by_local = {fn.name: fn for fn in fns if not fn.class_name}
         by_class_method: dict[tuple[str, str], PyFunction] = {
@@ -1089,6 +1257,8 @@ class PythonAnalyzer:
         call_returns = call_returns or {}
         protocols = protocols or {}
         protocol_impls = protocol_impls or {}
+        http_helpers = http_helpers or {}
+        sql_helpers = sql_helpers or {}
         module_consts = consts_by_module.get(fns[0].module if fns else "") or {}
 
         for fn in fns:
@@ -1164,6 +1334,20 @@ class PythonAnalyzer:
                     http_clients,
                     resolve_fn,
                     evidence,
+                    http_helpers,
+                )
+                self._record_sql_dict_helper(
+                    analysis,
+                    fn,
+                    method,
+                    qual,
+                    pos,
+                    resolve_fn,
+                    evidence,
+                    sql_helpers,
+                    imap,
+                    local_dicts,
+                    dicts_by_module,
                 )
                 self._record_queues(analysis, fn, node, method, qual, pos, resolve_fn, evidence)
                 self._record_rpc(analysis, fn, node, method, pos, resolve_fn, evidence)
@@ -1471,12 +1655,19 @@ class PythonAnalyzer:
         http_clients: set[str],
         resolve,
         evidence: Evidence,
+        http_helpers: dict[str, PyHttpHelper] | None = None,
     ) -> None:
         method_l = method.lower()
         func = node.child_by_field_name("function")
         recv = ""
         if func is not None and func.type == "attribute" and func.named_children:
             recv = text(func.named_children[0])
+        helper = _lookup_py_http_helper(fn, method, qual, http_helpers or {})
+        if helper is not None:
+            self._record_http_helper_call(
+                analysis, fn, pos, resolve, evidence, helper
+            )
+            return
         wrapper = method_l in HTTP_WRAPPER_METHODS or method in HTTP_WRAPPER_METHODS
         lib_call = any(lib in qual for lib in HTTP_CLIENT_LIBS)
         instance_call = bool(recv) and recv in http_clients and method_l in HTTP_CLIENT_FUNCS
@@ -1524,6 +1715,103 @@ class PythonAnalyzer:
                     evidence=evidence,
                     unresolved=unresolved,
                     confidence=conf,
+                )
+            )
+
+    def _record_http_helper_call(
+        self,
+        analysis: PyAnalysis,
+        fn: PyFunction,
+        pos: list[Node],
+        resolve,
+        evidence: Evidence,
+        helper: PyHttpHelper,
+    ) -> None:
+        if helper.path_index >= len(pos):
+            analysis.http_calls.append(
+                PyHttpCall(
+                    function=fn,
+                    method=helper.default_method,
+                    url="{base}/{path}",
+                    evidence=evidence,
+                    unresolved=True,
+                )
+            )
+            return
+        res = resolve(pos[helper.path_index])
+        texts = res.all_texts() or ([res.path_text] if res.path_text else [])
+        if not texts:
+            analysis.http_calls.append(
+                PyHttpCall(
+                    function=fn,
+                    method=helper.default_method,
+                    url="{base}/{path}",
+                    evidence=evidence,
+                    unresolved=True,
+                )
+            )
+            return
+        for path in texts:
+            if "://" in path or (path.startswith("{") and "/" in path and not path.startswith("/")):
+                url = _normalize_http_base(path)
+            elif path.startswith("/"):
+                url = "{base}" + path
+            elif path.startswith("{"):
+                url = "{base}/" + path
+            else:
+                url = "{base}/" + path
+            url = _normalize_http_base(url)
+            analysis.http_calls.append(
+                PyHttpCall(
+                    function=fn,
+                    method=helper.default_method,
+                    url=url,
+                    evidence=evidence,
+                    unresolved=res.unresolved or "{" in url,
+                    confidence=Confidence.UNKNOWN if res.unresolved else Confidence.INFERRED,
+                )
+            )
+
+    def _record_sql_dict_helper(
+        self,
+        analysis: PyAnalysis,
+        fn: PyFunction,
+        method: str,
+        qual: str,
+        pos: list[Node],
+        resolve,
+        evidence: Evidence,
+        sql_helpers: dict[str, PySqlDictHelper],
+        imap: ImportMap,
+        local_dicts: dict[str, dict[str, ResolvedString]],
+        dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]],
+    ) -> None:
+        helper = (
+            sql_helpers.get(qual)
+            or sql_helpers.get(method)
+            or (sql_helpers.get(f"{fn.module}.{method}"))
+        )
+        if helper is None and fn.class_name:
+            helper = sql_helpers.get(f"{fn.module}.{fn.class_name}.{method}")
+        if helper is None or helper.name_index >= len(pos):
+            return
+        key_res = resolve(pos[helper.name_index])
+        if not key_res.fully_static or not key_res.text:
+            return
+        dmap = (dicts_by_module.get(helper.dict_mod) or {}).get(helper.dict_name) if helper.dict_mod else None
+        if dmap is None:
+            dmap = lookup_dict(helper.dict_name, imap, local_dicts, dicts_by_module)
+        if not dmap or key_res.text not in dmap:
+            return
+        sql_res = dmap[key_res.text]
+        sql_val = sql_res.path_text if sql_res.usable else ""
+        if sql_val and looks_like_sql(sql_val):
+            analysis.sql_sites.append(
+                PySqlSite(
+                    function=fn,
+                    sql=sql_val,
+                    dynamic=sql_res.unresolved,
+                    evidence=evidence,
                 )
             )
 
@@ -1812,8 +2100,8 @@ def _sql_arg_sources(
         obj = node.child_by_field_name("value") or (
             node.named_children[0] if node.named_children else None
         )
-        if obj is not None and obj.type == "identifier":
-            dmap = lookup_dict(text(obj), imap, local_dicts, dicts_by_module)
+        if obj is not None:
+            dmap = lookup_dict_from_node(obj, imap, local_dicts, dicts_by_module)
             if dmap:
                 res = resolve(node)
                 if res.fully_static and res.text:

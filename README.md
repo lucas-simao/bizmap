@@ -105,7 +105,7 @@ flowchart LR
   GET_stock -->|reads inferred| inventory
 ```
 
-## How it works (v0.2.6)
+## How it works (v0.2.7)
 
 1. **Schema replayer** — applies `schema.sql` / migration folders in order
    (`CREATE TABLE IF NOT EXISTS`, quoted/schema-qualified pg_dump identifiers,
@@ -121,7 +121,8 @@ flowchart LR
    (`dropped: true` when still referenced), and Alembic `upgrade()`
    chains (schema role, not runtime writers) including `op.execute` of views.
 2. **Go detector** — Echo v4 routes (`group.POST(path, handler)` with group
-   prefixes, cross-package consts, factory handlers, and wrappers such as
+   prefixes, cross-package consts (including `const X = shared.X` aliases),
+   factory handlers, and wrappers such as
    `wrap(h.Version)`). Method names must be exactly `GET`/`POST`/…/`Any`/`Match`
    with a string-like path. pgx v5 `tx.Exec|Query|QueryRow(ctx, sql, args)`,
    including range-over-literal-slice SQL and helpers that take a `query`/`q`
@@ -165,6 +166,12 @@ flowchart LR
    local variable name. `payload.get` / Mapping `.get` are not HTTP;
    only `requests` / `httpx` / `aiohttp` / `urllib` clients and sessions.
    A constructor/config `base_url` is `{base}+path`, not a relative fetch.
+   Outbound helpers such as `_post(path)` that concatenate `self.base_url +
+   path` (or an httpx/requests session on `self`) compose at the caller;
+   uncomposed calls keep `unresolved_http`. SQL dicts reached through a
+   module alias (`queries.Q['k']`, `import pkg.queries as q`) and
+   import-time `dedent`/`strip` transforms resolve; `rpc("list")` wrappers
+   that do `run_query(Q[name])` attribute those tables to the route.
 4. **JavaScript / TypeScript detector** — Express / Fastify / Hono routes
    on a known app/router, including chained factories
    (`new Hono().use('*', mw).get('/a', h)`), including chained-export
@@ -179,8 +186,15 @@ flowchart LR
    `ky` / `ofetch` instances (exported, factory-built, or passed as a
    parameter into an object-literal factory
    `makeApi = (client) => ({ list: () => client.get('/x') })`) and
-   `request(path)` wrappers compose the outbound URL; if a parameter
-   client cannot be composed it is `unresolved_http`, never dropped.
+   `request(path)` wrappers compose the outbound URL; an instance passed
+   into an object-literal factory or a class constructor
+   (`new OrdersApi(api)` / `this.client.get`) keeps the caller's
+   `baseURL` (including `import.meta.env`); if a parameter client cannot
+   be composed it is `unresolved_http`, never dropped.
+   Chained Hono routes (any length) and statement-style sub-apps
+   (`const s = new Hono(); s.get('/x'); app.route('/', s)` inside a
+   chained export) keep the composed mount prefix.
+   `serve({ fetch: app.fetch })` is not a `POST /` entrypoint.
    Relative `fetch('/projects')` matches only the same repo; a constructor
    or config base is `{base}+path` and may match across repos when the path
    has 2+ literal segments or `services:` maps it. Inline handlers
@@ -281,7 +295,12 @@ table and collection names (`orders`, `users`, `tenants`, `notifications`,
   factories, Deps dataclass/NamedTuple callables into `create_app`,
   axios/ky object-literal factories, Go PathEscape/sprintf param
   routes, constructor `{base}` HTTP matching, Python dict.get is not
-  HTTP, assigned Firestore document refs. **This release.**
+  HTTP, assigned Firestore document refs.
+- **v0.2.7** — TS axios/ky instance parameters and class clients with
+  `import.meta.env` bases, Hono long chains and statement-style sub-apps,
+  no false `POST /` from `serve({ fetch })`, Python `_post` wrappers and
+  SQL-dict module aliases / `rpc(name)`, Go const aliases, hash-stable
+  graph JSON. **This release.**
 - **v0.3** — GitHub Action that warns when a PR changes a writer of a column
   that another in-flight PR also touches (“lineage conflict”).
 - **v0.4** — MCP server so agents can query `why orders.status` without

@@ -106,6 +106,13 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `os.getenv`, `settings.x_url`, a constant, or a hostname) through local
   assignments (`base = os.environ["X_URL"]; post(base+"/p")`).
   `services:` env matching uses that origin, not the local variable name.
+  Helpers such as `_post(self, path)` that call `self._transport.request`
+  with `self.base_url + path` compose `{base}+path` at the caller;
+  uncomposed calls keep `unresolved_http`.
+- SQL dicts via module alias (`from . import queries; queries.Q['k']`,
+  `import pkg.queries as q`) and import-time `textwrap.dedent` / `.strip()`
+  transforms resolve. `rpc("list")` wrappers that do `run_query(Q[name])`
+  bind the literal name at the call site.
 - `supabase.rpc("name")` becomes a `calls` edge to `function:sql.name`
   when that SQL function exists.
 
@@ -142,13 +149,16 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   (`wrap(h.Version)`, `mw(handler)`). Factories that take data
   (`profile.StaffPhoto(cfg)`) still resolve to the factory.
 - Echo methods match **exactly** (`GET`, not `options`). The path argument
-  must be string-like (literal, const, or concatenation).
+  must be string-like (literal, const, or concatenation). A const that
+  aliases another scanned package (`const PathPrefix = shared.PathPrefix`,
+  `var Base = shared.Base + "/v1"`) resolves when both packages are in
+  the scan.
 - `func main` is not a writer entrypoint unless it is a detected job or route.
   `bizmap.yaml` is found via `--config`, the scan root, or the git toplevel.
   `--exclude GLOB` (repeatable) merges with YAML `exclude`. `--profile`
   prints parse / resolve / sql / propagate timings to stderr.
 
-## JavaScript / TypeScript resolution (v0.2.6)
+## JavaScript / TypeScript resolution (v0.2.7)
 
 - `.js` / `.mjs` / `.cjs` use tree-sitter-javascript; `.ts` / `.tsx` use
   tree-sitter-typescript (`language_typescript` / `language_tsx`).
@@ -165,9 +175,16 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `calls_http`; `Map` / `Set` / `Headers` / `URLSearchParams` /
   `searchParams` / `config.headers` do not. `axios.create` /
   `ky.create` / `ofetch.create` `{baseURL}` (exported, factory-built, or
-  passed as a parameter into an object-literal factory) compose with
-  later `.get('/x')`; uncomposed parameter clients stay
-  `unresolved_http`. Relative
+  passed as a parameter into an object-literal factory
+  `makeOrders = (client) => ({ list: () => client.get('/orders') })`,
+  or a class constructor `new OrdersApi(api)` / `this.client.get`)
+  compose with later `.get('/x')`, including
+  `` `${import.meta.env.VITE_API_URL}/api/v1` `` bases and `/orders/${id}`
+  → `/orders/:id`. Uncomposed parameter clients stay
+  `unresolved_http`. Chained `.get/.post` of any length and
+  statement-style sub-apps mounted via `.route('/', s)` inside a chained
+  export keep the composed prefix. `serve({ fetch: app.fetch })` is not
+  `POST /`. Relative
   `fetch('/x')` matches only the same repo; constructor/config `{base}`
   URLs may match across repos when the path has 2+ literal segments or a
   `services:` mapping.
@@ -182,7 +199,7 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `entrypoint:http:POST:/functions/v1/<name>`, with call edges from the
   handler body into imported helpers.
 
-## Bundled rules (v0.2.6)
+## Bundled rules (v0.2.7)
 
 | File | Status | What it detects |
 | --- | --- | --- |
