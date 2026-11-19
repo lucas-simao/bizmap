@@ -1,4 +1,4 @@
-# nodes (38)
+# nodes (39)
 column column:invoices.amount_cents
 column column:invoices.id
 column column:invoices.order_id
@@ -30,6 +30,7 @@ function api/function:main.Repo.GetOrder
 function api/function:main.Repo.InsertOrder
 function api/function:main.Repo.MarkPaid
 function api/function:main.main
+function api/function:main.registerOrderRoutes
 function billing/function:app.create_invoice
 function billing/function:app.payment_webhook
 function web/function:src.api.client.module
@@ -37,7 +38,7 @@ function web/function:src.checkout.placeOrder
 function web/function:src.checkout.pollOrder
 table table:invoices
 table table:orders
-# edges (54)
+# edges (55)
 calls api/function:main.ExpireJob.Run -> api/function:main.Repo.ExpirePending [exact]
 calls api/function:main.Handler.CreateOrder -> api/function:main.Billing.CreateInvoice [exact]
 calls api/function:main.Handler.CreateOrder -> api/function:main.Repo.InsertOrder [exact]
@@ -47,6 +48,7 @@ calls api/function:main.main -> api/function:main.NewBilling [inferred]
 calls api/function:main.main -> api/function:main.NewExpireJob [inferred]
 calls api/function:main.main -> api/function:main.NewHandler [inferred]
 calls api/function:main.main -> api/function:main.NewRepo [inferred]
+calls api/function:main.main -> api/function:main.registerOrderRoutes [inferred]
 calls_http api/function:main.Billing.CreateInvoice -> billing/entrypoint:http:POST:/invoices [inferred]
 calls_http billing/function:app.payment_webhook -> api/entrypoint:http:POST:/api/orders/:id/paid [inferred]
 calls_http web/function:src.checkout.placeOrder -> api/entrypoint:http:POST:/api/orders [inferred]
