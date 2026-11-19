@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **Python `src/` layouts and monorepos**: module names now follow package
+  roots — the highest `__init__.py` package, else a declared source root
+  (`src/` next to `pyproject.toml`/`setup.*`, setuptools `packages.find.where`,
+  Poetry `packages[].from`) — so `from reports.layers import asset;
+  asset.bind_id()` resolves when scanning from the repo root
+  (`services/reports/src/reports/...`). Names that would collide across
+  services fall back to the path-based name. Function ids inside packages
+  change accordingly (`reports.layers.asset.bind_id`).
+
 - **Route-literal links lost after the origin fix**: a path helper's literal
   is no longer dropped. It moves to every call site of the helper (resolved
   through imports, any file; edge `via_helper: <helper>`), with the method of

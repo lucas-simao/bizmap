@@ -74,6 +74,82 @@ def _parser() -> Parser:
     return Parser(_PY_LANGUAGE)
 
 
+def _declared_source_roots(files: list[Path], root: Path) -> list[Path]:
+    """Source roots declared next to a pyproject.toml / setup.cfg / setup.py:
+    `src/`, `[tool.setuptools.packages.find] where`, Poetry `packages[].from`."""
+    import tomllib
+
+    root = root.resolve()
+    seen: set[Path] = set()
+    out: set[Path] = set()
+    for path in files:
+        d = path.resolve().parent
+        while True:
+            if d in seen:
+                break
+            seen.add(d)
+            if any((d / name).is_file() for name in ("pyproject.toml", "setup.cfg", "setup.py")):
+                if (d / "src").is_dir():
+                    out.add(d / "src")
+                pyproject = d / "pyproject.toml"
+                if pyproject.is_file():
+                    try:
+                        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        data = {}
+                    find = (((data.get("tool") or {}).get("setuptools") or {}).get("packages") or {})
+                    if isinstance(find, dict):
+                        where = (find.get("find") or {}).get("where") or []
+                        for w in [where] if isinstance(where, str) else where:
+                            out.add((d / str(w)).resolve())
+                    poetry = ((data.get("tool") or {}).get("poetry") or {}).get("packages") or []
+                    for pkg in poetry if isinstance(poetry, list) else []:
+                        if isinstance(pkg, dict) and pkg.get("from"):
+                            out.add((d / str(pkg["from"])).resolve())
+            if d == root or root not in d.parents:
+                break
+            d = d.parent
+    return sorted((p for p in out if p.is_dir()), key=lambda p: len(p.parts), reverse=True)
+
+
+def _python_module_names(files: list[Path], root: Path) -> dict[Path, str]:
+    """Importable module name per file.
+
+    1. Inside a package (`__init__.py` chain): dotted path from the parent of
+       the highest package directory (`src/reports/layers/asset.py` →
+       `reports.layers.asset`).
+    2. Under a declared source root (see `_declared_source_roots`): relative
+       to that root (namespace packages in `src/`).
+    3. Otherwise: relative to the scan root, as before.
+    Names that would collide fall back to (3) for every file involved.
+    """
+    root = root.resolve()
+    src_roots = _declared_source_roots(files, root)
+    names: dict[Path, str] = {}
+    for path in files:
+        full = path.resolve()
+        fallback = _module_name(rel(path, root))
+        top: Path | None = None
+        d = full.parent
+        while (d / "__init__.py").is_file() and (d == root or root in d.parents):
+            top = d
+            if d == root:
+                break
+            d = d.parent
+        if top is not None and top != root:
+            names[path] = _module_name(full.relative_to(top.parent).as_posix())
+            continue
+        hit = next((sr for sr in src_roots if sr in full.parents), None)
+        names[path] = _module_name(full.relative_to(hit).as_posix()) if hit else fallback
+    counts: dict[str, int] = {}
+    for name in names.values():
+        counts[name] = counts.get(name, 0) + 1
+    for path, name in list(names.items()):
+        if counts[name] > 1:
+            names[path] = _module_name(rel(path, root))
+    return names
+
+
 def _module_name(rel_file: str) -> str:
     path = rel_file[:-3] if rel_file.endswith(".py") else rel_file
     if path.endswith("/__init__"):
@@ -787,13 +863,14 @@ class PythonAnalyzer:
         dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]] = {}
         imaps: dict[str, ImportMap] = {}
 
+        module_names = _python_module_names(files, root)
         for path in files:
             source = path.read_bytes()
             ts_tree = self._parser.parse(source)
             forest.append(ts_tree)
             tree = ts_tree.root_node
             rel_file = rel(path, root)
-            module = _module_name(rel_file)
+            module = module_names.get(path) or _module_name(rel_file)
             imap = parse_imports(tree, module)
             imaps[module] = imap
             fns = self._collect_functions(tree, source, rel_file, module)
