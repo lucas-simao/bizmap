@@ -11,6 +11,9 @@
   as a function parameter (`fetch(`${baseUrl}/v1/x`)`) is composed from the
   call sites when every caller passes the same env/URL, so the traced matcher
   links it (`inferred`, honoring `services:`) instead of the literal fallback.
+- **Known HTTP client with an opaque path was dropped silently**:
+  `http.get(buildUrl(x))` where the path cannot be evaluated is now recorded
+  (`{base}{buildUrl(x)}` → `unresolved_http`, `path_dynamic`).
 
 - **`unresolved_calls` noise**: entries whose target also has a resolved
   `calls` edge from the same function are dropped (dedupe by origin/target);

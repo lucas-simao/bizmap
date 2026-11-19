@@ -334,3 +334,24 @@ export const c = (id: string) => report(import.meta.env.VITE_API_URL, id);
     for fn in ("src.api.siteOrders", "src.api.report"):
         edge = next(e for e in graph.edges.values() if e.type == "calls_http" and e.from_id.endswith(fn))
         assert edge.confidence.value == "inferred" and edge.attrs.get("via") != "route_literal", (fn, edge.attrs)
+
+
+def test_known_client_with_opaque_path_is_never_dropped(tmp_path: Path) -> None:
+    """`http.get(buildUrl(x))` with an opaque `buildUrl`: recorded as path_dynamic."""
+    web, api = tmp_path / "web", tmp_path / "api"
+    _write(api, "app.py", API)
+    _write(
+        web,
+        "src/opaque.ts",
+        """
+import axios from 'axios';
+import { buildUrl } from 'external-sdk';
+
+const http = axios.create({ baseURL: import.meta.env.VITE_API_URL });
+
+export const load = (x: string) => http.get(buildUrl(x));
+""",
+    )
+    graph = scan_paths([web, api])
+    notes = _unresolved(graph, "src.opaque.load")
+    assert notes and notes[0]["reason"] == "path_dynamic", notes

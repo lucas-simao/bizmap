@@ -1343,6 +1343,13 @@ class JsAnalyzer:
             base = bound or ("{" + leaf + "}" if not bound else bound)
             if not bound:
                 client_unknown = True
+        if path_val is None and args and (known or param_client or client_unknown):
+            # The path expression could not be evaluated (opaque helper,
+            # variable). Record the call with an explicit hole instead of
+            # dropping it: it becomes `unresolved_http` (`path_dynamic`).
+            expr = re.sub(r"[\s{}]+", " ", text(args[0])).strip()[:60] or "path"
+            path_val = "{" + (expr if "(" in expr else expr + "()") + "}"
+            path_unresolved = True
         composed = _join_route(base, path_val) if path_val else base
         if not composed or not _looks_like_http_path(composed):
             if (param_client or client_unknown) and path_val:
@@ -2849,7 +2856,13 @@ def _helper_body_expr(fn: Node) -> Node | None:
     body = fn.child_by_field_name("body")
     if body is None:
         return None
-    if body.type in {"template_string", "string", "binary_expression", "parenthesized_expression"}:
+    if body.type in {
+        "template_string",
+        "string",
+        "binary_expression",
+        "parenthesized_expression",
+        "call_expression",
+    }:
         return body
     if body.type == "statement_block":
         stmts = [c for c in body.named_children if c.type != "comment"]
