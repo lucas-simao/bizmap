@@ -368,6 +368,10 @@ def classify_unresolved_http(
     literal = has_meaningful_literal(leading)
     if other_holes and not literal:
         return "path_dynamic"
+    # A segment built by a call the scanner could not evaluate
+    # (`/client{site(siteId)}/orders`) is a dynamic path, whatever the base.
+    if any("(" in p for p in other_holes):
+        return "path_dynamic"
     if base_holes and not env_holes and "://" not in raw:
         return "base_unknown"
     if not literal:

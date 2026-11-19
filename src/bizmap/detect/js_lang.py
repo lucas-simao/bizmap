@@ -235,6 +235,9 @@ def _resolve_js_string(node: Node | None, consts: dict[str, str]) -> tuple[str |
     if node.type == "parenthesized_expression" and node.named_children:
         return _resolve_js_string(node.named_children[0], consts)
     if node.type == "call_expression":
+        helper = _apply_path_helper(node, consts)
+        if helper is not None:
+            return helper, True
         callee = call_callee_name(node)
         recv = _receiver_ident(node)
         args = call_args(node)
@@ -265,6 +268,9 @@ def _resolve_substitution(inner: Node | None, consts: dict[str, str]) -> tuple[s
             return val, unresolved
         return "{" + text(inner) + "}", True
     if inner.type == "call_expression":
+        helper = _apply_path_helper(inner, consts)
+        if helper is not None:
+            return helper, True
         callee = call_callee_name(inner)
         args = call_args(inner)
         val, unresolved = _resolve_js_string(inner, consts)
@@ -896,6 +902,7 @@ class JsAnalyzer:
         for _path, rel_file, module, tree, _src in parsed:
             consts = _collect_consts(tree)
             _apply_yaml_js_consts(consts, yaml_constants)
+            consts.update(_collect_path_helpers(tree, consts))
             consts_by_mod[module] = consts
             routers, clients = _collect_receivers(tree, consts)
             routers_by_mod[module] = routers
@@ -929,6 +936,7 @@ class JsAnalyzer:
                         fn_nodes[qual] = value
             wrappers_by_mod[module] = _collect_wrappers(tree, consts, clients)
 
+        _import_path_helpers(consts_by_mod, import_specs_by_mod)
         for _path, _rel_file, module, tree, _src in parsed:
             mounts.extend(
                 _collect_cross_mounts(
@@ -2715,3 +2723,97 @@ def _collect_route_literals(
                 same_repo=same_repo,
             )
         )
+
+
+
+# ---------------------------------------------------------------------------
+# Pure path helpers: `const site = (id) => `/sites/${id}`` / `function seg(id)
+# { return '/teams/' + id }`. Calls inside client URLs are evaluated with the
+# caller's argument names (`site(siteId)` → `/sites/{siteId}` → `/sites/:siteId`).
+# Stored in the module's consts under `name()` (template) and `name()#params`.
+# ---------------------------------------------------------------------------
+
+_HOLE = re.compile(r"\{([^{}]+)\}")
+
+
+def _helper_body_expr(fn: Node) -> Node | None:
+    body = fn.child_by_field_name("body")
+    if body is None:
+        return None
+    if body.type in {"template_string", "string", "binary_expression", "parenthesized_expression"}:
+        return body
+    if body.type == "statement_block":
+        stmts = [c for c in body.named_children if c.type != "comment"]
+        if len(stmts) == 1 and stmts[0].type == "return_statement" and stmts[0].named_children:
+            return stmts[0].named_children[0]
+    return None
+
+
+def _collect_path_helpers(tree: Node, consts: dict[str, str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for node in walk(tree):
+        name = ""
+        fn: Node | None = None
+        if node.type == "variable_declarator":
+            value = node.child_by_field_name("value")
+            if value is not None and value.type in {"arrow_function", "function", "function_expression"}:
+                name, fn = _declarator_name(node), value
+        elif node.type == "function_declaration":
+            ident = node.child_by_field_name("name")
+            name, fn = (text(ident) if ident is not None else ""), node
+        if not name or fn is None:
+            continue
+        expr = _helper_body_expr(fn)
+        if expr is None:
+            continue
+        params = _fn_param_names(fn)
+        scope = {k: v for k, v in consts.items() if k not in params}
+        value, _unresolved = _resolve_js_string(expr, scope)
+        if not value or not value.startswith("/") or any(ch.isspace() for ch in value):
+            continue
+        # Pure: the only holes are the helper's own parameters.
+        if not set(_HOLE.findall(value)) <= set(params):
+            continue
+        out[f"{name}()"] = value
+        out[f"{name}()#params"] = ",".join(params)
+    return out
+
+
+def _import_path_helpers(
+    consts_by_mod: dict[str, dict[str, str]],
+    import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
+) -> None:
+    for module, specs in import_specs_by_mod.items():
+        consts = consts_by_mod.setdefault(module, {})
+        for local, (src_mod, orig) in specs.items():
+            src = consts_by_mod.get(src_mod) or {}
+            key = f"{orig}()"
+            if key in src and f"{local}()" not in consts:
+                consts[f"{local}()"] = src[key]
+                consts[f"{local}()#params"] = src.get(f"{key}#params", "")
+
+
+def _apply_path_helper(call: Node, consts: dict[str, str]) -> str | None:
+    func = call.child_by_field_name("function")
+    if func is None or func.type != "identifier":
+        return None
+    key = f"{text(func)}()"
+    template = consts.get(key)
+    if template is None:
+        return None
+    params = [p for p in (consts.get(f"{key}#params") or "").split(",") if p]
+    args = call_args(call)
+    for i, param in enumerate(params):
+        rep = "{" + param + "}"
+        if i < len(args):
+            arg = args[i]
+            if arg.type == "identifier":
+                rep = "{" + text(arg) + "}"
+            elif arg.type == "member_expression":
+                rep = "{" + text(arg).rsplit(".", 1)[-1] + "}"
+            else:
+                val, _u = _resolve_js_string(arg, consts)
+                if val and "{" not in val and "/" not in val:
+                    rep = val
+        template = template.replace("{" + param + "}", rep)
+    return template
