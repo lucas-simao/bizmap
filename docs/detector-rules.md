@@ -112,7 +112,13 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
 - SQL dicts via module alias (`from . import queries; queries.Q['k']`,
   `import pkg.queries as q`) and import-time `textwrap.dedent` / `.strip()`
   transforms resolve. `rpc("list")` wrappers that do `run_query(Q[name])`
-  bind the literal name at the call site.
+  bind the literal name at the call site. Dicts derived in another module
+  (`Q = {k: _transform(v) for k, v in queries.RAW.items()}`) evaluate
+  identity, `dedent`/`strip`, `.replace('old.', 'new.')`, and
+  `.format(schema=CONST)` with constant args. Unknown transforms keep the
+  raw SQL tables with confidence `inferred` and a note.
+- `x.request('POST', path)` / `x.post(path)` on a transport whose class is
+  not scanned emit `unresolved_http` on the caller (never silent).
 - `supabase.rpc("name")` becomes a `calls` edge to `function:sql.name`
   when that SQL function exists.
 
@@ -152,13 +158,14 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   must be string-like (literal, const, or concatenation). A const that
   aliases another scanned package (`const PathPrefix = shared.PathPrefix`,
   `var Base = shared.Base + "/v1"`) resolves when both packages are in
-  the scan.
+  the scan. `bizmap.yaml` `constants: { PathPrefix: /api/v1, pkg.Name: /x }`
+  fills consts that alias an **unscanned** package.
 - `func main` is not a writer entrypoint unless it is a detected job or route.
   `bizmap.yaml` is found via `--config`, the scan root, or the git toplevel.
   `--exclude GLOB` (repeatable) merges with YAML `exclude`. `--profile`
   prints parse / resolve / sql / propagate timings to stderr.
 
-## JavaScript / TypeScript resolution (v0.2.7)
+## JavaScript / TypeScript resolution (v0.2.8)
 
 - `.js` / `.mjs` / `.cjs` use tree-sitter-javascript; `.ts` / `.tsx` use
   tree-sitter-typescript (`language_typescript` / `language_tsx`).
@@ -180,7 +187,12 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   or a class constructor `new OrdersApi(api)` / `this.client.get`)
   compose with later `.get('/x')`, including
   `` `${import.meta.env.VITE_API_URL}/api/v1` `` bases and `/orders/${id}`
-  → `/orders/:id`. Uncomposed parameter clients stay
+  → `/orders/:id`. Instances **returned by a factory**
+  (`createClient()` / `makeHttp()` that assigns `axios.create` then
+  attaches interceptors) compose the same way for `api.get('/orders')`,
+  generics `api.get<Order[]>('/orders')`, and `(await api.get(...)).data`.
+  Local wrappers `get(url)` / `request(method, url, body)` emit the
+  call-site path. Uncomposed parameter clients stay
   `unresolved_http`. Chained `.get/.post` of any length and
   statement-style sub-apps mounted via `.route('/', s)` inside a chained
   export keep the composed prefix. `serve({ fetch: app.fetch })` is not
@@ -199,7 +211,7 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `entrypoint:http:POST:/functions/v1/<name>`, with call edges from the
   handler body into imported helpers.
 
-## Bundled rules (v0.2.7)
+## Bundled rules (v0.2.8)
 
 | File | Status | What it detects |
 | --- | --- | --- |

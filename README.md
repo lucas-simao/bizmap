@@ -61,8 +61,9 @@ bizmap registry merge a.json b.json --out merged.json
 bizmap why orders.status --graph merged.json
 ```
 
-`name` / `database` / `services` / `repos` in `bizmap.yaml` control
-repo-qualified ids, shared table ids, and HTTP base-URL matching.
+   `name` / `database` / `services` / `repos` / `constants` in `bizmap.yaml`
+control repo-qualified ids, shared table ids, HTTP base-URL matching, and
+unscanned package const aliases (`PathPrefix`, `pkg.Name`).
 
 ### Example `why` output
 
@@ -105,7 +106,7 @@ flowchart LR
   GET_stock -->|reads inferred| inventory
 ```
 
-## How it works (v0.2.7)
+## How it works (v0.2.8)
 
 1. **Schema replayer** — applies `schema.sql` / migration folders in order
    (`CREATE TABLE IF NOT EXISTS`, quoted/schema-qualified pg_dump identifiers,
@@ -172,6 +173,13 @@ flowchart LR
    module alias (`queries.Q['k']`, `import pkg.queries as q`) and
    import-time `dedent`/`strip` transforms resolve; `rpc("list")` wrappers
    that do `run_query(Q[name])` attribute those tables to the route.
+   SQL dicts derived in another module
+   (`Q = {k: _transform(v) for k, v in queries.RAW.items()}`) evaluate
+   identity, `dedent`/`strip`, `.replace` / `.format` with constant args
+   (and apply schema renames); unknown transforms keep the raw SQL tables
+   with confidence `inferred` and a note. `x.request('POST', path)` /
+   `x.post(path)` on a transport whose class is not scanned emit
+   `unresolved_http` (never silent).
 4. **JavaScript / TypeScript detector** — Express / Fastify / Hono routes
    on a known app/router, including chained factories
    (`new Hono().use('*', mw).get('/a', h)`), including chained-export
@@ -191,6 +199,15 @@ flowchart LR
    (`new OrdersApi(api)` / `this.client.get`) keeps the caller's
    `baseURL` (including `import.meta.env`); if a parameter client cannot
    be composed it is `unresolved_http`, never dropped.
+   Instances **returned by a factory** (`export function createClient() { return axios.create({baseURL}) }`,
+   `const makeHttp = () => { const inst = axios.create({...}); inst.interceptors.request.use(...); return inst }`
+   then `export const api = createClient()`) compose the same way for
+   `api.get('/orders')`, `api.get<Order[]>('/orders')`, and
+   `(await api.get(...)).data` — never `:client` / `:http`.
+   Local wrappers `const get = <T>(url) => api.get<T>(BASE + url)` and
+   `request(method, url, body)` that call `api.request({ method, url: \`${BASE}${url}\` })`
+   emit the **call-site** path (`get('/orders/' + id)` → `/orders/:id`),
+   not `base:url`.
    Chained Hono routes (any length) and statement-style sub-apps
    (`const s = new Hono(); s.get('/x'); app.route('/', s)` inside a
    chained export) keep the composed mount prefix.
@@ -216,7 +233,9 @@ flowchart LR
    reach edge. HTTP clients emit
    `calls_http` when the URL matches a scanned route (same repo, or via
    `services:` base URLs, env var names, or hostnames). Unmatched client
-   calls print `N unresolved HTTP calls` with the env/host keys seen.
+   calls print `N unresolved HTTP calls` with the env/host keys seen and
+   per-reason counts (`target_not_scanned`, `base_unknown`, `path_dynamic`,
+   `client_unknown`). Each `unresolved_http` entry has a `reason`.
    Queue produce sites emit `enqueues` and `triggers` the matched consumer.
 6. **SQL** — named columns stay column-level; `SELECT *` and column-less
    INSERT are table-level. FROM-less SELECT (`now()`, `set_config`) touches
@@ -236,7 +255,9 @@ flowchart LR
    `unresolved_http` in the graph (stderr counts match).
 8. **Overrides** — `bizmap.yaml` (`--config`, scan root, or git toplevel)
    fills in `why`, extra edges, `exclude` globs, `expand_star`, plus
-   `name`, `database`, `services`, `queues`, and `repos`. `--exclude GLOB`
+   `name`, `database`, `services`, `queues`, `repos`, and `constants`
+   (unscanned package const aliases such as `PathPrefix: /api/v1` or
+   `pkg.Name`). `--exclude GLOB`
    merges with YAML. `--profile` times each scan phase.
 
 ### Performance
@@ -300,7 +321,11 @@ table and collection names (`orders`, `users`, `tenants`, `notifications`,
   `import.meta.env` bases, Hono long chains and statement-style sub-apps,
   no false `POST /` from `serve({ fetch })`, Python `_post` wrappers and
   SQL-dict module aliases / `rpc(name)`, Go const aliases, hash-stable
-  graph JSON. **This release.**
+  graph JSON.
+- **v0.2.8** — TS factory-returned axios/ky instances and local path
+  wrappers, Python SQL dicts derived in another module, unscanned
+  transport `unresolved_http`, `constants:` in `bizmap.yaml`,
+  `reason` on every unmatched HTTP call. **This release.**
 - **v0.3** — GitHub Action that warns when a PR changes a writer of a column
   that another in-flight PR also touches (“lineage conflict”).
 - **v0.4** — MCP server so agents can query `why orders.status` without

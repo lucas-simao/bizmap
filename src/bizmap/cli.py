@@ -131,11 +131,21 @@ def scan_cmd(
     if unresolved:
         keys: list[str] = []
         seen: set[str] = set()
+        reason_counts: dict[str, int] = {}
         for item in unresolved:
+            reason = str(item.get("reason") or "target_not_scanned")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
             for key in item.get("keys") or []:
                 if key not in seen:
                     seen.add(key)
                     keys.append(str(key))
+        order = ("target_not_scanned", "base_unknown", "path_dynamic", "client_unknown")
+        reason_bits = [f"{name}={reason_counts[name]}" for name in order if name in reason_counts]
+        for name, count in sorted(reason_counts.items()):
+            if name not in order:
+                reason_bits.append(f"{name}={count}")
+        if reason_bits:
+            click.echo("HTTP unmatched by reason: " + ", ".join(reason_bits))
         suffix = f" ({', '.join(keys)})" if keys else ""
         click.echo(f"{len(unresolved)} unresolved HTTP calls{suffix}")
     if mermaid_flag or mermaid_focus:
