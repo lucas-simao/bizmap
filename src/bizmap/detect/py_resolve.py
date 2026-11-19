@@ -233,11 +233,13 @@ def resolve_expr(
     consts_by_module: dict[str, dict[str, ResolvedString]] | None = None,
     dicts: dict[str, dict[str, ResolvedString]] | None = None,
     dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]] | None = None,
+    call_returns: dict[str, ResolvedString] | None = None,
 ) -> ResolvedString:
     imap = imap or ImportMap()
     consts_by_module = consts_by_module or {}
     dicts = dicts or {}
     dicts_by_module = dicts_by_module or {}
+    call_returns = call_returns or {}
     if node is None:
         return ResolvedString(None, False, True)
     if node.type == "string":
@@ -293,8 +295,13 @@ def resolve_expr(
                 if attr_name in nested and nested[attr_name].usable:
                     return nested[attr_name]
                 return _placeholder_for(f"{head}.{attr_name}")
-            if head in env:
+            if head in {"settings", "config", "conf"}:
                 return _placeholder_for(f"{head}.{attr_name}")
+            if head in env:
+                inner = env[head]
+                if inner.placeholder or not inner.fully_static:
+                    # origin-preserving: settings-like attrs keep the attr spelling
+                    return _placeholder_for(f"{head}.{attr_name}")
         return _placeholder_for(raw)
     if node.type in {"parenthesized_expression", "conditional_expression"}:
         if node.named_children:
@@ -322,7 +329,14 @@ def resolve_expr(
             pos = call_posargs(node)
             if pos:
                 key = resolve_expr(
-                    pos[0], env, module_consts, imap, consts_by_module, dicts, dicts_by_module
+                    pos[0],
+                    env,
+                    module_consts,
+                    imap,
+                    consts_by_module,
+                    dicts,
+                    dicts_by_module,
+                    call_returns,
                 )
                 if key.fully_static and key.text:
                     return _placeholder_for(key.text)
@@ -330,6 +344,11 @@ def resolve_expr(
                     inner = key.placeholder.strip("{}")
                     if inner:
                         return _placeholder_for(inner)
+        # One-hop helper: `_get_url()` whose body returns an f-string / concat.
+        for key in (qual, leaf):
+            found = call_returns.get(key)
+            if found and found.usable:
+                return found
         return _placeholder_for(text(node)[:48])
     if node.type in {"integer", "float", "true", "false", "none"}:
         return ResolvedString(text(node), True, False)
@@ -556,4 +575,76 @@ def find_dict_string(
                 found = resolve(val_n)
                 if found.usable:
                     return found
+    return None
+
+
+def collect_local_env(
+    fn_node: Node,
+    module_consts: dict[str, ResolvedString],
+    imap: ImportMap,
+    consts_by_module: dict[str, dict[str, ResolvedString]] | None = None,
+    dicts: dict[str, dict[str, ResolvedString]] | None = None,
+    dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]] | None = None,
+    call_returns: dict[str, ResolvedString] | None = None,
+) -> dict[str, ResolvedString]:
+    """Function-local assignments, so ``base = os.environ['X']; base + '/p'`` keeps X."""
+    env: dict[str, ResolvedString] = dict(module_consts)
+    consts_by_module = consts_by_module or {}
+    dicts = dicts or {}
+    dicts_by_module = dicts_by_module or {}
+    call_returns = call_returns or {}
+    body = fn_node.child_by_field_name("body") or fn_node
+    for node in walk(body):
+        if node.type != "assignment":
+            continue
+        name = assignment_target_name(node)
+        value = node.child_by_field_name("right")
+        if not name or value is None:
+            continue
+        env[name] = resolve_expr(
+            value,
+            env,
+            module_consts,
+            imap,
+            consts_by_module,
+            dicts,
+            dicts_by_module,
+            call_returns,
+        )
+    return env
+
+
+def simple_return_value(
+    fn_node: Node,
+    env: dict[str, ResolvedString],
+    module_consts: dict[str, ResolvedString],
+    imap: ImportMap,
+    consts_by_module: dict[str, dict[str, ResolvedString]] | None = None,
+    dicts: dict[str, dict[str, ResolvedString]] | None = None,
+    dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]] | None = None,
+) -> ResolvedString | None:
+    """Single return expression of a helper (one hop, no nested call_returns)."""
+    body = fn_node.child_by_field_name("body") or fn_node
+    found: list[ResolvedString] = []
+    for node in walk(body):
+        if node.type != "return_statement":
+            continue
+        if not node.named_children:
+            continue
+        found.append(
+            resolve_expr(
+                node.named_children[0],
+                env,
+                module_consts,
+                imap,
+                consts_by_module,
+                dicts,
+                dicts_by_module,
+            )
+        )
+    usable = [r for r in found if r.usable]
+    if len(usable) == 1:
+        return usable[0]
+    if usable and all(r.path_text == usable[0].path_text for r in usable):
+        return usable[0]
     return None

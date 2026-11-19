@@ -1,4 +1,4 @@
-# BizMap graph schema (v0.2.1)
+# BizMap graph schema (v0.2.2)
 
 `bizmap scan` writes `bizmap.graph.json`. The graph is fully deterministic: every
 node and edge is produced from source text (SQL, tree-sitter ASTs, comments, or
@@ -8,7 +8,7 @@ an explicit `bizmap.yaml` override). There is no LLM in the loop.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | string | Graph format version (`"0.2.1"`). |
+| `version` | string | Graph format version (`"0.2.2"`). |
 | `generated_at` | string | UTC timestamp. |
 | `schema` | object | Reconstructed database schema (`schema.tables`). |
 | `nodes` | array | Graph nodes (see below). |
@@ -43,8 +43,8 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 | --- | --- | --- |
 | `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:<kind>:<key>` | `kind` (`http` \| `scheduled_job` \| `firestore` \| `celery_task` \| `worker` \| `pubsub` \| `cloud_task` \| `firebase_http` \| `firebase_call`), `method`, `path`, `symbol`, `why`, `evidence`, optional `confidence`, `candidates`, `unresolved` (const path not in the scan), optional `collection` / `event` |
 | `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch) |
-| `table` | `table:<name>` | `name`; optional `external` (system catalogs), `candidates` (dynamic/`unknown`), `rls`, `policies` |
-| `view` | `view:<name>` | `name`, `kind: view`, optional `materialized` |
+| `table` | `table:<name>` | `name`; optional `external` (system catalogs / `storage.*` / `vault.*` / `auth.*`), `kind` (`external_relation` \| `unresolved_relation`), `dropped` (still referenced after `DROP TABLE`), `candidates` (dynamic/`unknown`), `rls`, `policies` |
+| `view` | `view:<name>` | `name`, `kind` (`view` \| `unresolved_relation`), optional `materialized` |
 | `column` | `column:<table>.<column>` | `table`, `name`, `data_type`, `nullable`, optional `why` |
 | `db_trigger` | `db_trigger:<name>` | `name`, `table`, `timing`, `events`, `function`, `evidence` |
 | `collection` | `collection:<name>` | `name` (Firestore collection) |
@@ -108,7 +108,7 @@ column is written.
 | Value | When |
 | --- | --- |
 | `exact` | Fully static SQL (string literals / const concatenation, including cross-package `pkg.Const`) parsed by sqlglot, or a route/job registration whose handler resolved via type. |
-| `inferred` | Call-graph propagation (table-level), `SELECT *` (table-level, or columns with `--expand-star`), INSERT without a column list, interface dispatch to a structural implementer, or a writer of table T also writing what a trigger on T writes. |
+| `inferred` | Call-graph propagation (table-level), `SELECT *` (table-level, or columns with `--expand-star`), INSERT without a column list, interface/object dispatch to a structural implementer or constructor-assigned type, or a writer of table T also writing what a trigger on T writes. |
 | `unknown` | Dynamically built SQL (`"UPDATE t SET " + col` or `"UPDATE "+table+" SET"`), unparsed SQL, an unresolvable route path (`{otherpkg.PendingPath}/setup`, with `unresolved: true`), or an ambiguous handler (candidates listed, no arbitrary pick). FROM-less SELECT is not unknown: it emits no table edge. |
 
 When the same edge is observed twice, the **highest** confidence is kept
@@ -126,25 +126,27 @@ applied in order. Supported PostgreSQL constructs:
 - `CREATE TRIGGER` + `CREATE FUNCTION` (quoted / schema-qualified pg_dump
   identifiers; plpgsql body scanned for `INSERT`/`UPDATE`/`DELETE`/`SELECT`
   after comments, string literals, DECLARE variables, and INTO targets are
-  stripped)
+  stripped). Function bodies are **re-analyzed after the full replay** so
+  `CREATE FUNCTION` that appears before `CREATE TABLE` still records those
+  tables. `EXECUTE format('UPDATE %I ...')` is treated as dynamic SQL.
 - `CREATE VIEW` / `CREATE MATERIALIZED VIEW` (and Alembic `op.execute` of the
   same) as `view` nodes with `derives_from` edges
+- `DROP TABLE` (the table is marked `dropped: true` when it is still referenced)
 - `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`
 - `CREATE POLICY ... ON table` (name, command, role, `USING` / `WITH CHECK`)
 - Alembic Python revisions (`op.create_table`, `add_column`, `drop_*`, `execute`) applied in `down_revision` order; those functions are `role: schema` and listed by `why` as **defined/altered by**, not runtime writers
 
 Table nodes are created for reconstructed DDL tables and for system catalogs
-(`pg_roles`, `pg_catalog.*`, `information_schema.*`, `pg_*`) marked
-`external`. When DDL is present, unknown real-looking
-identifiers are not turned into table nodes (the origin function may list
-them under `unresolved` instead). Schema-qualified names and tables created
-in migrations still become nodes. Without DDL, static SQL that
-names a real identifier may still create a table node. CTE / subquery /
-LATERAL aliases (`l`, `r`, `l.x`, `files.file_id`), SQL keywords, and
-PL/pgSQL keywords / DECLARE'd variables are never tables. FROM-less SELECT
-(`SELECT now()`) touches no table. Dynamic table
-names become `table:unknown` with `candidates` when determinable, and stay
-on the origin function only.
+(`pg_roles`, `pg_catalog.*`, `information_schema.*`, `pg_*`, `storage.*`,
+`vault.*`, `auth.*`) marked `external` (`kind: external_relation`).
+Relations named in FROM/JOIN/INSERT/UPDATE that are not in DDL become
+`unresolved_relation` nodes (views on read, tables on write) with edges, so
+a route still shows `reads view X`. CTE / subquery / LATERAL aliases
+(`l`, `r`, `l.x`, `files.file_id`), SQL keywords, and PL/pgSQL keywords /
+DECLARE'd variables are never tables. FROM-less SELECT (`SELECT now()`)
+touches no table. Dynamic table names (`"UPDATE "+t+" SET"`, `%I` holes)
+always become `table:unknown` with confidence `unknown` and `candidates`
+when determinable, and stay on the origin function only.
 
 ## Overrides (`bizmap.yaml`)
 
@@ -166,6 +168,8 @@ services:
 queues:
   ingest: ingest
   jobs: on_jobs
+  # entrypoint id or route — links a producer without an extracted http_url
+  # jobs-queue: entrypoint:http:POST:/jobs/drain
 repos:
   - catalog
   - worker

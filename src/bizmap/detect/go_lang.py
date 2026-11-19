@@ -1620,6 +1620,26 @@ class GoAnalyzer:
             if found is not None:
                 conf = Confidence.EXACT if found.receiver and fn.receiver else Confidence.INFERRED
                 return [(found, conf, [])]
+            if operand is not None and operand.type == "selector_expression":
+                obj_t = self._type_of_expr(
+                    operand.child_by_field_name("operand"), fn, info, local_types, idx
+                )
+                field_n = operand.child_by_field_name("field")
+                if obj_t is not None and field_n is not None:
+                    concretes = idx.field_concretes.get(
+                        (obj_t.import_path or "", obj_t.name, text(field_n)), []
+                    )
+                    unique = list(dict.fromkeys((c.import_path, c.name) for c in concretes))
+                    callees: list[GoFunction] = []
+                    for ip, typ in unique:
+                        gf = idx.by_method.get((ip, typ, method))
+                        if gf is not None:
+                            callees.append(gf)
+                    if len(callees) == 1:
+                        return [(callees[0], Confidence.INFERRED, [])]
+                    if callees:
+                        cands = [c.qualname for c in callees]
+                        return [(c, Confidence.INFERRED, list(cands)) for c in callees]
             return []
         impls = list(idx.implementers.get(iface_key) or [])
         if operand is not None and operand.type == "selector_expression":
@@ -1834,15 +1854,19 @@ class GoAnalyzer:
                     pname = text(val)
                     if pname in fn.params:
                         idx.ctor_field_params[(fn.import_path, fn.name)][fname] = pname
+            if val is not None:
+                concrete = self._infer_value_type(val, fn, info, local_types, idx)
+                if concrete is not None and (concrete.import_path, concrete.name) not in idx.interfaces:
+                    idx.field_concretes[(ip, gtype.name, fname)].append(concrete)
             if fname in iface_fields:
-                if val is not None:
-                    concrete = self._infer_value_type(val, fn, info, local_types, idx)
-                    if concrete is not None and (concrete.import_path, concrete.name) not in idx.interfaces:
-                        idx.field_concretes[(ip, gtype.name, fname)].append(concrete)
                 if val is not None and val.type == "identifier":
                     pname = text(val)
                     if pname in fn.params:
                         idx.ctor_field_params[(fn.import_path, fn.name)][fname] = pname
+            elif val is not None and val.type == "identifier":
+                pname = text(val)
+                if pname in fn.params:
+                    idx.ctor_field_params[(fn.import_path, fn.name)][fname] = pname
 
     def _bind_constructor_call(
         self, call: Node, fn: GoFunction, info: _FileInfo, idx: _Indexes
@@ -1858,7 +1882,6 @@ class GoAnalyzer:
         ret = callee.return_type
         ret_ip = ret.import_path or callee.import_path
         local_types = self._local_types(fn, info, idx)
-        iface_fields = idx.iface_fields.get((ret_ip, ret.name), set())
         func_fields = idx.func_fields.get((ret_ip, ret.name), set())
         for fname, pname in mapping.items():
             if pname not in param_order:
@@ -1870,10 +1893,9 @@ class GoAnalyzer:
                 resolved = self._resolve_func_expr(args[i], fn, info, idx)
                 if resolved is not None:
                     idx.field_funcs[(ret_ip, ret.name, fname)].append(resolved.qualname)
-            if fname in iface_fields:
-                concrete = self._infer_value_type(args[i], fn, info, local_types, idx)
-                if concrete is not None and (concrete.import_path, concrete.name) not in idx.interfaces:
-                    idx.field_concretes[(ret_ip, ret.name, fname)].append(concrete)
+            concrete = self._infer_value_type(args[i], fn, info, local_types, idx)
+            if concrete is not None and (concrete.import_path, concrete.name) not in idx.interfaces:
+                idx.field_concretes[(ret_ip, ret.name, fname)].append(concrete)
 
     def _const_refs_in_args(self, args: list[Node], info: _FileInfo, idx: _Indexes) -> list[str]:
         refs: list[str] = []

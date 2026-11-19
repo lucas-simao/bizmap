@@ -43,6 +43,10 @@ CREATE_TABLE_HEAD = re.compile(
     rf"CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?({QUAL_IDENT})",
     re.IGNORECASE,
 )
+DROP_TABLE = re.compile(
+    rf"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?({QUAL_IDENT}(?:\s*,\s*{QUAL_IDENT})*)",
+    re.IGNORECASE,
+)
 CREATE_POLICY = re.compile(
     rf"""CREATE\s+POLICY\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))\s+ON\s+({QUAL_IDENT})""",
     re.IGNORECASE,
@@ -99,6 +103,7 @@ class Table:
     constraints: dict[str, str] = field(default_factory=dict)
     policies: list[Policy] = field(default_factory=list)
     rls: bool = False
+    dropped: bool = False
 
 
 @dataclass
@@ -178,6 +183,8 @@ class Schema:
                 ]
             if table.rls:
                 tables[name]["rls"] = True
+            if table.dropped:
+                tables[name]["dropped"] = True
         payload: dict = {"tables": tables}
         if self.views:
             payload["views"] = {
@@ -448,6 +455,7 @@ def _apply_create_table(schema: Schema, stmt: exp.Create) -> None:
     if not table_name:
         return
     table = _table(schema, ident_leaf(table_name) or table_name)
+    table.dropped = False
     for expr in coldefs:
         if isinstance(expr, exp.ColumnDef):
             _apply_column_def(table, expr)
@@ -678,6 +686,37 @@ def strip_plpgsql_into(sql: str) -> str:
     return "".join(pieces)
 
 
+def _unquote_sql_literal(raw: str) -> str:
+    s = raw.strip()
+    if len(s) >= 2 and s[0] == "'" and s[-1] == "'":
+        return s[1:-1].replace("''", "'")
+    m = DOLLAR_TAG.match(s)
+    if m:
+        tag = m.group(0)
+        end = s.find(tag, len(tag))
+        if end > 0:
+            return s[len(tag) : end]
+    return s
+
+
+def extract_execute_sql(body: str) -> list[tuple[str, bool]]:
+    """SQL strings passed to ``EXECUTE`` / ``EXECUTE format(...)``.
+
+    ``format('UPDATE %I ...')`` is marked dynamic (table name is a hole).
+    """
+    out: list[tuple[str, bool]] = []
+    for m in re.finditer(
+        r"(?is)\bEXECUTE\s+(?:format\s*\(\s*)?(?:E)?('(?:''|[^'])*'|\$[A-Za-z0-9_]*\$)",
+        body,
+    ):
+        sql = _unquote_sql_literal(m.group(1))
+        if not sql.strip():
+            continue
+        dynamic = bool(re.search(r"%[IDsL]", sql)) or "format" in m.group(0).lower()
+        out.append((sql, dynamic))
+    return out
+
+
 def extract_sql_from_plpgsql(body: str) -> list[str]:
     """Pull SQL verbs out of a plpgsql / DO body.
 
@@ -704,6 +743,90 @@ def extract_sql_from_plpgsql(body: str) -> list[str]:
     return found
 
 
+def _analyze_fn_body(schema: Schema, fn: DbFunction) -> None:
+    """(Re)scan a plpgsql body against the current reconstructed schema."""
+    colmap = schema.column_names()
+    known = set(colmap) | set(schema.views)
+    declared = plpgsql_declared_names(fn.body)
+    skip = declared | {k.lower() for k in PLPGSQL_KEYWORDS}
+    accesses: list[SqlAccess] = []
+    unresolved: list[str] = []
+    seen_u: set[str] = set()
+
+    def take(access: SqlAccess) -> None:
+        tname = ident_leaf(access.table) if access.table else ""
+        if access.unknown_table:
+            accesses.append(access)
+            return
+        if not tname:
+            return
+        if tname in skip or is_skipped_table_name(tname, skip):
+            return
+        accesses.append(access)
+        if (
+            known
+            and tname not in known
+            and not access.schema_qualified
+            and not access.external
+            and tname not in seen_u
+        ):
+            seen_u.add(tname)
+            unresolved.append(tname)
+
+    for inner in extract_sql_from_plpgsql(fn.body):
+        for access in analyze_sql(
+            inner,
+            schema_columns=colmap,
+            require_known=False,
+            skip_names=skip,
+        ):
+            take(access)
+    for inner, dynamic in extract_execute_sql(fn.body):
+        for access in analyze_sql(
+            inner,
+            schema_columns=colmap,
+            dynamic=dynamic,
+            require_known=False,
+            skip_names=skip,
+        ):
+            take(access)
+    fn.accesses = accesses
+    fn.unresolved = unresolved
+
+
+def finalize_schema(schema: Schema) -> None:
+    """Re-resolve function/view bodies after the full DDL replay.
+
+    pg_dump emits ``CREATE FUNCTION`` before ``CREATE TABLE``; table names
+    that were unresolved on first pass become real accesses here.
+    """
+    for fn in schema.functions.values():
+        _analyze_fn_body(schema, fn)
+    colmap = schema.column_names()
+    skip = {k.lower() for k in PLPGSQL_KEYWORDS}
+    for view in schema.views.values():
+        if not view.query:
+            continue
+        accesses = analyze_sql(
+            view.query,
+            schema_columns=colmap,
+            require_known=False,
+            skip_names=skip,
+        )
+        view.accesses = accesses
+        tables: list[str] = []
+        seen: set[str] = set()
+        for access in accesses:
+            tname = ident_leaf(access.table) if access.table else ""
+            if not tname or access.unknown_table or tname in seen:
+                continue
+            if is_skipped_table_name(tname):
+                continue
+            seen.add(tname)
+            tables.append(tname)
+        view.tables = tables
+
+
 def _apply_function(schema: Schema, sql: str, evidence: Evidence) -> None:
     m = CREATE_FN.search(sql)
     if not m:
@@ -718,30 +841,23 @@ def _apply_function(schema: Schema, sql: str, evidence: Evidence) -> None:
         body=body.strip(),
         evidence=evidence,
     )
-    colmap = schema.column_names()
-    known = set(colmap) | set(schema.views)
-    declared = plpgsql_declared_names(fn.body)
-    skip = declared | {k.lower() for k in PLPGSQL_KEYWORDS}
-    for inner in extract_sql_from_plpgsql(fn.body):
-        raw = analyze_sql(
-            inner,
-            schema_columns=colmap,
-            require_known=False,
-            skip_names=skip,
-        )
-        for access in raw:
-            tname = ident_leaf(access.table) if access.table else ""
-            if not tname or access.unknown_table:
-                if access.unknown_table:
-                    fn.accesses.append(access)
-                continue
-            if tname in skip or is_skipped_table_name(tname, skip):
-                continue
-            if not known or tname in known or access.schema_qualified:
-                fn.accesses.append(access)
-            elif tname not in fn.unresolved:
-                fn.unresolved.append(tname)
+    _analyze_fn_body(schema, fn)
     schema.functions[name] = fn
+
+
+def _apply_drop_table(schema: Schema, sql: str) -> None:
+    m = DROP_TABLE.search(sql)
+    if not m:
+        return
+    for raw in re.split(r"\s*,\s*", m.group(1)):
+        name = ident_leaf(raw)
+        if not name:
+            continue
+        table = schema.tables.get(name)
+        if table is not None:
+            table.dropped = True
+        else:
+            schema.tables[name] = Table(name=name, dropped=True)
 
 
 def _apply_do_block(schema: Schema, sql: str, evidence: Evidence) -> None:
@@ -923,6 +1039,11 @@ def apply_statement(schema: Schema, sql: str, evidence: Evidence) -> None:
             m_rls = ENABLE_RLS.search(stripped)
             if m_rls:
                 _table(schema, ident_leaf(m_rls.group(1))).rls = True
+        elif isinstance(stmt, exp.Drop):
+            kind = str(stmt.args.get("kind") or "").upper()
+            if "TABLE" in kind:
+                _apply_drop_table(schema, stripped)
+                handled = True
         elif isinstance(stmt, exp.Command):
             cmd = str(stmt.this or "").upper()
             expr = str(stmt.args.get("expression") or stripped)
@@ -966,7 +1087,11 @@ def apply_statement(schema: Schema, sql: str, evidence: Evidence) -> None:
         return
     m_tbl = CREATE_TABLE_HEAD.match(stripped)
     if m_tbl and re.search(r"(?is)^CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\b", stripped):
-        _table(schema, ident_leaf(m_tbl.group(1)))
+        table = _table(schema, ident_leaf(m_tbl.group(1)))
+        table.dropped = False
+        return
+    if DROP_TABLE.search(stripped) and re.search(r"(?is)^DROP\s+TABLE\b", stripped):
+        _apply_drop_table(schema, stripped)
         return
     m_rls = ENABLE_RLS.search(stripped)
     if m_rls:
@@ -999,6 +1124,7 @@ def replay_sql(sql: str, *, file: str = "schema.sql") -> Schema:
     for line, stmt in split_sql_statements(sql):
         evidence = Evidence(file=file, line=line, symbol=_stmt_symbol(stmt))
         apply_statement(schema, stmt, evidence)
+    finalize_schema(schema)
     return schema
 
 
@@ -1010,4 +1136,5 @@ def replay_files(files: list[Path], root: Path) -> Schema:
         for line, stmt in split_sql_statements(text):
             evidence = Evidence(file=rel_file, line=line, symbol=_stmt_symbol(stmt))
             apply_statement(schema, stmt, evidence)
+    finalize_schema(schema)
     return schema

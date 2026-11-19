@@ -24,6 +24,18 @@ TABLE_FROM_PREFIX = re.compile(
     rf"(?:ONLY\s+)?({QUAL_IDENT})"
 )
 DYNAMIC_PLACEHOLDER = re.compile(r"\{[^{}]+\}")
+# Table-name holes: `"UPDATE "+t+" SET"`, `EXECUTE format('UPDATE %I ...')`.
+DYNAMIC_TABLE_HOLE = re.compile(
+    r"(?is)\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+"
+    r"(?:ONLY\s+)?(?:%I|%s|%L|\{[^{}]+\}|(?=\s*(?:SET|WHERE|VALUES|RETURNING)\b))"
+)
+EXTERNAL_SCHEMAS = {
+    "pg_catalog",
+    "information_schema",
+    "storage",
+    "vault",
+    "auth",
+}
 _CTE_HEAD = re.compile(r"(?is)\bWITH\s+(?:RECURSIVE\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+AS\b")
 _CTE_MORE = re.compile(r"(?is),\s*([A-Za-z_][A-Za-z0-9_]*)\s+AS\s*\(")
 _SUBQUERY_OPEN = re.compile(r"(?is)(?:\bLATERAL\s*)?\(\s*(?:SELECT|WITH|VALUES)\b")
@@ -316,6 +328,7 @@ class SqlAccess:
     candidates: list[str] = field(default_factory=list)
     schema_qualified: bool = False
     unresolved: bool = False
+    relation_kind: str | None = None  # external_relation | unresolved_relation
 
 
 def ident_parts(raw: str | None) -> list[str]:
@@ -358,14 +371,31 @@ def normalize_placeholders(sql: str) -> str:
 def is_external_table(name: str | None) -> bool:
     if not name:
         return False
-    raw = name.lower()
+    raw = name.lower().strip()
+    parts = ident_parts(raw) or [p for p in raw.split(".") if p]
+    if parts and parts[0] in EXTERNAL_SCHEMAS:
+        return True
     if raw.startswith("information_schema.") or raw == "information_schema":
         return True
     if raw.startswith("pg_catalog.") or raw == "pg_catalog":
         return True
-    leaf = raw.split(".")[-1]
+    leaf = parts[-1] if parts else raw.split(".")[-1]
     if leaf.startswith("pg_") or leaf in PG_CATALOG_TABLES:
         return True
+    return False
+
+
+def has_dynamic_table_hole(sql: str) -> bool:
+    """True when DML has a missing/interpolated table name, not a FROM-less SELECT."""
+    if not sql or not sql.strip():
+        return False
+    if DYNAMIC_TABLE_HOLE.search(sql):
+        return True
+    if DYNAMIC_PLACEHOLDER.search(sql) and re.search(
+        r"(?is)\b(?:INSERT|UPDATE|DELETE|MERGE)\b", sql
+    ):
+        if not re.search(r"(?is)\b(?:FROM|INTO|UPDATE|JOIN)\s+[A-Za-z_]", sql):
+            return True
     return False
 
 
@@ -642,15 +672,22 @@ def _add(
         table = ident_leaf(table)
         external = is_external_table(table)
     else:
-        # Keep catalog schema qualification to avoid colliding with app tables
-        # such as ``columns``.
-        pass
+        # Keep catalog/extension schema qualification (storage.objects, auth.users)
+        # to avoid colliding with app tables such as ``columns`` / ``users``.
+        parts = ident_parts(table)
+        if len(parts) >= 2 and parts[0] in EXTERNAL_SCHEMAS:
+            table = f"{parts[0]}.{parts[-1]}".lower()
+        elif qualified:
+            table = table.lower()
     if skip_names and ident_leaf(table) in skip_names:
         return
     key = (kind, table.lower(), (column or "").lower(), confidence.value, dynamic, external)
     if key in seen:
         return
     seen.add(key)
+    relation_kind = None
+    if external:
+        relation_kind = "external_relation"
     out.append(
         SqlAccess(
             kind=kind,
@@ -661,6 +698,7 @@ def _add(
             dynamic=dynamic,
             external=external,
             schema_qualified=qualified,
+            relation_kind=relation_kind,
         )
     )
 
@@ -704,7 +742,11 @@ def _table_allowed(
     if known:
         if leaf in known or table.lower() in known:
             return True
-        return bool(schema_qualified or ident_is_qualified(table))
+        if schema_qualified or ident_is_qualified(table):
+            return True
+        # Named FROM/JOIN/INSERT/UPDATE relations that are not in DDL are
+        # kept as unresolved_relation nodes (not silently dropped).
+        return True
     return True
 
 
@@ -968,6 +1010,25 @@ def _fallback_table_accesses(
                 found_real = True
     if found_real:
         return out
+    if has_dynamic_table_hole(sql) or (
+        dynamic
+        and re.search(r"(?is)^(INSERT|UPDATE|DELETE|MERGE)\b", sql.strip())
+        and not _sql_looks_fromless_select(sql)
+    ):
+        candidates = sorted(t for t in known if t not in SQL_KEYWORDS) if known else []
+        _add(
+            out,
+            kind,
+            None,
+            None,
+            Confidence.UNKNOWN,
+            sql,
+            True,
+            seen,
+            unknown_table=True,
+            candidates=candidates,
+        )
+        return out
     # Aliases-only (or FROM-less) SQL: do not invent table:unknown when DDL exists.
     if known or phantoms:
         return out
@@ -1014,10 +1075,12 @@ def analyze_sql(
         known = set()
     skip = {s.lower() for s in (skip_names or ())}
     phantoms = text_phantom_aliases(sql) | skip
-    if DYNAMIC_PLACEHOLDER.search(sql) and not re.search(
-        r"(?is)\b(?:FROM|INTO|UPDATE|JOIN)\s+[A-Za-z_]", sql
+    if has_dynamic_table_hole(sql) or (
+        DYNAMIC_PLACEHOLDER.search(sql)
+        and not re.search(r"(?is)\b(?:FROM|INTO|UPDATE|JOIN)\s+[A-Za-z_]", sql)
+        and re.search(r"(?is)\b(?:INSERT|UPDATE|DELETE|MERGE)\b", sql)
     ):
-        # e.g. UPDATE {table} SET ... — table name was interpolated.
+        # e.g. UPDATE {table} SET ... / UPDATE %I SET ... — table name interpolated.
         kind = _kind_from_sql(sql)
         return [
             SqlAccess(
@@ -1063,18 +1126,26 @@ def analyze_sql(
             known_tables=known,
             skip_names=skip,
         )
-    out = [
-        a
-        for a in out
-        if a.unknown_table
-        or _table_allowed(
+    kept: list[SqlAccess] = []
+    for a in out:
+        if a.unknown_table or _table_allowed(
             a.table,
             known or None,
             phantoms,
             schema_qualified=a.schema_qualified,
             skip_names=skip,
-        )
-    ]
+        ):
+            if (
+                not a.unknown_table
+                and not a.external
+                and known
+                and ident_leaf(a.table) not in known
+                and a.table.lower() not in known
+            ):
+                a.unresolved = True
+                a.relation_kind = a.relation_kind or "unresolved_relation"
+            kept.append(a)
+    out = kept
     if not parsed_any or not out:
         # FROM-less SELECT (set_config, now(), SELECT 1) touches no table.
         # Functions are never tables; do not invent table:unknown.

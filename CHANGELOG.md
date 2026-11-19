@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.2.2 — 2026-11-19
+
+Forward refs, external relations, object dispatch, and TypeScript servers
+after a private evaluation of v0.2.1. Behavior is generic; tests and fixtures
+are synthetic only (`orders`, `users`, `tenants`, `documents`, `jobs`).
+
+### Fixed
+
+- **Forward-referenced SQL functions**: plpgsql bodies are re-analyzed after
+  the full schema replay, so `CREATE FUNCTION` that appears before
+  `CREATE TABLE` (pg_dump order) still records writes/reads of those tables.
+- **Dynamic table names**: `"UPDATE "+t+" SET ..."` (Go/Python) and
+  `EXECUTE format('UPDATE %I ...')` again emit `writes -> table:unknown`
+  with confidence `unknown` and `candidates` when DDL is present — they
+  no longer disappear.
+- **Missing relations**: FROM/JOIN/INSERT/UPDATE names that are not in the
+  reconstructed schema become `view:` / `table:` nodes with
+  `kind: unresolved_relation` (and edges), so a route still shows
+  `reads view X`. `DROP TABLE` leaves `dropped: true` when the name is
+  still referenced. Schema-qualified built-ins (`storage.*`, `vault.*`,
+  `auth.*`, `pg_*`, `information_schema.*`) are `external` with
+  `kind: external_relation`.
+- **Object dispatch**: `Drainer(outbox)` then `self.outbox.settle(...)`,
+  and `def run(store: Store): store.save(...)`, follow the class method
+  (by annotation, constructor assignment, or a single implementer).
+  Confidence `inferred`. Python and Go.
+- **Cloud Tasks / Pub/Sub**: a one-hop helper
+  (`create_task(task={'http_request': {'url': _get_url()}})`) is traced
+  to the helper's return value. `queues: {queue_name: <entrypoint or route>}`
+  links a producer even when no `http_url` was extracted.
+- **HTTP origin keys**: unresolved client URLs report the env var
+  (`os.environ["X_URL"]`, `os.getenv`, `settings.x_url`), a constant, or
+  a hostname — not a local variable such as `base`. `services:` env
+  matching uses that origin (`base = os.environ["X_URL"]; post(base+"/p")`
+  links to `/p` in another repo via `env: X_URL`).
+
+### Added
+
+- **TypeScript server detection** via `tree-sitter-typescript`: Express /
+  Fastify / Hono routes (`app.get`, `router.post`), Supabase JS
+  `.from('t').select/insert/update/delete/upsert` and `.rpc('fn')`,
+  `pg`/`postgres` `query()` SQL, and Supabase Edge Functions
+  (`Deno.serve` / `serve` in `supabase/functions/<name>/index.ts` →
+  HTTP `/functions/v1/<name>`).
+
+### Changed
+
+- Graph format **0.2.2**: table/view `kind` may be `unresolved_relation`
+  or `external_relation`; tables may be `dropped: true`.
+
 ## 0.2.1 — 2026-11-19
 
 Precision fixes for SQL functions, views, and service links after a private
