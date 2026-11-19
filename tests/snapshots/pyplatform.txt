@@ -1,0 +1,247 @@
+# nodes (95)
+collection collection:events
+collection collection:jobs
+collection collection:notifications
+column column:audit_log.action
+column column:audit_log.id
+column column:audit_log.order_id
+column column:documents.body
+column column:documents.id
+column column:documents.order_id
+column column:orders.id
+column column:orders.notes
+column column:orders.order_id
+column column:orders.status
+column column:orders.tenant_id
+column column:orders.user_id
+column column:tenants.id
+column column:tenants.name
+column column:users.email
+column column:users.id
+column column:users.tenant_id
+db_trigger db_trigger:trg_orders_audit
+entrypoint catalog/entrypoint:celery:tasks.refresh_orders
+entrypoint catalog/entrypoint:http:DELETE:/api/orders/{id}
+entrypoint catalog/entrypoint:http:GET:/api/orders
+entrypoint catalog/entrypoint:http:GET:/api/orders/{id}
+entrypoint catalog/entrypoint:http:GET:/api{missing_paths.SECRET}/hidden
+entrypoint catalog/entrypoint:http:GET:/v1/api/orders
+entrypoint catalog/entrypoint:http:GET:/v1/api/orders/{id}
+entrypoint catalog/entrypoint:http:GET:/v1/api{missing_paths.SECRET}/hidden
+entrypoint catalog/entrypoint:http:POST:/api/orders
+entrypoint catalog/entrypoint:http:POST:/api/orders/{id}/pay
+entrypoint catalog/entrypoint:http:POST:/v1/api/orders
+entrypoint storefront/entrypoint:worker:loop.run_forever_loop
+entrypoint web/entrypoint:http:GET:/health
+entrypoint web/entrypoint:http:GET:/rpc/tax
+entrypoint web/entrypoint:http:POST:/proxy/orders
+entrypoint worker/entrypoint:cloud_task:main.handle_task
+entrypoint worker/entrypoint:firebase_call:POST:/ping
+entrypoint worker/entrypoint:firebase_http:POST:/ingest
+entrypoint worker/entrypoint:firestore:jobs:created
+entrypoint worker/entrypoint:firestore:jobs:updated
+entrypoint worker/entrypoint:job:main.sweep
+entrypoint worker/entrypoint:pubsub:jobs
+function catalog/function:alembic.versions.0001_init.downgrade
+function catalog/function:alembic.versions.0001_init.upgrade
+function catalog/function:alembic.versions.0002_notes.downgrade
+function catalog/function:alembic.versions.0002_notes.upgrade
+function catalog/function:app.get_order
+function catalog/function:app.hidden
+function catalog/function:app.list_orders
+function catalog/function:app.pay_order
+function catalog/function:app.post_order
+function catalog/function:app.remove_order
+function catalog/function:db.cancel_order
+function catalog/function:db.create_order
+function catalog/function:db.fetch_order
+function catalog/function:db.list_open_orders
+function catalog/function:db.mark_paid
+function catalog/function:db.raw_totals
+function catalog/function:sql.apply_order_tax
+function catalog/function:sql.log_order_write
+function catalog/function:tasks.enqueue_ingest
+function catalog/function:tasks.refresh_orders
+function storefront/function:client.create_order
+function storefront/function:client.list_orders
+function storefront/function:client.local_open_orders
+function storefront/function:client.pay_order
+function storefront/function:client.publish_job
+function storefront/function:loop.__main__
+function storefront/function:loop.run_forever_loop
+function web/function:server.GET /health
+function web/function:server.GET /rpc/tax
+function web/function:server.POST /proxy/orders
+function web/function:server.module
+function web/function:server.rpc
+function web/function:sql.apply_order_tax
+function worker/function:main.handle_task
+function worker/function:main.ingest
+function worker/function:main.on_job_created
+function worker/function:main.on_job_updated
+function worker/function:main.on_jobs_topic
+function worker/function:main.ping
+function worker/function:main.sweep
+queue catalog/queue:celery:tasks.refresh_orders
+queue catalog/queue:cloud_tasks:ingest
+queue storefront/queue:pubsub:jobs
+queue worker/queue:cloud_tasks:handle_task
+queue worker/queue:firestore:jobs
+queue worker/queue:pubsub:jobs
+table table:audit_log
+table table:documents
+table table:orders
+table table:tenants
+table table:unknown
+table table:users
+# edges (149)
+calls catalog/function:app.get_order -> catalog/function:db.fetch_order [inferred]
+calls catalog/function:app.pay_order -> catalog/function:db.mark_paid [inferred]
+calls catalog/function:app.post_order -> catalog/function:db.create_order [inferred]
+calls catalog/function:app.post_order -> catalog/function:tasks.enqueue_ingest [inferred]
+calls catalog/function:app.remove_order -> catalog/function:db.cancel_order [inferred]
+calls storefront/function:loop.__main__ -> storefront/function:loop.run_forever_loop [inferred]
+calls storefront/function:loop.run_forever_loop -> storefront/function:client.list_orders [inferred]
+calls web/function:server.GET /rpc/tax -> web/function:sql.apply_order_tax [inferred]
+calls web/function:server.rpc -> web/function:sql.apply_order_tax [inferred]
+calls_http catalog/function:tasks.enqueue_ingest -> worker/entrypoint:firebase_http:POST:/ingest [inferred]
+calls_http storefront/function:client.create_order -> catalog/entrypoint:http:POST:/api/orders [inferred]
+calls_http storefront/function:client.list_orders -> catalog/entrypoint:http:GET:/api/orders [inferred]
+calls_http storefront/function:client.pay_order -> catalog/entrypoint:http:POST:/api/orders/{id}/pay [inferred]
+calls_http web/function:server.module -> catalog/entrypoint:http:POST:/api/orders [inferred]
+enqueues catalog/function:app.post_order -> catalog/queue:celery:tasks.refresh_orders [inferred]
+enqueues catalog/function:tasks.enqueue_ingest -> catalog/queue:cloud_tasks:ingest [inferred]
+enqueues storefront/function:client.publish_job -> storefront/queue:pubsub:jobs [inferred]
+reads catalog/entrypoint:http:DELETE:/api/orders/{id} -> table:orders [inferred]
+reads catalog/entrypoint:http:GET:/api/orders/{id} -> table:orders [inferred]
+reads catalog/entrypoint:http:GET:/v1/api/orders/{id} -> table:orders [inferred]
+reads catalog/entrypoint:http:POST:/api/orders/{id}/pay -> table:orders [inferred]
+reads catalog/function:app.get_order -> table:orders [inferred]
+reads catalog/function:app.pay_order -> table:orders [inferred]
+reads catalog/function:app.remove_order -> table:orders [inferred]
+reads catalog/function:db.cancel_order -> column:orders.id [exact]
+reads catalog/function:db.cancel_order -> table:unknown [unknown]
+reads catalog/function:db.create_order -> table:unknown [unknown]
+reads catalog/function:db.fetch_order -> column:orders.id [exact]
+reads catalog/function:db.fetch_order -> table:orders [inferred]
+reads catalog/function:db.list_open_orders -> column:orders.status [exact]
+reads catalog/function:db.list_open_orders -> table:orders [inferred]
+reads catalog/function:db.mark_paid -> column:orders.id [exact]
+reads catalog/function:db.mark_paid -> table:unknown [unknown]
+reads catalog/function:db.raw_totals -> column:orders.status [exact]
+reads catalog/function:db.raw_totals -> table:orders [inferred]
+reads catalog/function:sql.apply_order_tax -> column:orders.id [exact]
+reads catalog/function:sql.apply_order_tax -> column:orders.order_id [exact]
+reads storefront/function:client.local_open_orders -> column:orders.id [exact]
+reads storefront/function:client.local_open_orders -> column:orders.status [exact]
+reads storefront/function:client.local_open_orders -> table:orders [unknown]
+reads worker/entrypoint:job:main.sweep -> collection:jobs [inferred]
+reads worker/function:main.sweep -> collection:jobs [exact]
+triggers catalog/entrypoint:celery:tasks.refresh_orders -> catalog/function:tasks.refresh_orders [exact]
+triggers catalog/entrypoint:http:DELETE:/api/orders/{id} -> catalog/function:app.remove_order [exact]
+triggers catalog/entrypoint:http:GET:/api/orders -> catalog/function:app.list_orders [exact]
+triggers catalog/entrypoint:http:GET:/api/orders/{id} -> catalog/function:app.get_order [exact]
+triggers catalog/entrypoint:http:GET:/api{missing_paths.SECRET}/hidden -> catalog/function:app.hidden [unknown]
+triggers catalog/entrypoint:http:GET:/v1/api/orders -> catalog/function:app.list_orders [exact]
+triggers catalog/entrypoint:http:GET:/v1/api/orders/{id} -> catalog/function:app.get_order [exact]
+triggers catalog/entrypoint:http:GET:/v1/api{missing_paths.SECRET}/hidden -> catalog/function:app.hidden [unknown]
+triggers catalog/entrypoint:http:POST:/api/orders -> catalog/function:app.post_order [exact]
+triggers catalog/entrypoint:http:POST:/api/orders/{id}/pay -> catalog/function:app.pay_order [exact]
+triggers catalog/entrypoint:http:POST:/v1/api/orders -> catalog/function:app.post_order [exact]
+triggers catalog/queue:celery:tasks.refresh_orders -> catalog/entrypoint:celery:tasks.refresh_orders [inferred]
+triggers catalog/queue:celery:tasks.refresh_orders -> catalog/function:tasks.refresh_orders [exact]
+triggers catalog/queue:cloud_tasks:ingest -> worker/entrypoint:firebase_http:POST:/ingest [inferred]
+triggers db_trigger:trg_orders_audit -> catalog/function:sql.log_order_write [exact]
+triggers storefront/entrypoint:worker:loop.run_forever_loop -> storefront/function:loop.run_forever_loop [exact]
+triggers storefront/queue:pubsub:jobs -> worker/entrypoint:pubsub:jobs [inferred]
+triggers web/entrypoint:http:GET:/health -> web/function:server.GET /health [inferred]
+triggers web/entrypoint:http:GET:/rpc/tax -> web/function:server.GET /rpc/tax [inferred]
+triggers web/entrypoint:http:POST:/proxy/orders -> web/function:server.POST /proxy/orders [inferred]
+triggers worker/entrypoint:cloud_task:main.handle_task -> worker/entrypoint:firestore:jobs:created [inferred]
+triggers worker/entrypoint:cloud_task:main.handle_task -> worker/entrypoint:firestore:jobs:updated [inferred]
+triggers worker/entrypoint:cloud_task:main.handle_task -> worker/function:main.handle_task [exact]
+triggers worker/entrypoint:firebase_call:POST:/ping -> worker/function:main.ping [exact]
+triggers worker/entrypoint:firebase_http:POST:/ingest -> worker/entrypoint:firestore:jobs:created [inferred]
+triggers worker/entrypoint:firebase_http:POST:/ingest -> worker/entrypoint:firestore:jobs:updated [inferred]
+triggers worker/entrypoint:firebase_http:POST:/ingest -> worker/function:main.ingest [exact]
+triggers worker/entrypoint:firestore:jobs:created -> worker/function:main.on_job_created [exact]
+triggers worker/entrypoint:firestore:jobs:updated -> worker/function:main.on_job_updated [exact]
+triggers worker/entrypoint:job:main.sweep -> worker/function:main.sweep [exact]
+triggers worker/entrypoint:pubsub:jobs -> worker/entrypoint:firestore:jobs:created [inferred]
+triggers worker/entrypoint:pubsub:jobs -> worker/entrypoint:firestore:jobs:updated [inferred]
+triggers worker/entrypoint:pubsub:jobs -> worker/function:main.on_jobs_topic [exact]
+triggers worker/function:main.handle_task -> worker/entrypoint:firestore:jobs:created [inferred]
+triggers worker/function:main.handle_task -> worker/entrypoint:firestore:jobs:updated [inferred]
+triggers worker/function:main.ingest -> worker/entrypoint:firestore:jobs:created [inferred]
+triggers worker/function:main.ingest -> worker/entrypoint:firestore:jobs:updated [inferred]
+triggers worker/function:main.on_jobs_topic -> worker/entrypoint:firestore:jobs:created [inferred]
+triggers worker/function:main.on_jobs_topic -> worker/entrypoint:firestore:jobs:updated [inferred]
+triggers worker/queue:cloud_tasks:handle_task -> worker/entrypoint:cloud_task:main.handle_task [inferred]
+triggers worker/queue:cloud_tasks:handle_task -> worker/function:main.handle_task [exact]
+triggers worker/queue:firestore:jobs -> worker/entrypoint:firestore:jobs:created [inferred]
+triggers worker/queue:firestore:jobs -> worker/entrypoint:firestore:jobs:updated [inferred]
+triggers worker/queue:firestore:jobs -> worker/function:main.on_job_created [exact]
+triggers worker/queue:firestore:jobs -> worker/function:main.on_job_updated [exact]
+triggers worker/queue:pubsub:jobs -> worker/entrypoint:pubsub:jobs [inferred]
+triggers worker/queue:pubsub:jobs -> worker/function:main.on_jobs_topic [exact]
+writes catalog/entrypoint:http:DELETE:/api/orders/{id} -> column:audit_log.action [inferred]
+writes catalog/entrypoint:http:DELETE:/api/orders/{id} -> column:audit_log.order_id [inferred]
+writes catalog/entrypoint:http:DELETE:/api/orders/{id} -> table:orders [inferred]
+writes catalog/entrypoint:http:POST:/api/orders -> column:audit_log.action [inferred]
+writes catalog/entrypoint:http:POST:/api/orders -> column:audit_log.order_id [inferred]
+writes catalog/entrypoint:http:POST:/api/orders -> table:documents [inferred]
+writes catalog/entrypoint:http:POST:/api/orders -> table:orders [inferred]
+writes catalog/entrypoint:http:POST:/api/orders/{id}/pay -> column:audit_log.action [inferred]
+writes catalog/entrypoint:http:POST:/api/orders/{id}/pay -> column:audit_log.order_id [inferred]
+writes catalog/entrypoint:http:POST:/api/orders/{id}/pay -> table:orders [inferred]
+writes catalog/entrypoint:http:POST:/v1/api/orders -> column:audit_log.action [inferred]
+writes catalog/entrypoint:http:POST:/v1/api/orders -> column:audit_log.order_id [inferred]
+writes catalog/entrypoint:http:POST:/v1/api/orders -> table:documents [inferred]
+writes catalog/entrypoint:http:POST:/v1/api/orders -> table:orders [inferred]
+writes catalog/function:app.pay_order -> column:audit_log.action [inferred]
+writes catalog/function:app.pay_order -> column:audit_log.order_id [inferred]
+writes catalog/function:app.pay_order -> table:orders [inferred]
+writes catalog/function:app.post_order -> column:audit_log.action [inferred]
+writes catalog/function:app.post_order -> column:audit_log.order_id [inferred]
+writes catalog/function:app.post_order -> table:documents [inferred]
+writes catalog/function:app.post_order -> table:orders [inferred]
+writes catalog/function:app.remove_order -> column:audit_log.action [inferred]
+writes catalog/function:app.remove_order -> column:audit_log.order_id [inferred]
+writes catalog/function:app.remove_order -> table:orders [inferred]
+writes catalog/function:db.cancel_order -> column:audit_log.action [inferred]
+writes catalog/function:db.cancel_order -> column:audit_log.order_id [inferred]
+writes catalog/function:db.cancel_order -> table:orders [exact]
+writes catalog/function:db.create_order -> column:audit_log.action [inferred]
+writes catalog/function:db.create_order -> column:audit_log.order_id [inferred]
+writes catalog/function:db.create_order -> column:documents.body [exact]
+writes catalog/function:db.create_order -> column:documents.id [exact]
+writes catalog/function:db.create_order -> column:documents.order_id [exact]
+writes catalog/function:db.create_order -> column:orders.id [exact]
+writes catalog/function:db.create_order -> column:orders.status [exact]
+writes catalog/function:db.create_order -> column:orders.tenant_id [exact]
+writes catalog/function:db.create_order -> column:orders.user_id [exact]
+writes catalog/function:db.create_order -> table:documents [inferred]
+writes catalog/function:db.mark_paid -> column:audit_log.action [inferred]
+writes catalog/function:db.mark_paid -> column:audit_log.order_id [inferred]
+writes catalog/function:db.mark_paid -> column:orders.status [exact]
+writes catalog/function:db.mark_paid -> table:orders [inferred]
+writes catalog/function:sql.apply_order_tax -> column:audit_log.action [inferred]
+writes catalog/function:sql.apply_order_tax -> column:audit_log.order_id [inferred]
+writes catalog/function:sql.apply_order_tax -> column:orders.notes [exact]
+writes catalog/function:sql.log_order_write -> column:audit_log.action [exact]
+writes catalog/function:sql.log_order_write -> column:audit_log.order_id [exact]
+writes db_trigger:trg_orders_audit -> column:audit_log.action [exact]
+writes db_trigger:trg_orders_audit -> column:audit_log.order_id [exact]
+writes worker/entrypoint:cloud_task:main.handle_task -> collection:jobs [inferred]
+writes worker/entrypoint:firebase_http:POST:/ingest -> collection:jobs [inferred]
+writes worker/entrypoint:firestore:jobs:created -> collection:events [inferred]
+writes worker/entrypoint:firestore:jobs:created -> collection:notifications [inferred]
+writes worker/entrypoint:firestore:jobs:updated -> collection:notifications [inferred]
+writes worker/entrypoint:pubsub:jobs -> collection:jobs [inferred]
+writes worker/function:main.handle_task -> collection:jobs [exact]
+writes worker/function:main.ingest -> collection:jobs [exact]
+writes worker/function:main.on_job_created -> collection:events [exact]
+writes worker/function:main.on_job_created -> collection:notifications [exact]
+writes worker/function:main.on_job_updated -> collection:notifications [exact]
+writes worker/function:main.on_jobs_topic -> collection:jobs [exact]
+# unresolved_http (0)

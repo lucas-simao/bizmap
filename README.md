@@ -353,5 +353,11 @@ ruff check src tests
 pytest -q
 ```
 
+`tests/test_snapshots.py` keeps a golden, line-per-link summary of every
+example in `tests/snapshots/*.txt` and checks that each example scans to
+byte-identical JSON under several `PYTHONHASHSEED` values. When a detector
+change is intended, refresh with `BIZMAP_UPDATE_SNAPSHOTS=1 pytest
+tests/test_snapshots.py` and review the `+`/`-` diff in the PR.
+
 MIT licensed. Contributions that add YAML detector rules for new frameworks
 are especially welcome.

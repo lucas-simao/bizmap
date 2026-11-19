@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Golden snapshots** (`tests/snapshots/*.txt`, `bizmap.snapshot.summarize`):
+  one sorted line per node, edge (with confidence), and unresolved HTTP call
+  for every bundled example. Any link gained or lost shows up as a readable
+  diff in the PR. Refresh with `BIZMAP_UPDATE_SNAPSHOTS=1`.
+- **Determinism across hash seeds for every example** (not only a synthetic
+  fixture): `shop`, `clinic`, and the joint `pyplatform` scan must produce
+  byte-identical JSON under three `PYTHONHASHSEED` values.
+
 ## 0.2.9 — 2026-11-19
 
 Route-registration HTTP false positives, stable `unresolved_calls` labels,
