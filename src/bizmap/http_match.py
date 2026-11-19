@@ -295,7 +295,7 @@ def match_http(
     # scanned matches nothing (the call stays `target_not_scanned`) instead of
     # falling through to a same-path route in another repo.
     target_service: str | None = None
-    if route_repos and len({r for r in route_repos.values() if r}) > 1:
+    if route_repos and caller_repo and any(r and r != caller_repo for r in route_repos.values()):
         target_service = service_for_url(url, services or {})
     specific = max((literal_segment_count(c) for c in candidates), default=0) >= 2
     hits: list[str] = []
