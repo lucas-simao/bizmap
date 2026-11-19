@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`registry merge` ≠ joint scan (1 edge)**: `bizmap scan web` (one repo)
+  did not see the `services:` / `database:` declared in the workspace
+  `bizmap.yaml` that lists `repos: [web, api, billing]`, so per-repo graphs
+  lacked services and `{BILLING_URL}/invoices` stayed unresolved after merge.
+  A repo now inherits `services:` and `database:` from the nearest ancestor
+  `bizmap.yaml` whose `repos:` lists it (its own entries win). A CLI test
+  runs both paths on every multi-repo example and compares the full JSON.
+
 - **`report --redact` leaked schema names**: `via` values such as
   `db_trigger:<name>` were printed in clear. Every name from code or schema is
   now hashed (`db_trigger:h:…`); only counts, edge types, entrypoint kinds,
