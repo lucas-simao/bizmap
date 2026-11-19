@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **Route-literal uniqueness across services**: a literal that was unique
+  inside its own repo kept its `heuristic` edge after merge even when another
+  scanned service had the same path. Literal edges are now recomputed on the
+  merged graph and exist only when the path has exactly one owner among all
+  scanned services (otherwise `route_literal_skipped: ambiguous`).
+- **`--salt-file` permissions**: the salt file is created `0600`.
+
 - **TS path helpers on real code**: helpers that wrap the parameter
   (`` `/sites/${encodeURIComponent(id)}` ``) were rejected as impure, so no
   link appeared. `encodeURIComponent`, `encodeURI`, `String`, `Number`,

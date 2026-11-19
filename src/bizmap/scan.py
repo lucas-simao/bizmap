@@ -1269,6 +1269,16 @@ def _literal_covers(note_url: str, path: str) -> bool:
     return path_template_match(stripped, path) or suffix_template_match(stripped, path)
 
 
+def _drop_route_literal_edges(graph: Graph) -> None:
+    """Forget literal links from an earlier pass (e.g. one repo alone).
+
+    A literal unique within its own repo may be ambiguous across all scanned
+    services; the pass on the merged graph recomputes every literal link.
+    """
+    for eid in [e.id for e in graph.edges.values() if e.type == "calls_http" and e.attrs.get("via") == "route_literal"]:
+        del graph.edges[eid]
+
+
 def _link_route_literals(graph: Graph) -> None:
     """Link API-looking string literals to routes when the client was not traced.
 
@@ -1298,6 +1308,7 @@ def _link_route_literals(graph: Graph) -> None:
         ev = node.attrs.get("evidence") or {}
         ev_file = ev.get("file") if isinstance(ev, dict) else getattr(ev, "file", "")
         route_home[node.id] = (str(node.attrs.get("repo") or graph.repo or ""), str(ev_file or ""))
+    _drop_route_literal_edges(graph)
     if not routes:
         return
     existing: dict[str, set[str]] = defaultdict(set)
@@ -1738,6 +1749,7 @@ def relink_merged_graph(graph: Graph, services: dict[str, str] | None = None) ->
     """Re-run HTTP and queue matching on a (merged) graph using stored call info."""
     services = services or graph.attrs.get("services") or {}
     _warn_unscanned_services(graph, services)
+    _drop_route_literal_edges(graph)
     _relink_http_from_graph(graph, services)
     _link_route_literals(graph)
     _relink_queues_from_graph(graph, services)
