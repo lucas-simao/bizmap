@@ -26,6 +26,7 @@ from bizmap.graph import (
     view_id,
 )
 from bizmap.http_match import (
+    base_is_known,
     classify_unresolved_http,
     drop_leading_placeholders,
     match_http,
@@ -33,6 +34,7 @@ from bizmap.http_match import (
     path_template_match,
     path_without_placeholders,
     route_literal_hits,
+    service_for_url,
     strip_service_base,
     suffix_template_match,
     unresolved_http_keys,
@@ -1272,8 +1274,11 @@ def _link_route_literals(graph: Graph) -> None:
 
     Fallback for front-end clients built through factories / DI / wrappers the
     detectors cannot follow: a literal like ``/orders/${id}`` inside
-    ``loadOrder`` becomes ``calls_http`` (``inferred``, ``via: route_literal``)
-    to the *single* route it matches. Ambiguous literals link to nothing.
+    ``loadOrder`` becomes ``calls_http`` (``heuristic``, ``via: route_literal``)
+    to the *single* route it matches, only when the call's base is unknown.
+    A traced call with a known base (env var / absolute URL) is never
+    rerouted; ambiguous literals link to nothing. Both cases are recorded in
+    the function's ``route_literal_skipped`` with the discarded candidates.
     Literals never link to a route registered in the same file.
     """
     routes: list[tuple[str, str, str]] = []
@@ -1305,6 +1310,12 @@ def _link_route_literals(graph: Graph) -> None:
         if not literals:
             continue
         repo = str(node.attrs.get("repo") or graph.repo or "")
+        traced = [
+            str(item.get("url") or "")
+            for item in (node.attrs.get("http_calls") or [])
+            if isinstance(item, dict)
+        ]
+        skipped: list[dict] = []
         for lit in literals:
             path = str(lit.get("path") or "")
             ev_raw = lit.get("evidence") or {}
@@ -1315,21 +1326,47 @@ def _link_route_literals(graph: Graph) -> None:
                 if route_home.get(eid) != (repo, lit_file)
                 and not (lit.get("same_repo") and route_home.get(eid, ("", ""))[0] != repo)
             ]
+            if not hits:
+                continue
+            # A traced client call for this path with a concrete base (env var
+            # or absolute URL) already says where it goes: matched, or
+            # `target_not_scanned`. The literal must not reroute it.
+            known = sorted({u for u in traced if base_is_known(u) and _literal_covers(u, path)})
+            if known:
+                skipped.append(
+                    {
+                        "path": path,
+                        "reason": "base_known",
+                        "base": known[0],
+                        "service": service_for_url(known[0], graph.attrs.get("services") or {}),
+                        "discarded": sorted(hits),
+                    }
+                )
+                continue
             if len(hits) != 1:
+                skipped.append({"path": path, "reason": "ambiguous", "discarded": sorted(hits)})
                 continue
             target = hits[0]
             covered[node.id].append(path)
             if target in existing[node.id]:
                 continue
+            rpath = next((p for eid, _m, p in routes if eid == target), "")
             graph.add_edge(
                 "calls_http",
                 node.id,
                 target,
-                confidence=Confidence.INFERRED,
+                confidence=Confidence.HEURISTIC,
                 evidence=Evidence.from_dict(ev_raw),
                 via="route_literal",
+                match="full" if path_template_match(rpath, path) else "suffix",
             )
             existing[node.id].add(target)
+        if skipped:
+            node.attrs["route_literal_skipped"] = [
+                {k: v for k, v in item.items() if v not in (None, "", [])} for item in skipped
+            ]
+        else:
+            node.attrs.pop("route_literal_skipped", None)
     if not covered:
         return
     for fid, paths in covered.items():
@@ -1436,17 +1473,21 @@ def _link_http(
             continue
         keys = unresolved_http_keys(url)
         reason = classify_unresolved_http(url, client_unknown=client_unknown)
+        service = service_for_url(url, services)
         node = graph.get(fid)
         if node is not None:
             notes = list(node.attrs.get("unresolved_http") or [])
             note = {"url": url, "method": method, "keys": keys, "reason": reason}
+            if service:
+                note["service"] = service
             if note not in notes:
                 notes.append(note)
             node.attrs["unresolved_http"] = notes
             node.attrs.setdefault("unresolved", True)
-        unmatched.append(
-            {"url": url, "method": method, "keys": keys, "from": fid, "reason": reason}
-        )
+        item = {"url": url, "method": method, "keys": keys, "from": fid, "reason": reason}
+        if service:
+            item["service"] = service
+        unmatched.append(item)
     graph.attrs["unresolved_http"] = unmatched
     return unmatched
 
@@ -1758,12 +1799,16 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
             reason = classify_unresolved_http(
                 url, client_unknown=bool(item.get("client_unknown"))
             )
+            service = service_for_url(url, services)
             note = {"url": url, "method": method, "keys": keys, "reason": reason}
+            if service:
+                note["service"] = service
             if note not in still:
                 still.append(note)
-            unmatched.append(
-                {"url": url, "method": method, "keys": keys, "from": node.id, "reason": reason}
-            )
+            summary = {"url": url, "method": method, "keys": keys, "from": node.id, "reason": reason}
+            if service:
+                summary["service"] = service
+            unmatched.append(summary)
         if still:
             node.attrs["unresolved_http"] = still
             node.attrs.setdefault("unresolved", True)

@@ -98,7 +98,7 @@ def _rollup_edges(graph: Graph) -> dict[tuple[str, str, str], str]:
 
     def keep(ep: str, kind: str, table: str, conf: str) -> None:
         key = (ep, kind, table)
-        rank = {"exact": 3, "inferred": 2, "unknown": 1}
+        rank = {"exact": 4, "inferred": 3, "heuristic": 2, "unknown": 1}
         prev = rolled.get(key)
         if prev is None or rank.get(conf, 0) > rank.get(prev, 0):
             rolled[key] = conf

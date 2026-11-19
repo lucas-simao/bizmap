@@ -223,7 +223,7 @@ def format_why(graph: Graph, table_dot_column: str) -> str:
             return
         edges = sorted(
             edges,
-            key=lambda e: ({"exact": 0, "inferred": 1, "unknown": 2}[e.confidence.value], e.from_id),
+            key=lambda e: ({"exact": 0, "inferred": 1, "heuristic": 2, "unknown": 3}[e.confidence.value], e.from_id),
         )
         for edge in edges:
             src = graph.get(edge.from_id)

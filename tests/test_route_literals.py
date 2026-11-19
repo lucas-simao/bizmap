@@ -12,7 +12,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from bizmap.graph import function_id
-from bizmap.http_match import route_literal_hits, suffix_template_match
+from bizmap.http_match import (
+    base_is_known,
+    route_literal_hits,
+    service_for_url,
+    suffix_template_match,
+)
 from bizmap.scan import scan_path, scan_paths
 
 
@@ -101,8 +106,9 @@ export async function cancelOrder(id: string) {
         for e in graph.edges.values()
         if e.type == "calls_http" and e.from_id.endswith(function_id("src.orders.loadOrder"))
     )
-    assert edge.confidence.value == "inferred"
+    assert edge.confidence.value == "heuristic"
     assert edge.attrs.get("via") == "route_literal"
+    assert edge.attrs.get("match") == "suffix"
     assert edge.evidence is not None and edge.evidence.file == "src/orders.ts"
 
 
@@ -260,3 +266,124 @@ export async function loadAll() {
     )
     graph = scan_paths([web, api])
     assert _calls_http_from(graph, function_id("src.bare.loadAll")) == set()
+
+
+def test_known_base_to_unscanned_service_never_reroutes(tmp_path: Path) -> None:
+    """web → `api` (VITE_API_URL, not scanned); `billing` has the same path.
+
+    Neither the traced client nor the literal fallback may link web → billing;
+    the call stays `target_not_scanned` for service `api`, and the discarded
+    billing route is recorded for audit.
+    """
+    web = tmp_path / "web"
+    billing = tmp_path / "billing"
+    _write(
+        tmp_path,
+        "bizmap.yaml",
+        """
+services:
+  api:
+    url: http://api.internal
+    env: VITE_API_URL
+  billing:
+    url: http://billing.internal
+    env: BILLING_URL
+""",
+    )
+    _write(
+        web,
+        "src/http.ts",
+        """
+import axios from 'axios';
+export const api = axios.create({ baseURL: import.meta.env.VITE_API_URL });
+""",
+    )
+    _write(
+        web,
+        "src/items.ts",
+        """
+import { api } from './http';
+
+export async function loadItem(id: string) {
+  return api.get(`/api/v1/items/${id}`);
+}
+""",
+    )
+    _write(
+        billing,
+        "app.py",
+        """
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/api/v1/items/{item_id}")
+def get_item(item_id: str):
+    return {}
+""",
+    )
+    graph = scan_paths([web, billing], config=tmp_path / "bizmap.yaml")
+    fn = function_id("src.items.loadItem")
+    assert _calls_http_from(graph, fn) == set()
+    unresolved = [
+        u for u in graph.attrs.get("unresolved_http") or [] if str(u.get("from", "")).endswith(fn)
+    ]
+    assert len(unresolved) == 1, unresolved
+    assert unresolved[0]["reason"] == "target_not_scanned"
+    assert unresolved[0].get("service") == "api"
+    node = next(n for n in graph.nodes.values() if n.id.endswith(fn))
+    skipped = node.attrs.get("route_literal_skipped") or []
+    assert skipped and skipped[0]["reason"] == "base_known", skipped
+    assert skipped[0]["discarded"] == ["billing/entrypoint:http:GET:/api/v1/items/{item_id}"]
+
+
+def test_known_base_to_scanned_service_links_only_there(tmp_path: Path) -> None:
+    """Same path in two scanned repos: the env-mapped service wins, exactly once."""
+    web = tmp_path / "web"
+    api = tmp_path / "api"
+    billing = tmp_path / "billing"
+    _write(tmp_path, "bizmap.yaml", "services:\n  api:\n    env: VITE_API_URL\n")
+    _write(
+        web,
+        "src/items.ts",
+        """
+import axios from 'axios';
+const api = axios.create({ baseURL: import.meta.env.VITE_API_URL });
+
+export async function loadItem(id: string) {
+  return api.get(`/api/v1/items/${id}`);
+}
+""",
+    )
+    route = """
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/api/v1/items/{item_id}")
+def get_item(item_id: str):
+    return {}
+"""
+    _write(api, "app.py", route)
+    _write(billing, "app.py", route)
+    graph = scan_paths([web, api, billing], config=tmp_path / "bizmap.yaml")
+    hits = _calls_http_from(graph, function_id("src.items.loadItem"))
+    assert hits == {"api/entrypoint:http:GET:/api/v1/items/{item_id}"}, hits
+
+
+def test_service_helpers() -> None:
+    services = {
+        "api": {"url": "http://api.internal", "env": ["VITE_API_URL"]},
+        "pay": {"env": "PAY_URL", "repo": "billing"},
+    }
+    assert service_for_url("{VITE_API_URL}/x", services) == "api"
+    assert service_for_url("http://api.internal/x", services) == "api"
+    assert service_for_url("{PAY_URL}/charge", services) == "billing"
+    assert service_for_url("{base}/x", services) is None
+    assert base_is_known("{VITE_API_URL}/x")
+    assert base_is_known("https://h/x")
+    assert not base_is_known("{base}/x")
+    assert not base_is_known("{window.__CONFIG__.apiBase}/x")
+    assert not base_is_known("/x")

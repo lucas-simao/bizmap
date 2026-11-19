@@ -224,6 +224,49 @@ def is_relative_client_url(url: str | None) -> bool:
     return raw.startswith("/")
 
 
+_LEADING_HOLE = re.compile(r"^\{([^{}]+)\}")
+
+
+def service_for_url(url: str, services: dict[str, Any] | None) -> str | None:
+    """Name of the ``services:`` entry a client URL points at, if any.
+
+    Matched by env placeholder (``{BILLING_URL}/x``), host, or URL prefix.
+    The entry's ``repo:`` wins over its key, so ``services: {pay: {repo:
+    billing}}`` names the scanned repo ``billing``.
+    """
+    if not url or not services:
+        return None
+    raw = url.strip()
+    m = _LEADING_HOLE.match(raw)
+    hole = m.group(1).strip() if m else ""
+    hole_leaf = hole.split(".")[-1] if hole else ""
+    host = urlparse(raw).netloc.split("@")[-1].lower() if "://" in raw else ""
+    for name, spec in services.items():
+        svc_url, envs, hosts = _service_fields(str(name), spec)
+        target = str(spec.get("repo") or name) if isinstance(spec, dict) else str(name)
+        if hole and (hole in envs or hole_leaf in envs):
+            return target
+        if host and host in {h.lower() for h in hosts}:
+            return target
+        if svc_url and "://" in svc_url and raw.lower().startswith(svc_url.lower().rstrip("/")):
+            return target
+    return None
+
+
+def base_is_known(url: str) -> bool:
+    """True when the client URL carries a concrete origin: an absolute URL or
+    an env-var placeholder (``{VITE_API_URL}/x``). Lower-case holes such as
+    ``{base}`` / ``{client}`` and bare paths are unknown bases."""
+    raw = (url or "").strip()
+    if "://" in raw:
+        return True
+    m = _LEADING_HOLE.match(raw)
+    if not m:
+        return False
+    leaf = m.group(1).strip().split(".")[-1]
+    return bool(_ENV_LIKE_NAME.match(leaf))
+
+
 def match_http(
     method: str,
     url: str,
@@ -247,11 +290,21 @@ def match_http(
         return []
     relative = is_relative_client_url(url)
     service_hit = _service_prefix_hit(url, services or {})
+    # When the base names a declared service and the graph spans several
+    # repos, only that service's routes may match. A service that was not
+    # scanned matches nothing (the call stays `target_not_scanned`) instead of
+    # falling through to a same-path route in another repo.
+    target_service: str | None = None
+    if route_repos and len({r for r in route_repos.values() if r}) > 1:
+        target_service = service_for_url(url, services or {})
     specific = max((literal_segment_count(c) for c in candidates), default=0) >= 2
     hits: list[str] = []
     for eid, rmethod, rpath in routes:
         if rmethod.upper() != method_u:
             continue
+        if target_service is not None and route_repos is not None:
+            if (route_repos.get(eid) or "") != target_service:
+                continue
         if caller_repo and route_repos:
             rrepo = route_repos.get(eid)
             if rrepo and rrepo != caller_repo:
