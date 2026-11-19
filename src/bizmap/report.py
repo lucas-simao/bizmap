@@ -144,9 +144,9 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
     call_reasons: Counter[str] = Counter()
     for n in nodes.values():
         names = n.get("unresolved_calls") or []
-        reasons = n.get("unresolved_call_reasons") or {}
+        why_not = n.get("unresolved_call_reasons") or {}
         for name in names:
-            call_reasons[str(reasons.get(name) or "no_scanned_implementer")] += 1
+            call_reasons[str(why_not.get(name) or "no_scanned_implementer")] += 1
     total_entry = len(entrypoints)
     total_reach = sum(reaching.values())
     unknown_only = sum(1 for n in entrypoints if not reach[n["id"]] and n["id"] in unknown_reach)
