@@ -1111,6 +1111,24 @@ def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
                 confidence=access.confidence,
                 evidence=Evidence(file=site.file, line=site.line, symbol=site.symbol),
             )
+            for caller in {site.symbol, *_callers_of(site.symbol, reverse)}:
+                if caller != site.symbol:
+                    graph.add_edge(
+                        _kind_edge(access.kind),
+                        function_id(caller),
+                        target,
+                        confidence=Confidence.INFERRED,
+                    )
+                for node in graph.nodes.values():
+                    if node.type != "entrypoint":
+                        continue
+                    if node.attrs.get("symbol") == caller:
+                        graph.add_edge(
+                            _kind_edge(access.kind),
+                            node.id,
+                            target,
+                            confidence=Confidence.INFERRED,
+                        )
     for acc in analysis.table_accesses:
         fid = function_id(acc.symbol)
         graph.add_node(
@@ -1139,11 +1157,41 @@ def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
         )
 
 
+def _stash_http_call(
+    graph: Graph,
+    fid: str,
+    method: str,
+    url: str,
+    evidence: dict,
+    *,
+    name: str,
+    language: str,
+) -> None:
+    node = graph.get(fid)
+    if node is None:
+        graph.add_node(
+            fid,
+            "function",
+            name=name,
+            language=language,
+            evidence=evidence,
+        )
+        node = graph.get(fid)
+    if node is None:
+        return
+    bucket = list(node.attrs.get("http_calls") or [])
+    item = {"method": method, "url": url, "evidence": evidence}
+    if item not in bucket:
+        bucket.append(item)
+    node.attrs["http_calls"] = bucket
+
+
 def _link_http(
     graph: Graph,
     py: PyAnalysis | None,
     js: JsAnalysis | None,
     services: dict[str, str],
+    go: GoAnalysis | None = None,
 ) -> list[dict]:
     """Match HTTP client calls to routes. Return unmatched calls for the scan summary."""
     routes: list[tuple[str, str, str]] = []
@@ -1172,6 +1220,17 @@ def _link_http(
         for c in js.http_calls:
             ev = Evidence(file=c.file, line=c.line, symbol=c.symbol)
             calls.append((function_id(c.symbol), c.method, c.url, ev, Confidence.INFERRED))
+    if go:
+        for c in getattr(go, "http_calls", None) or []:
+            calls.append(
+                (
+                    function_id(c.function.qualname),
+                    c.method,
+                    c.url,
+                    c.evidence,
+                    Confidence.INFERRED,
+                )
+            )
     unmatched: list[dict] = []
     for fid, method, url, ev, conf in calls:
         hits = match_http(method, url, routes, services)
@@ -1380,7 +1439,7 @@ def scan_paths(
     services: dict[str, str] = {}
     for root in roots:
         root = root.resolve()
-        cfg = load_scan_config(root, config=config)
+        cfg = _config_for_root(root, config=config, shared_name=False)
         services.update(cfg.services)
         graphs.append(
             _scan_one(
@@ -1397,26 +1456,58 @@ def scan_paths(
     parent_cfg = load_scan_config(roots[0].parent if roots else Path("."), config=config)
     services.update(parent_cfg.services)
     merged.attrs["services"] = services
-    _relink_http_from_graph(merged, services)
+    _relink_from_graph(merged, services)
     if profile:
         sys.stderr.write(f"bizmap profile: merged {len(roots)} repos nodes={len(merged.nodes)}\n")
         sys.stderr.flush()
     return merged
 
 
+def _config_for_root(
+    root: Path, *, config: Path | None, shared_name: bool
+) -> ScanConfig:
+    """Load scan config, keeping each repo's own name on multi-root scans."""
+    local = load_scan_config(root, config=None)
+    cfg = load_scan_config(root, config=config)
+    if config is None or shared_name:
+        if not cfg.name:
+            cfg.name = root.name
+        return cfg
+    name = local.name or root.name
+    services = dict(cfg.services)
+    services.update(local.services)
+    exclude = list(dict.fromkeys([*cfg.exclude, *local.exclude]))
+    raw = dict(cfg.raw or {})
+    raw.update(local.raw or {})
+    return ScanConfig(
+        exclude=exclude,
+        expand_star=bool(cfg.expand_star or local.expand_star),
+        path=local.path or cfg.path,
+        raw=raw,
+        name=name,
+        database=local.database or cfg.database,
+        services=services,
+        repos=local.repos or cfg.repos,
+    )
+
+
+def relink_merged_graph(graph: Graph, services: dict[str, str] | None = None) -> None:
+    """Re-run HTTP and queue matching on a (merged) graph using stored call info."""
+    services = services or graph.attrs.get("services") or {}
+    _relink_http_from_graph(graph, services)
+    _relink_queues_from_graph(graph, services)
+
+
+def _relink_from_graph(graph: Graph, services: dict[str, str] | None = None) -> None:
+    relink_merged_graph(graph, services)
+
+
 def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
-    """Match functions that already have no calls_http using stored http path attrs.
+    """Match stored ``http_calls`` against every scanned route in the graph.
 
     Intra-repo linking happens in `_scan_one`. After merge, qualify_graph rewrites
-    ids; existing calls_http edges are preserved. This pass matches any
-    `http_call` attrs left on functions (none today) and is a no-op besides
-    matching calls_http targets that were intra-repo-only when a service base
-    now maps onto another repo's route — handled by scanning `calls_http`
-    evidence URLs is not stored. Instead, re-match using entrypoint paths vs
-    edges already present is sufficient when each scan recorded calls_http
-    against local routes only.
-
-    Cross-repo: look at function nodes with attr `http_calls` if present.
+    ids; this pass re-matches using each function's ``http_calls`` /
+    ``unresolved_http`` so cross-repo ``calls_http`` edges match a joint scan.
     """
     routes = [
         (n.id, str(n.attrs.get("method") or ""), str(n.attrs.get("path") or ""))
@@ -1428,12 +1519,17 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
     ]
     unmatched: list[dict] = []
     for node in graph.nodes.values():
-        pending = node.attrs.get("http_calls") or []
+        pending = list(node.attrs.get("http_calls") or [])
         if not pending:
-            continue
+            for note in node.attrs.get("unresolved_http") or []:
+                if isinstance(note, dict) and note.get("url"):
+                    pending.append(note)
+        still: list[dict] = []
         for item in pending:
             method = str(item.get("method") or "GET")
             url = str(item.get("url") or "")
+            if not url:
+                continue
             ev = Evidence.from_dict(item.get("evidence")) if item.get("evidence") else None
             hits = match_http(method, url, routes, services)
             if hits:
@@ -1443,11 +1539,54 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
                     )
                 continue
             keys = unresolved_http_keys(url)
-            if keys:
-                unmatched.append(
-                    {"url": url, "method": method, "keys": keys, "from": node.id}
-                )
+            note = {"url": url, "method": method, "keys": keys}
+            if note not in still:
+                still.append(note)
+            unmatched.append({"url": url, "method": method, "keys": keys, "from": node.id})
+        if still:
+            node.attrs["unresolved_http"] = still
+            node.attrs.setdefault("unresolved", True)
+        elif "unresolved_http" in node.attrs:
+            node.attrs["unresolved_http"] = []
     graph.attrs["unresolved_http"] = unmatched
+
+
+def _relink_queues_from_graph(graph: Graph, services: dict[str, str]) -> None:
+    """Re-match Cloud Tasks / Pub/Sub producers to consumer entrypoints after merge."""
+    hints = _queue_hints(graph.attrs.get("queues") or {})
+    for node in graph.nodes.values():
+        for ev in node.attrs.get("queue_events") or []:
+            if str(ev.get("role") or "") != "produce":
+                continue
+            kind = str(ev.get("kind") or ev.get("queue_kind") or "")
+            if kind not in {"cloud_tasks", "pubsub"}:
+                continue
+            url = ev.get("http_url") or ev.get("url")
+            topic = ev.get("name") if kind == "pubsub" else ev.get("name")
+            consumers = _match_queue_consumer(
+                graph,
+                url=url,
+                topic=topic,
+                kind=kind,
+                services=services,
+                hints=hints,
+            )
+            produce_qid = None
+            for edge in graph.outgoing(node.id, "enqueues"):
+                produce_qid = edge.to_id
+                break
+            if produce_qid is None:
+                produce_qid = queue_id(kind, str(ev.get("name") or "queue"))
+                graph.add_node(produce_qid, "queue", kind=kind, name=ev.get("name"))
+            evidence = Evidence.from_dict(ev.get("evidence")) if ev.get("evidence") else None
+            for eid in consumers:
+                graph.add_edge(
+                    "triggers",
+                    produce_qid,
+                    eid,
+                    confidence=Confidence.INFERRED,
+                    evidence=evidence,
+                )
 
 
 def _scan_one(
@@ -1473,6 +1612,7 @@ def _scan_one(
     graph.attrs["repo"] = graph.repo
     graph.attrs["database"] = graph.database
     graph.attrs["services"] = cfg.services
+    graph.attrs["queues"] = (cfg.raw or {}).get("queues") or {}
     graph.version = GRAPH_VERSION
 
     t0 = time.perf_counter()
@@ -1499,46 +1639,56 @@ def _scan_one(
     t_prop = time.perf_counter()
     _apply_sql_functions(graph, schema)
     _apply_db_triggers(graph, schema)
-    _link_http(graph, py_analysis, js_analysis, cfg.services)
+    _link_http(graph, py_analysis, js_analysis, cfg.services, go=go_analysis)
     _link_queue_consumers(graph, py_analysis, cfg)
     # stash client calls on function nodes so merge can re-match cross-repo
     for call in py_analysis.http_calls:
-        fid = function_id(call.function.qualname)
-        node = graph.get(fid)
-        if node is None:
-            continue
-        bucket = list(node.attrs.get("http_calls") or [])
-        bucket.append(
-            {
-                "method": call.method,
-                "url": call.url,
-                "evidence": call.evidence.to_dict(),
-            }
+        _stash_http_call(
+            graph,
+            function_id(call.function.qualname),
+            call.method,
+            call.url,
+            call.evidence.to_dict(),
+            name=call.function.qualname,
+            language="python",
         )
-        node.attrs["http_calls"] = bucket
     for call in js_analysis.http_calls:
-        fid = function_id(call.symbol)
+        _stash_http_call(
+            graph,
+            function_id(call.symbol),
+            call.method,
+            call.url,
+            {"file": call.file, "line": call.line, "symbol": call.symbol},
+            name=call.symbol,
+            language="javascript",
+        )
+    for call in getattr(go_analysis, "http_calls", None) or []:
+        _stash_http_call(
+            graph,
+            function_id(call.function.qualname),
+            call.method,
+            call.url,
+            call.evidence.to_dict(),
+            name=call.function.qualname,
+            language="go",
+        )
+    for ev in py_analysis.queue_events:
+        fid = function_id(ev.function.qualname)
         node = graph.get(fid)
         if node is None:
-            graph.add_node(
-                fid,
-                "function",
-                name=call.symbol,
-                language="javascript",
-                evidence={"file": call.file, "line": call.line, "symbol": call.symbol},
-            )
-            node = graph.get(fid)
-        if node is None:
             continue
-        bucket = list(node.attrs.get("http_calls") or [])
+        bucket = list(node.attrs.get("queue_events") or [])
         bucket.append(
             {
-                "method": call.method,
-                "url": call.url,
-                "evidence": {"file": call.file, "line": call.line, "symbol": call.symbol},
+                "kind": ev.queue_kind,
+                "name": ev.name,
+                "role": ev.role,
+                "http_url": ev.http_url,
+                "http_method": ev.http_method,
+                "evidence": ev.evidence.to_dict(),
             }
         )
-        node.attrs["http_calls"] = bucket
+        node.attrs["queue_events"] = bucket
     _link_firestore_triggers(graph)
     if cfg.path:
         apply_overrides(graph, cfg.path)

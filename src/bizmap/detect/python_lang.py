@@ -39,6 +39,7 @@ from bizmap.sql_analyze import looks_like_sql
 _PY_LANGUAGE = Language(tspy.language())
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
+APP_CTORS = {"FastAPI", "Flask", "APIRouter", "Blueprint", "Quart", "Sanic", "Starlette"}
 FIRESTORE_DOC_EVENTS = {
     "on_document_created": "created",
     "on_document_updated": "updated",
@@ -426,6 +427,8 @@ class PythonAnalyzer:
                         prefix = resolve(pos[2]).path_text
                     if lname:
                         blueprints[lname] = prefix
+                elif callee in APP_CTORS and lname:
+                    routers[lname] = ""
             if node.type == "call" and call_callee_name(node) == "include_router":
                 pos = call_posargs(node)
                 kw = call_kwargs(node)
@@ -633,12 +636,14 @@ class PythonAnalyzer:
 
         # Flask @bp.route / @app.route
         if method_l == "route" and call is not None:
+            if receiver not in routers and receiver not in blueprints:
+                return
             pos = call_posargs(call)
             kw = call_kwargs(call)
             path_node = pos[0] if pos else kw.get("rule")
             path_res = resolve(path_node) if path_node is not None else ResolvedString("", True, False)
             methods = _list_string_items(kw.get("methods")) or ["GET"]
-            prefix = blueprints.get(receiver, "")
+            prefix = blueprints.get(receiver) or routers.get(receiver, "")
             full = join_route_path(prefix, path_res.path_text)
             unresolved = path_res.unresolved or ("{" in prefix and not prefix.startswith("/{"))
             for m in methods:
@@ -654,10 +659,12 @@ class PythonAnalyzer:
                 )
             return
 
-        # FastAPI @app.get / @router.post
+        # FastAPI @app.get / @router.post — only on a known app/router/blueprint
         if method_l in http_deco and call is not None:
+            if receiver not in routers and receiver not in blueprints:
+                return
             if self._fastapi and not import_matches(imap.raw, self._fastapi.when):
-                # still allow if receiver looks like app/router
+                # still allow if receiver is a collected app/router
                 pass
             pos = call_posargs(call)
             path_idx = 0
@@ -1512,6 +1519,44 @@ def _class_field_names(class_node: Node) -> list[str]:
     return names
 
 
+def _ann_is_callable(ann: Node | None) -> bool:
+    if ann is None:
+        return False
+    raw = text(ann)
+    return "Callable" in raw or raw in {"callable", "FunctionType"}
+
+
+def _class_callable_fields(class_node: Node) -> set[str]:
+    """Dataclass / annotated fields whose type is Callable."""
+    body = class_node.child_by_field_name("body")
+    if body is None:
+        return set()
+    names: set[str] = set()
+    for stmt in body.named_children:
+        assign = None
+        if stmt.type == "expression_statement" and stmt.named_children:
+            inner = stmt.named_children[0]
+            if inner.type == "assignment":
+                assign = inner
+        if assign is None:
+            continue
+        left = assign.child_by_field_name("left")
+        lname = text(left) if left is not None and left.type == "identifier" else ""
+        if not lname or lname.startswith("_"):
+            continue
+        typ = assign.child_by_field_name("type")
+        if typ is None:
+            for child in assign.named_children:
+                if child is left:
+                    continue
+                if child.type in {"type", "identifier", "subscript", "attribute"}:
+                    typ = child
+                    break
+        if _ann_is_callable(typ):
+            names.add(lname)
+    return names
+
+
 def _fn_by_name(analysis: PyAnalysis) -> dict[str, list[PyFunction]]:
     by_name: dict[str, list[PyFunction]] = {}
     for fn in analysis.functions.values():
@@ -1535,6 +1580,7 @@ def _resolve_callable_injection(analysis: PyAnalysis) -> None:
     param_of: dict[str, list[str]] = {}
     class_fields: dict[str, list[str]] = {}
     class_nodes: dict[str, Node] = {}
+    callable_fields: dict[str, set[str]] = {}
     seen_files: set[str] = set()
     for fn in analysis.functions.values():
         param_of[fn.qualname] = _param_names(fn.node)
@@ -1545,6 +1591,7 @@ def _resolve_callable_injection(analysis: PyAnalysis) -> None:
                 if cname and cname not in class_fields:
                     class_fields[cname] = _class_field_names(cur)
                     class_nodes[cname] = cur
+                    callable_fields[cname] = _class_callable_fields(cur)
                 break
             cur = cur.parent
         if fn.file in seen_files:
@@ -1560,6 +1607,7 @@ def _resolve_callable_injection(analysis: PyAnalysis) -> None:
             if cname and cname not in class_fields:
                 class_fields[cname] = _class_field_names(node)
                 class_nodes[cname] = node
+                callable_fields[cname] = _class_callable_fields(node)
 
     # (caller, callee, param_index_or_name, target_qualname)
     passed: list[tuple[str, str, str, str]] = []
@@ -1628,9 +1676,21 @@ def _resolve_callable_injection(analysis: PyAnalysis) -> None:
     for cls, field_name, target in ctor_fields:
         field_targets.setdefault((cls, field_name), set()).add(target)
 
+    init_maps: dict[str, dict[str, str]] = {
+        cname: _init_self_fields(node) for cname, node in class_nodes.items()
+    }
+    param_ann: dict[str, dict[str, str]] = {
+        fn.qualname: _param_annotations(fn.node) for fn in analysis.functions.values()
+    }
+
+    def link_unique(field_name: str) -> str | None:
+        hit = _unique_fn(by_name.get(field_name) or [])
+        return hit.qualname if hit else None
+
     new_calls: list[tuple[str, str, Evidence, Confidence]] = []
     for fn in analysis.functions.values():
         params = set(param_of.get(fn.qualname) or [])
+        anns = param_ann.get(fn.qualname) or {}
         for node in walk(fn.node):
             if node.type != "call":
                 continue
@@ -1649,30 +1709,51 @@ def _resolve_callable_injection(analysis: PyAnalysis) -> None:
                         if (fn.qualname, target) not in existing:
                             new_calls.append((fn.qualname, target, evidence, Confidence.INFERRED))
                             existing.add((fn.qualname, target))
+                    uniq = link_unique(name)
+                    if uniq and (fn.qualname, uniq) not in existing:
+                        new_calls.append((fn.qualname, uniq, evidence, Confidence.INFERRED))
+                        existing.add((fn.qualname, uniq))
             # obj.field() dataclass / injected field
             if func is not None and func.type == "attribute" and func.named_children:
                 field = method
                 obj = func.named_children[0]
                 obj_name = text(obj) if obj.type == "identifier" else ""
+                targets: set[str] = set()
                 if obj_name == "self" and fn.class_name:
-                    for target in field_targets.get((fn.class_name, field), ()):
-                        if (fn.qualname, target) not in existing:
-                            new_calls.append((fn.qualname, target, evidence, Confidence.INFERRED))
-                            existing.add((fn.qualname, target))
-                if obj_name in params:
-                    # svc.save() — svc is a param filled with Class(save=fn)
-                    for (_cls, fld), targets in field_targets.items():
+                    targets.update(field_targets.get((fn.class_name, field), ()))
+                    param = (init_maps.get(fn.class_name) or {}).get(field)
+                    if param:
+                        targets.update(param_targets.get((fn.qualname, param), ()))
+                        uniq = link_unique(param)
+                        if uniq:
+                            targets.add(uniq)
+                    if field in (callable_fields.get(fn.class_name) or set()):
+                        uniq = link_unique(field)
+                        if uniq:
+                            targets.add(uniq)
+                    uniq = link_unique(field)
+                    if uniq:
+                        targets.add(uniq)
+                if obj_name in params or obj_name in anns:
+                    # svc.save() / deps.run_query() — injected field on a typed param
+                    for (_cls, fld), fld_targets in field_targets.items():
                         if fld != field:
                             continue
-                        for target in targets:
-                            if (fn.qualname, target) not in existing:
-                                new_calls.append(
-                                    (fn.qualname, target, evidence, Confidence.INFERRED)
-                                )
-                                existing.add((fn.qualname, target))
-                    for target in param_targets.get((fn.qualname, obj_name), ()):
-                        # param itself is a class instance; field call already handled
-                        _ = target
+                        targets.update(fld_targets)
+                    typ = anns.get(obj_name)
+                    known_fields = set(callable_fields.get(typ) or ())
+                    known_fields.update(class_fields.get(typ) or ())
+                    if not typ:
+                        for fields in callable_fields.values():
+                            known_fields.update(fields)
+                    if field in known_fields or typ in class_fields or typ in callable_fields:
+                        uniq = link_unique(field)
+                        if uniq:
+                            targets.add(uniq)
+                for target in targets:
+                    if (fn.qualname, target) not in existing:
+                        new_calls.append((fn.qualname, target, evidence, Confidence.INFERRED))
+                        existing.add((fn.qualname, target))
     analysis.calls.extend(new_calls)
 
 

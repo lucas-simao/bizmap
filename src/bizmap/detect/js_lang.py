@@ -29,13 +29,22 @@ except Exception:  # pragma: no cover - optional dep
     _TSX_LANGUAGE = None
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "all", "use"}
+ROUTE_HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "all"}
+CLIENT_HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 ROUTER_FACTORIES = {"express", "Router", "fastify", "Fastify", "Hono", "Koa", "createApp"}
 ROUTER_CTORS = {"Hono", "Koa", "Express"}
-CLIENT_LIBS = {"axios", "fetch", "got", "ky", "superagent", "http", "https", "request"}
+CLIENT_LIBS = {"axios", "fetch", "got", "ky", "ofetch", "superagent", "http", "https", "request"}
+CLIENT_CREATE_KEYS = ("baseURL", "baseUrl", "prefixUrl", "prefix", "base")
 SUPABASE_WRITE = {"insert", "upsert", "update", "delete"}
 SUPABASE_READ = {"select", "maybeSingle", "single"}
 PG_QUERY_METHODS = {"query", "exec", "execute"}
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_MEMBER = re.compile(
+    r"^(?:process\.env|Bun\.env|import\.meta\.env)\.([A-Za-z_][A-Za-z0-9_]*)$"
+)
+_ENV_INDEX = re.compile(
+    r"""^(?:process\.env|Bun\.env|import\.meta\.env)\[(['"])([A-Za-z_][A-Za-z0-9_]*)\1\]$"""
+)
 
 
 def _parser_for(path: Path) -> Parser | None:
@@ -87,8 +96,39 @@ def _declarator_name(node: Node) -> str:
     return left if _IDENT.match(left) else ""
 
 
+def _join_route(prefix: str, path: str) -> str:
+    """Join a router prefix with a path or URL fragment."""
+    if not prefix:
+        if not path:
+            return ""
+        if path.startswith("/") or path.startswith("{") or "://" in path:
+            return path
+        return "/" + path
+    if not path:
+        return prefix
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    if prefix.endswith("/") and path.startswith("/"):
+        return prefix[:-1] + path
+    if "://" in prefix and not path.startswith("/") and not path.startswith("{"):
+        return prefix.rstrip("/") + "/" + path
+    if not path.startswith("/") and not path.startswith("{") and not prefix.endswith("/"):
+        return prefix.rstrip("/") + "/" + path
+    return prefix.rstrip("/") + path
+
+
+def _env_placeholder(raw: str) -> str | None:
+    m = _ENV_MEMBER.match(raw.strip())
+    if m:
+        return "{" + m.group(1) + "}"
+    m = _ENV_INDEX.match(raw.strip())
+    if m:
+        return "{" + m.group(2) + "}"
+    return None
+
+
 def _resolve_js_string(node: Node | None, consts: dict[str, str]) -> tuple[str | None, bool]:
-    """Return (value, unresolved) for a string, template, or resolvable const."""
+    """Return (value, unresolved) for a string, template, concat, env, or const."""
     if node is None:
         return None, False
     if node.type in {"string", "string_fragment"}:
@@ -111,11 +151,61 @@ def _resolve_js_string(node: Node | None, consts: dict[str, str]) -> tuple[str |
         if name in consts:
             return consts[name], "{" in consts[name]
         return None, False
-    if node.type == "member_expression":
+    if node.type in {"member_expression", "subscript_expression"}:
         raw = text(node)
         if raw in consts:
             return consts[raw], "{" in consts[raw]
+        env = _env_placeholder(raw)
+        if env:
+            return env, True
+        if node.type == "subscript_expression":
+            obj = node.child_by_field_name("object") or (
+                node.named_children[0] if node.named_children else None
+            )
+            idx = node.child_by_field_name("index") or (
+                node.named_children[1] if len(node.named_children) > 1 else None
+            )
+            if obj is not None and text(obj) in {"process.env", "Bun.env", "import.meta.env"}:
+                key, _u = _resolve_js_string(idx, consts)
+                if key:
+                    return "{" + key + "}", True
         return None, False
+    if node.type == "binary_expression":
+        op_nodes = [c for c in node.children if not c.is_named]
+        op = text(op_nodes[0]) if op_nodes else "+"
+        if op != "+":
+            return None, False
+        left = node.child_by_field_name("left") or (
+            node.named_children[0] if node.named_children else None
+        )
+        right = node.child_by_field_name("right") or (
+            node.named_children[1] if len(node.named_children) > 1 else None
+        )
+        lv, lu = _resolve_js_string(left, consts)
+        rv, ru = _resolve_js_string(right, consts)
+        if lv is None and left is not None and left.type == "identifier":
+            lv, lu = "{" + text(left) + "}", True
+        if rv is None and right is not None and right.type == "identifier":
+            rv, ru = "{" + text(right) + "}", True
+        if lv is None and rv is None:
+            return None, False
+        return (lv or "") + (rv or ""), lu or ru or lv is None or rv is None
+    if node.type == "parenthesized_expression" and node.named_children:
+        return _resolve_js_string(node.named_children[0], consts)
+    if node.type == "call_expression":
+        callee = call_callee_name(node)
+        recv = _receiver_ident(node)
+        args = call_args(node)
+        raw = text(node.child_by_field_name("function") or node)
+        if callee in {"get", "getenv"} and (
+            "env" in raw.lower() or recv in {"Deno", "process", "Bun"}
+        ):
+            if args:
+                key, _u = _resolve_js_string(args[0], consts)
+                if key:
+                    return "{" + key.strip("{}") + "}", True
+        if callee in consts:
+            return consts[callee], "{" in consts[callee]
     return None, False
 
 
@@ -153,7 +243,47 @@ def _looks_like_http_path(value: str | None) -> bool:
     return "/" in value
 
 
-def _is_router_factory(node: Node | None) -> bool:
+def _call_chain_inward(node: Node | None) -> list[Node]:
+    """Walk ``new Hono().use().get()`` from the outer call to the root factory."""
+    chain: list[Node] = []
+    cur: Node | None = node
+    seen = 0
+    while cur is not None and seen < 32:
+        seen += 1
+        chain.append(cur)
+        if cur.type == "call_expression":
+            func = cur.child_by_field_name("function")
+            if func is not None and func.type == "member_expression" and func.named_children:
+                cur = func.named_children[0]
+                continue
+            break
+        if cur.type == "new_expression":
+            break
+        if cur.type == "member_expression" and cur.named_children:
+            cur = cur.named_children[0]
+            continue
+        break
+    return chain
+
+
+def _ctor_leaf(node: Node | None) -> str:
+    if node is None or node.type != "new_expression":
+        return ""
+    ctor = node.child_by_field_name("constructor")
+    if ctor is None or ctor.type == "type_arguments":
+        ctor = next(
+            (c for c in node.named_children if c.type not in {"type_arguments", "arguments"}),
+            None,
+        )
+    if ctor is None:
+        return ""
+    raw = text(ctor)
+    if "<" in raw:
+        raw = raw.split("<", 1)[0]
+    return raw.split(".")[-1].strip()
+
+
+def _is_bare_router_factory(node: Node | None) -> bool:
     if node is None:
         return False
     if node.type == "call_expression":
@@ -167,11 +297,114 @@ def _is_router_factory(node: Node | None) -> bool:
                 return True
         return False
     if node.type == "new_expression":
-        ctor = node.child_by_field_name("constructor") or (
-            node.named_children[0] if node.named_children else None
-        )
-        return bool(ctor is not None and text(ctor).split(".")[-1] in ROUTER_CTORS)
+        return _ctor_leaf(node) in ROUTER_CTORS
     return False
+
+
+def _is_router_factory(node: Node | None) -> bool:
+    """True when ``node`` is (or chains from) ``new Hono()`` / ``express()`` / ``Router()``."""
+    if node is None:
+        return False
+    if _is_bare_router_factory(node):
+        return True
+    chain = _call_chain_inward(node)
+    if not chain:
+        return False
+    return _is_bare_router_factory(chain[-1])
+
+
+def _mount_method_prefix(call: Node, consts: dict[str, str]) -> str:
+    if call.type != "call_expression":
+        return ""
+    method = call_callee_name(call)
+    method_l = method.lower()
+    args = call_args(call)
+    if method in {"basePath", "basepath"} or method_l == "basepath":
+        if args:
+            val, _u = _resolve_js_string(args[0], consts)
+            return val or ""
+    if method_l in {"route", "group"} and args:
+        val, _u = _resolve_js_string(args[0], consts)
+        return val or ""
+    return ""
+
+
+def _router_prefix_of(value: Node, consts: dict[str, str], routers: dict[str, str]) -> str:
+    """Prefix stored on an assigned router, including its own `.basePath()` / `.route()`."""
+    prefix = _chain_prefix(value, consts, routers)
+    extra = _mount_method_prefix(value, consts)
+    return _join_route(prefix, extra) if extra else prefix
+
+
+def _chain_prefix(call: Node, consts: dict[str, str], routers: dict[str, str]) -> str:
+    """Prefix from ``.basePath('/v1')`` / ``.route('/x')`` / a named router receiver."""
+    chain = _call_chain_inward(call)
+    prefix = ""
+    for n in reversed(chain[1:]):
+        if n.type == "identifier":
+            prefix = (routers.get(text(n)) or "") + prefix
+            continue
+        if n.type == "call_expression":
+            method = call_callee_name(n)
+            method_l = method.lower()
+            args = call_args(n)
+            if method in {"basePath", "basepath"} or method_l == "basepath":
+                if args:
+                    val, _u = _resolve_js_string(args[0], consts)
+                    if val:
+                        prefix = _join_route(prefix, val)
+            elif method_l == "route" and args:
+                val, _u = _resolve_js_string(args[0], consts)
+                if val and (len(args) == 1 or args[0].type in {"string", "template_string", "identifier"}):
+                    prefix = _join_route(prefix, val)
+    return prefix
+
+
+def _object_prop(obj: Node | None, keys: tuple[str, ...], consts: dict[str, str]) -> tuple[str | None, bool]:
+    if obj is None or obj.type != "object":
+        return None, False
+    for child in obj.named_children:
+        if child.type != "pair":
+            continue
+        key_n = child.child_by_field_name("key")
+        val_n = child.child_by_field_name("value")
+        key = text(key_n).strip("'\"") if key_n is not None else ""
+        if key in keys:
+            return _resolve_js_string(val_n, consts)
+    return None, False
+
+
+def _fn_param_names(node: Node | None) -> list[str]:
+    if node is None:
+        return []
+    params = node.child_by_field_name("parameters")
+    if params is None:
+        for child in node.named_children:
+            if child.type in {"formal_parameters", "parameters"}:
+                params = child
+                break
+    names: list[str] = []
+    if params is None:
+        for child in node.named_children:
+            if child.type == "identifier":
+                names.append(text(child))
+                break
+            if child.type in {"required_parameter", "optional_parameter"}:
+                ident = child.named_children[0] if child.named_children else None
+                if ident is not None and ident.type == "identifier":
+                    names.append(text(ident))
+                break
+        return names
+    for child in params.named_children:
+        if child.type == "identifier":
+            names.append(text(child))
+        elif child.type in {"required_parameter", "optional_parameter", "rest_parameter"}:
+            ident = child.child_by_field_name("pattern") or (
+                child.named_children[0] if child.named_children else None
+            )
+            if ident is not None and ident.type == "identifier":
+                names.append(text(ident))
+    return names
 
 
 def _receiver_ident(call: Node) -> str:
@@ -314,14 +547,15 @@ class JsAnalyzer:
 
         consts_by_mod: dict[str, dict[str, str]] = {}
         routers_by_mod: dict[str, dict[str, str]] = {}
-        clients_by_mod: dict[str, set[str]] = {}
+        clients_by_mod: dict[str, dict[str, str]] = {}
+        wrappers_by_mod: dict[str, dict[str, tuple[str, str]]] = {}
         fn_nodes: dict[str, Node] = {}
         imports_by_mod: dict[str, dict[str, str]] = {}
 
         for _path, rel_file, module, tree, _src in parsed:
             consts = _collect_consts(tree)
             consts_by_mod[module] = consts
-            routers, clients = _collect_receivers(tree)
+            routers, clients = _collect_receivers(tree, consts)
             routers_by_mod[module] = routers
             clients_by_mod[module] = clients
             imports_by_mod[module] = _collect_imports(tree, module)
@@ -344,11 +578,13 @@ class JsAnalyzer:
                         qual = f"{module}.{name}"
                         analysis.functions[qual] = (rel_file, line_of(node))
                         fn_nodes[qual] = value
+            wrappers_by_mod[module] = _collect_wrappers(tree, consts, clients)
 
         for _path, rel_file, module, tree, _src in parsed:
             consts = consts_by_mod.get(module) or {}
             routers = routers_by_mod.get(module) or {}
-            clients = clients_by_mod.get(module) or set()
+            clients = clients_by_mod.get(module) or {}
+            wrappers = wrappers_by_mod.get(module) or {}
             imports = imports_by_mod.get(module) or {}
             self._scan_file(
                 analysis,
@@ -358,6 +594,7 @@ class JsAnalyzer:
                 consts,
                 routers,
                 clients,
+                wrappers,
                 imports,
                 fn_nodes,
             )
@@ -371,7 +608,8 @@ class JsAnalyzer:
         module: str,
         consts: dict[str, str],
         routers: dict[str, str],
-        clients: set[str],
+        clients: dict[str, str],
+        wrappers: dict[str, tuple[str, str]],
         imports: dict[str, str],
         fn_nodes: dict[str, Node],
     ) -> None:
@@ -379,25 +617,30 @@ class JsAnalyzer:
             if node.type != "call_expression":
                 continue
             method = call_callee_name(node).lower()
+            raw_method = call_callee_name(node)
             args = call_args(node)
             recv = _receiver_ident(node)
+            chain_router = _is_router_factory(node)
             if method in HTTP_METHODS and args:
                 path_val, path_unresolved = _resolve_js_string(args[0], consts)
-                is_router = recv in routers
-                if is_router and path_val is not None and (
+                prefix = _chain_prefix(node, consts, routers)
+                is_router = recv in routers or chain_router
+                if is_router and method == "use":
+                    continue
+                if is_router and method == "route":
+                    continue
+                if is_router and method in ROUTE_HTTP_METHODS and path_val is not None and (
                     path_val.startswith("/") or path_val.startswith("{") or "://" in path_val
                 ):
-                    if method == "use":
-                        continue
                     handler_node = args[-1] if len(args) >= 2 else None
                     handler_qual, handler_label = self._handler_symbol(
                         handler_node, module, imports
                     )
-                    path_norm = (
-                        path_val
-                        if path_val.startswith("/") or path_val.startswith("{")
-                        else "/" + path_val
-                    )
+                    path_norm = _join_route(prefix, path_val)
+                    if not (
+                        path_norm.startswith("/") or path_norm.startswith("{") or "://" in path_norm
+                    ):
+                        path_norm = "/" + path_norm
                     if handler_qual is None and handler_label == "anonymous":
                         handler_qual = f"{module}.{method.upper()} {path_norm}"
                     route = JsRoute(
@@ -406,7 +649,7 @@ class JsAnalyzer:
                         handler=handler_qual or f"{module}.{handler_label}",
                         file=rel_file,
                         line=line_of(node),
-                        unresolved=path_unresolved,
+                        unresolved=path_unresolved or ("{" in path_norm and "://" not in path_norm),
                         handler_qual=handler_qual,
                     )
                     analysis.routes.append(route)
@@ -422,21 +665,23 @@ class JsAnalyzer:
                     )
                     continue
                 # Outbound client call (axios.get, client.get, api.post, …)
-                if method in {"get", "post", "put", "patch", "delete", "head", "options"}:
+                if method in CLIENT_HTTP_METHODS:
                     if recv.lower() in {"map", "set", "weakmap", "weakset"}:
                         continue
-                    if path_val is None or not _looks_like_http_path(path_val):
-                        continue
                     if is_router:
+                        continue
+                    base = clients.get(recv) or ""
+                    composed = _join_route(base, path_val) if path_val else base
+                    if not composed or not _looks_like_http_path(composed):
                         continue
                     analysis.http_calls.append(
                         JsHttpCall(
                             method=method.upper(),
-                            url=path_val,
+                            url=composed,
                             file=rel_file,
                             line=line_of(node),
-                            symbol=f"{module}.{recv + '.' if recv else ''}{method}",
-                            unresolved=path_unresolved or ("{" in path_val),
+                            symbol=_enclosing_symbol(node, module),
+                            unresolved=path_unresolved or ("{" in composed),
                         )
                     )
                     continue
@@ -460,7 +705,7 @@ class JsAnalyzer:
                         url=url,
                         file=rel_file,
                         line=line_of(node),
-                        symbol=f"{module}.fetch",
+                        symbol=_enclosing_symbol(node, module),
                         unresolved=unresolved or ("{" in url and not url.startswith("/{")),
                     )
                 )
@@ -473,10 +718,27 @@ class JsAnalyzer:
                             url=url,
                             file=rel_file,
                             line=line_of(node),
-                            symbol=f"{module}.{method}",
+                            symbol=_enclosing_symbol(node, module),
                             unresolved=unresolved,
                         )
                     )
+            wrap = wrappers.get(raw_method) or wrappers.get(method)
+            if wrap and args:
+                http_method, base = wrap
+                path_val, path_unresolved = _resolve_js_string(args[0], consts)
+                if path_val:
+                    composed = _join_route(base, path_val)
+                    if _looks_like_http_path(composed):
+                        analysis.http_calls.append(
+                            JsHttpCall(
+                                method=http_method,
+                                url=composed,
+                                file=rel_file,
+                                line=line_of(node),
+                                symbol=_enclosing_symbol(node, module),
+                                unresolved=path_unresolved or ("{" in composed),
+                            )
+                        )
             if method == "rpc" and args:
                 name, _u = _resolve_js_string(args[0], consts)
                 if name:
@@ -496,23 +758,59 @@ class JsAnalyzer:
                         )
                     )
             self._maybe_supabase(analysis, node, method, args, rel_file, module, consts)
-        edge_name = _supabase_fn_name(rel_file)
-        if edge_name and any(
-            n.type == "call_expression" and call_callee_name(n).lower() in {"serve"}
-            for n in walk(tree)
-        ):
-            path = f"/functions/v1/{edge_name}"
-            handler = f"{module}.serve"
-            analysis.routes.append(
-                JsRoute(
-                    method="POST",
-                    path=path,
-                    handler=handler,
-                    file=rel_file,
-                    line=1,
+            if method == "serve" and recv in {"", "Deno"}:
+                self._record_serve(
+                    analysis,
+                    node,
+                    args,
+                    rel_file,
+                    module,
+                    consts,
+                    imports,
+                    fn_nodes,
                 )
+
+    def _record_serve(
+        self,
+        analysis: JsAnalysis,
+        node: Node,
+        args: list[Node],
+        rel_file: str,
+        module: str,
+        consts: dict[str, str],
+        imports: dict[str, str],
+        fn_nodes: dict[str, Node],
+    ) -> None:
+        if not args:
+            return
+        handler_node = _unwrap_hof_handler(args[0])
+        edge_name = _supabase_fn_name(rel_file)
+        path = f"/functions/v1/{edge_name}" if edge_name else "/"
+        handler_qual, handler_label = self._handler_symbol(handler_node, module, imports)
+        symbol = handler_qual or f"{module}.serve"
+        if handler_qual is None and handler_label == "anonymous":
+            symbol = f"{module}.serve"
+        analysis.functions.setdefault(symbol, (rel_file, line_of(node)))
+        analysis.routes.append(
+            JsRoute(
+                method="POST",
+                path=path,
+                handler=symbol,
+                file=rel_file,
+                line=line_of(node),
+                handler_qual=handler_qual,
             )
-            analysis.functions[handler] = (rel_file, 1)
+        )
+        self._scan_handler(
+            analysis,
+            handler_node,
+            symbol,
+            rel_file,
+            module,
+            consts,
+            imports,
+            fn_nodes,
+        )
 
     def _handler_symbol(
         self, handler: Node | None, module: str, imports: dict[str, str]
@@ -628,14 +926,58 @@ class JsAnalyzer:
         )
 
 
+def _unwrap_hof_handler(node: Node | None) -> Node | None:
+    """Unwrap ``withAuth(async (req) => ...)`` / named handlers for ``serve(...)``."""
+    cur = node
+    for _ in range(8):
+        if cur is None:
+            return None
+        if cur.type in {
+            "arrow_function",
+            "function",
+            "function_expression",
+            "function_declaration",
+            "identifier",
+        }:
+            return cur
+        if cur.type == "call_expression":
+            args = call_args(cur)
+            nxt = None
+            for arg in args:
+                if arg.type in {
+                    "arrow_function",
+                    "function",
+                    "function_expression",
+                    "identifier",
+                    "call_expression",
+                }:
+                    nxt = arg
+            cur = nxt
+            continue
+        if cur.type == "await_expression" and cur.named_children:
+            cur = cur.named_children[0]
+            continue
+        if cur.type == "parenthesized_expression" and cur.named_children:
+            cur = cur.named_children[0]
+            continue
+        break
+    return cur
+
+
 def _enclosing_symbol(node: Node, module: str) -> str:
     cur = node.parent
     while cur is not None:
-        if cur.type in {"function_declaration", "method_definition", "function"}:
+        if cur.type in {"function_declaration", "method_definition", "function", "function_expression"}:
             name_n = cur.child_by_field_name("name")
             name = text(name_n) if name_n else ""
             if name:
                 return f"{module}.{name}"
+        if cur.type == "arrow_function":
+            parent = cur.parent
+            if parent is not None and parent.type == "variable_declarator":
+                name = _declarator_name(parent)
+                if name:
+                    return f"{module}.{name}"
         cur = cur.parent
     return f"{module}.module"
 
@@ -650,14 +992,16 @@ def _collect_consts(tree: Node) -> dict[str, str]:
         if not name or value is None:
             continue
         val, unresolved = _resolve_js_string(value, consts)
-        if val is not None and not unresolved:
+        if val is not None:
             consts[name] = val
+            _ = unresolved
     return consts
 
 
-def _collect_receivers(tree: Node) -> tuple[dict[str, str], set[str]]:
+def _collect_receivers(tree: Node, consts: dict[str, str] | None = None) -> tuple[dict[str, str], dict[str, str]]:
+    consts = consts or {}
     routers: dict[str, str] = {}
-    clients: set[str] = set()
+    clients: dict[str, str] = {}
     for node in walk(tree):
         if node.type != "variable_declarator":
             continue
@@ -667,24 +1011,22 @@ def _collect_receivers(tree: Node) -> tuple[dict[str, str], set[str]]:
             continue
         raw = text(node)
         if _is_router_factory(value) or _typed_as_router(raw):
-            routers[name] = ""
+            routers[name] = _router_prefix_of(value, consts, routers)
             continue
         if value.type == "call_expression":
             callee = call_callee_name(value)
             recv = _receiver_ident(value)
+            args = call_args(value)
             if callee in {"create"} and recv.lower() in CLIENT_LIBS:
-                clients.add(name)
-            if callee in CLIENT_LIBS:
-                clients.add(name)
+                base, _u = _object_prop(args[0] if args else None, CLIENT_CREATE_KEYS, consts)
+                clients[name] = base or ""
+            elif callee in CLIENT_LIBS:
+                base, _u = _object_prop(args[0] if args else None, CLIENT_CREATE_KEYS, consts)
+                clients[name] = base or ""
         if value.type == "identifier" and text(value) in CLIENT_LIBS:
-            clients.add(name)
-        if value.type == "new_expression":
-            ctor = value.child_by_field_name("constructor") or (
-                value.named_children[0] if value.named_children else None
-            )
-            ctor_name = text(ctor) if ctor is not None else ""
-            if ctor_name.split(".")[-1] in ROUTER_CTORS:
-                routers[name] = ""
+            clients[name] = ""
+        if value.type == "new_expression" and _ctor_leaf(value) in ROUTER_CTORS:
+            routers[name] = ""
     # Nested groups: const admin = app.group("/admin") / app.route("/admin")
     for node in walk(tree):
         if node.type != "variable_declarator":
@@ -695,11 +1037,91 @@ def _collect_receivers(tree: Node) -> tuple[dict[str, str], set[str]]:
             continue
         method = call_callee_name(value).lower()
         recv = _receiver_ident(value)
-        if recv in routers and method in {"group", "route", "router"}:
+        if recv in routers and method in {"group", "route", "router", "basepath"}:
             args = call_args(value)
-            prefix, _u = _resolve_js_string(args[0], {}) if args else ("", False)
-            routers[name] = (routers.get(recv) or "") + (prefix or "")
+            prefix, _u = _resolve_js_string(args[0], consts) if args else ("", False)
+            routers[name] = _join_route(routers.get(recv) or "", prefix or "")
+            if method == "basepath":
+                routers[name] = _join_route(routers.get(recv) or "", prefix or "")
+    # app.route('/api', sub) / app.use('/api', sub) mounts
+    for node in walk(tree):
+        if node.type != "call_expression":
+            continue
+        method = call_callee_name(node).lower()
+        recv = _receiver_ident(node)
+        if recv not in routers or method not in {"route", "use", "group"}:
+            continue
+        args = call_args(node)
+        if len(args) < 2:
+            continue
+        prefix, _u = _resolve_js_string(args[0], consts)
+        if not prefix or prefix in {"*", "/*"}:
+            continue
+        sub = args[1]
+        sub_name = text(sub) if sub.type == "identifier" else ""
+        if sub_name and (sub_name in routers or sub_name):
+            routers[sub_name] = _join_route(routers.get(recv) or "", prefix)
     return routers, clients
+
+
+def _collect_wrappers(
+    tree: Node, consts: dict[str, str], clients: dict[str, str]
+) -> dict[str, tuple[str, str]]:
+    """Functions that prepend a base const/env to a path argument."""
+    wrappers: dict[str, tuple[str, str]] = {}
+
+    def consider(name: str, fn_node: Node) -> None:
+        params = _fn_param_names(fn_node)
+        if not name or not params:
+            return
+        path_param = params[0]
+        extra = dict(consts)
+        extra[path_param] = ""
+        for node in walk(fn_node):
+            if node.type != "call_expression":
+                continue
+            method = call_callee_name(node).lower()
+            args = call_args(node)
+            recv = _receiver_ident(node)
+            url_node = args[0] if args else None
+            http_method = "GET"
+            is_http = False
+            if method == "fetch":
+                is_http = True
+                if len(args) > 1:
+                    raw = text(args[1])
+                    for m in HTTP_METHODS:
+                        if f"method: '{m.upper()}'" in raw or f'method: "{m.upper()}"' in raw:
+                            http_method = m.upper()
+            elif method in CLIENT_HTTP_METHODS and (
+                recv in clients or recv.lower() in CLIENT_LIBS
+            ):
+                is_http = True
+                http_method = method.upper()
+            if not is_http:
+                continue
+            url, _u = _resolve_js_string(url_node, extra)
+            base = ""
+            if recv in clients:
+                base = clients[recv]
+            if url:
+                base = _join_route(base, url)
+            if not base:
+                continue
+            wrappers[name] = (http_method, base.rstrip("/"))
+            return
+
+    for node in walk(tree):
+        if node.type in {"function_declaration", "function"}:
+            name_n = node.child_by_field_name("name")
+            name = text(name_n) if name_n else ""
+            consider(name, node)
+        if node.type == "variable_declarator":
+            value = node.child_by_field_name("value")
+            name = _declarator_name(node)
+            if name and value is not None and value.type in {"arrow_function", "function"}:
+                consider(name, value)
+    return wrappers
 
 
 def _collect_imports(tree: Node, module: str) -> dict[str, str]:

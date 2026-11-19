@@ -1,4 +1,4 @@
-# BizMap graph schema (v0.2.3)
+# BizMap graph schema (v0.2.4)
 
 `bizmap scan` writes `bizmap.graph.json`. The graph is fully deterministic: every
 node and edge is produced from source text (SQL, tree-sitter ASTs, comments, or
@@ -8,7 +8,7 @@ an explicit `bizmap.yaml` override). There is no LLM in the loop.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | string | Graph format version (`"0.2.3"`). |
+| `version` | string | Graph format version (`"0.2.4"`). |
 | `generated_at` | string | UTC timestamp. |
 | `schema` | object | Reconstructed database schema (`schema.tables`). |
 | `nodes` | array | Graph nodes (see below). |
@@ -17,6 +17,8 @@ an explicit `bizmap.yaml` override). There is no LLM in the loop.
 | `database` | string? | Shared-database key. Matching values share table/collection ids on merge. |
 | `repos` | array? | Repo names included in a merged registry graph. |
 | `services` | object? | Service name → base URL, used to match HTTP client calls. |
+| `queues` | object? | Queue name → consumer hint, copied from `bizmap.yaml` for rematch. |
+| `unresolved_http` | array? | Unmatched outbound HTTP calls (`url`, `method`, `keys`, `from`). Stderr counts this list. |
 
 ### `schema.tables.<name>`
 
@@ -42,7 +44,7 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 | `type` | `id` pattern | Extra fields |
 | --- | --- | --- |
 | `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:<kind>:<key>` | `kind` (`http` \| `scheduled_job` \| `firestore` \| `celery_task` \| `worker` \| `pubsub` \| `cloud_task` \| `firebase_http` \| `firebase_call`), `method`, `path`, `symbol`, `why`, `evidence`, optional `confidence`, `candidates`, `unresolved` (const path not in the scan), optional `unresolved_calls`, optional `collection` / `event` |
-| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http` |
+| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http` |
 | `table` | `table:<name>` | `name`; optional `external` (system catalogs / `storage.*` / `vault.*` / `auth.*`), `kind` (`external_relation` \| `unresolved_relation`), `dropped` (still referenced after `DROP TABLE`), `candidates` (dynamic/`unknown`), `rls`, `policies` |
 | `view` | `view:<name>` | `name`, `kind` (`view` \| `unresolved_relation`), optional `materialized` |
 | `column` | `column:<table>.<column>` | `table`, `name`, `data_type`, `nullable`, optional `why` |
@@ -194,4 +196,7 @@ entrypoints around one table or view. `--mermaid-limit N` caps node count.
 
 `bizmap scan` prints `N unresolved HTTP calls (ENV, host, …)` after the
 graph write when client URLs did not match a scanned route or `services:`
-entry. Declare the missing env/host in `services:` to resolve them.
+entry. The same list is stored as top-level `unresolved_http` (and on each
+caller) so the count matches the graph. Declare the missing env/host in
+`services:` to resolve them. `bizmap registry merge` re-runs HTTP/queue
+matching from stored `http_calls`.

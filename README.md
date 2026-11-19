@@ -105,7 +105,7 @@ flowchart LR
   GET_stock -->|reads inferred| inventory
 ```
 
-## How it works (v0.2.3)
+## How it works (v0.2.4)
 
 1. **Schema replayer** — applies `schema.sql` / migration folders in order
    (`CREATE TABLE IF NOT EXISTS`, quoted/schema-qualified pg_dump identifiers,
@@ -125,16 +125,20 @@ flowchart LR
    `wrap(h.Version)`). Method names must be exactly `GET`/`POST`/…/`Any`/`Match`
    with a string-like path. pgx v5 `tx.Exec|Query|QueryRow(ctx, sql, args)`,
    including range-over-literal-slice SQL and helpers that take a `query`/`q`
-   string (tables attributed to the caller). Any `go` statement whose target
-   uses `time.NewTicker` / `time.Tick` / `time.After` loops or a cron library.
-   Packages are keyed by import path; display names are the directory relative
-   to the scan root.
+   string (tables attributed to the caller). Outbound `net/http`
+   `NewRequest` / `NewRequestWithContext`, `client.Do`, and `http.Get`/`Post`
+   (const, env, `fmt.Sprintf`, concat) become `calls_http`. Any `go` statement
+   whose target uses `time.NewTicker` / `time.Tick` / `time.After` loops or a
+   cron library. Packages are keyed by import path; display names are the
+   directory relative to the scan root.
 3. **Python detector** — FastAPI/Flask routes (module/imported consts, `+`,
    f-strings, `APIRouter` / `include_router` prefixes). Unresolvable path
    pieces stay `{name}` placeholders (`unresolved`, never truncated).
    SQLAlchemy Core/ORM usage and `text()`/`execute()` SQL, plus SQL strings
-   held in module dicts (`QUERIES["a"]`) and callables injected as arguments
-   or dataclass fields. Constructor/annotation dispatch
+   held in module dicts (`QUERIES["a"]`) and callables injected as arguments,
+   `deps.run_query` / `self.run_query`, or dataclass `Callable` fields.
+   HTTP routes require a known FastAPI/Flask app, APIRouter, or Blueprint
+   (so `@patch("x.x.logger")` is not a route). Constructor/annotation dispatch
    (`Drainer(outbox)` → `self.outbox.settle`, `store: Store` → `store.save`).
    Firebase Functions + Firestore collections, including
    document refs (`ref.set` after `collection().document()`), transactions,
@@ -144,13 +148,16 @@ flowchart LR
    Client URLs keep the env/host origin (`os.environ["X_URL"]`), not a
    local variable name.
 4. **JavaScript / TypeScript detector** — Express / Fastify / Hono routes
-   on a known app/router with a string-literal (or resolvable const) path.
-   `client.get` / `axios.get` / `fetch` / `Map.get` are outbound
-   `calls_http`, not routes. Inline handlers attribute `supabase.from('t')`
-   to the route. `.ts`/`.tsx` use tree-sitter-typescript. `pg`/`postgres`
+   on a known app/router, including chained factories
+   (`new Hono().use('*', mw).get('/a', h)`), `.basePath('/v1')`, and
+   `.route('/x', sub)`. `client.get` / `axios.get` / `fetch` / `Map.get`
+   are outbound `calls_http`, not routes. `axios.create({baseURL})` /
+   `ky` / `ofetch` instances and `request(path)` wrappers compose the
+   outbound URL. Inline handlers attribute `supabase.from('t')` to the
+   route. `.ts`/`.tsx` use tree-sitter-typescript. `pg`/`postgres`
    `query()` SQL and Supabase Edge Functions
    (`serve` / `Deno.serve` in `supabase/functions/<name>/index.ts` →
-   HTTP `/functions/v1/<name>`).
+   HTTP `/functions/v1/<name>`, with call edges into imported helpers).
 5. **Call graph** — handler → service → repository using typed locals,
    constructors, import aliases, injected func fields
    (`Service{ring: notify.Send}`), **object/interface dispatch**
@@ -172,9 +179,12 @@ flowchart LR
    `information_schema.*`, `pg_*`, `storage.*`, `vault.*`, and `auth.*`
    are marked `external`.
 7. **Registry** — `bizmap scan a b` or `bizmap registry merge a.json b.json`
-   qualifies function/entrypoint/queue ids by repo. Tables and collections
-   share ids when `database:` is the same, so `why orders.status` on the
-   merged graph lists writers and readers from every service.
+   qualifies function/entrypoint/queue ids by repo and re-matches HTTP/queue
+   links from stored `http_calls`. Tables and collections share ids when
+   `database:` is the same, so `why orders.status` on the merged graph lists
+   writers and readers from every service. Multi-path scans with a shared
+   `--config` keep each repo's own name. Unmatched client calls persist as
+   `unresolved_http` in the graph (stderr counts match).
 8. **Overrides** — `bizmap.yaml` (`--config`, scan root, or git toplevel)
    fills in `why`, extra edges, `exclude` globs, `expand_star`, plus
    `name`, `database`, `services`, `queues`, and `repos`. `--exclude GLOB`
@@ -221,7 +231,11 @@ table and collection names (`orders`, `users`, `tenants`, `notifications`,
 - **v0.2.3** — Go Group prefix hang, INSERT ON CONFLICT / FOR UPDATE OF,
   TS client-call false routes, HTTP matching without `{param}` wildcards,
   handler table attribution, `collection:unknown`, `unresolved_calls`,
-  non-editable install. **This release.**
+  non-editable install.
+- **v0.2.4** — Chained Hono-style routers, Deno/Edge serve call-graphs,
+  Go `http.NewRequest` / TS axios-create compose, Python injected
+  Callable fields, registry HTTP rematch, multi-path repo names,
+  persisted `unresolved_http`. **This release.**
 - **v0.3** — GitHub Action that warns when a PR changes a writer of a column
   that another in-flight PR also touches (“lineage conflict”).
 - **v0.4** — MCP server so agents can query `why orders.status` without

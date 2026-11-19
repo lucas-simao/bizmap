@@ -10,7 +10,7 @@ from bizmap import __version__
 from bizmap.graph import Graph
 from bizmap.mermaid import DEFAULT_LIMIT, render_mermaid
 from bizmap.registry import graph_from_json, merge_graphs
-from bizmap.scan import scan_path, scan_paths
+from bizmap.scan import relink_merged_graph, scan_path, scan_paths
 from bizmap.why import format_why
 
 
@@ -198,6 +198,12 @@ def registry_merge_cmd(graphs: tuple[Path, ...], out_path: Path) -> None:
             raise click.ClickException(f"{path}: invalid graph JSON: {exc}") from exc
         loaded.append(graph_from_json(data))
     merged = merge_graphs(loaded)
+    services: dict = dict(merged.attrs.get("services") or {})
+    for graph in loaded:
+        for k, v in (graph.attrs.get("services") or {}).items():
+            services.setdefault(k, v)
+    merged.attrs["services"] = services
+    relink_merged_graph(merged, services)
     payload = merged.to_dict()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
