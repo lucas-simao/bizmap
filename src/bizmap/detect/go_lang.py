@@ -1836,6 +1836,15 @@ class GoAnalyzer:
                         if val.type != "call_expression":
                             continue
                         if call_callee_name(val) == group_method:
+                            # `s := g.Group("/org")` where `g` is a parameter
+                            # whose prefix arrived from a caller in this pass:
+                            # recompute from the current prefixes (any depth).
+                            new_prefix = self._group_call_prefix(
+                                val, prefixes, echo_rule, package_consts, info, idx
+                            )
+                            if len(new_prefix) <= PREFIX_MAX_LEN and prefixes.get(ident) != new_prefix:
+                                prefixes[ident] = new_prefix
+                                changed = True
                             continue
                         hits = self._resolve_callees(val, fn, info, idx)
                         if len(hits) != 1:

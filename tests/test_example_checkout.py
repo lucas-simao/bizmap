@@ -16,6 +16,29 @@ def _http_links(graph) -> list[tuple[str, str]]:
     )
 
 
+EXPECTED_LINKS = [
+    ("placeOrder", "entrypoint:http:POST:/api/orders"),
+    ("pollOrder", "entrypoint:http:GET:/api/orders/:id"),
+    ("CreateInvoice", "entrypoint:http:POST:/invoices"),
+    ("payment_webhook", "entrypoint:http:POST:/api/orders/:id/paid"),
+]
+
+
+def test_checkout_links_never_disappear() -> None:
+    """Regression guard: names every expected cross-service link that is missing
+    (e.g. a Go route that lost its group prefix, or stricter matching)."""
+    graph = scan_path(CHECKOUT)
+    missing = [
+        f"{frm} -> {to}" for frm, to in EXPECTED_LINKS if not _linked(graph, frm, to)
+    ]
+    routes = sorted(
+        f"{n.attrs.get('method')} {n.attrs.get('path')}"
+        for n in graph.nodes.values()
+        if n.type == "entrypoint" and n.attrs.get("kind") == "http"
+    )
+    assert missing == [], f"missing links: {missing}; scanned routes: {routes}"
+
+
 def _linked(graph, frm_part: str, to_suffix: str) -> bool:
     return any(
         frm_part in frm and to.endswith(to_suffix) for frm, to in _http_links(graph)
