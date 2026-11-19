@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **Base passed as a parameter → `inferred`, in real shapes**: caller
+  arguments now resolve through env aliases (`const env = import.meta.env;
+  env.VITE_API_URL`), env destructuring (`const { VITE_API_URL } =
+  import.meta.env`), config objects (`config.apiUrl`) and consts imported from
+  other modules; and the binding also applies to route literals (untraced
+  clients), so when every caller passes the same env mapped in `services:`
+  the link is `inferred` instead of `heuristic`.
+
 - **Route literals use only the final URL**:
   - a literal covered by a traced call of the same function is matched with
     that call's full path; a URL with an explicit base (placeholder or

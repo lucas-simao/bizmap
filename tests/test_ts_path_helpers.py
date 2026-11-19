@@ -355,3 +355,65 @@ export const load = (x: string) => http.get(buildUrl(x));
     graph = scan_paths([web, api])
     notes = _unresolved(graph, "src.opaque.load")
     assert notes and notes[0]["reason"] == "path_dynamic", notes
+
+
+def test_param_base_bound_from_config_alias_and_imports_is_inferred(tmp_path: Path) -> None:
+    web, api = tmp_path / "web", tmp_path / "api"
+    _write(tmp_path, "bizmap.yaml", "services:\n  api:\n    env: VITE_API_URL\n")
+    _write(
+        api,
+        "server.ts",
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.get('/v1/reports/:id', h);
+app.get('/v1/stats', h);
+""",
+    )
+    _write(
+        web,
+        "src/config.ts",
+        """
+const env = import.meta.env;
+export const config = { apiUrl: env.VITE_API_URL };
+export const API_URL = env.VITE_API_URL;
+""",
+    )
+    _write(
+        web,
+        "src/api.ts",
+        """
+import { container } from './c';
+
+export async function getReport(baseUrl: string, id: string) {
+  return container.resolve('http').get(`${baseUrl}/v1/reports/${id}`);
+}
+
+export async function getStats(baseUrl: string) {
+  return fetch(`${baseUrl}/v1/stats`);
+}
+""",
+    )
+    _write(
+        web,
+        "src/callers.ts",
+        """
+import { config, API_URL } from './config';
+import { getReport, getStats } from './api';
+
+const { VITE_API_URL } = import.meta.env;
+
+export const a = (id: string) => getReport(config.apiUrl, id);
+export const b = (id: string) => getReport(API_URL, id);
+export const c = (id: string) => getReport(VITE_API_URL, id);
+export const d = () => getStats(config.apiUrl);
+""",
+    )
+    graph = scan_paths([web, api], config=tmp_path / "bizmap.yaml")
+    for fn, ep in (
+        ("src.api.getReport", "api/entrypoint:http:GET:/v1/reports/:id"),
+        ("src.api.getStats", "api/entrypoint:http:GET:/v1/stats"),
+    ):
+        edges = [e for e in graph.edges.values() if e.type == "calls_http" and e.from_id.endswith(function_id(fn))]
+        assert [(e.to_id, e.confidence.value) for e in edges] == [(ep, "inferred")], (fn, [(e.id, e.attrs) for e in edges])
