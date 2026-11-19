@@ -1378,7 +1378,12 @@ def _link_route_literals(graph: Graph) -> None:
             # Only the final URL counts: if a traced call of this function
             # covers the literal, match its full path; an explicit base (even
             # unknown) means the path must match whole, never by its tail.
-            covering = [u for u in traced if _literal_covers(u, path)]
+            lit_traced = list(traced)
+            if lit.get("bound_base"):
+                # every caller passes this concrete base for the URL's base
+                # parameter: treat it as the call's own base
+                lit_traced.append(str(lit["bound_base"]).rstrip("/") + path)
+            covering = [u for u in lit_traced if _literal_covers(u, path)]
             explicit = bool(lit.get("explicit_base")) or any(has_explicit_base(u) for u in covering)
             match_path = path
             for u in covering:
@@ -1401,7 +1406,7 @@ def _link_route_literals(graph: Graph) -> None:
             # as `inferred` (same evidence level as a traced call); otherwise the
             # literal must not reroute the call.
             confidence = Confidence.HEURISTIC
-            known = sorted({u for u in traced if base_is_known(u) and _literal_covers(u, path)})
+            known = sorted({u for u in lit_traced if base_is_known(u) and _literal_covers(u, path)})
             if known:
                 service = service_for_url(known[0], graph.attrs.get("services") or {})
                 own = [eid for eid in hits if service and route_home.get(eid, ("", ""))[0] == service]
@@ -2065,6 +2070,7 @@ def _scan_one(
             "evidence": {"file": lit.file, "line": lit.line, "symbol": lit.symbol},
         }
         base_item["explicit_base"] = True if getattr(lit, "explicit_base", False) else None
+        base_item["bound_base"] = getattr(lit, "bound_base", None)
         is_fn = lit.symbol in js_analysis.functions
         wanted = "call" if is_fn else "ref"
         all_sites = (

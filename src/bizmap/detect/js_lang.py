@@ -200,6 +200,9 @@ def _resolve_js_string(node: Node | None, consts: dict[str, str]) -> tuple[str |
         env = _env_placeholder(raw)
         if env:
             return env, True
+        head, _sep, leaf2 = raw.partition(".")
+        if _sep and f"{head}.*env" in consts and "." not in leaf2:
+            return "{" + leaf2 + "}", True
         if node.type == "subscript_expression":
             obj = node.child_by_field_name("object") or (
                 node.named_children[0] if node.named_children else None
@@ -854,6 +857,9 @@ class JsRouteLiteral:
     helper: bool = False
     # the literal carried its own base (`${API}/x`, `https://h/x`): match whole
     explicit_base: bool = False
+    base_hole: str | None = None
+    # concrete base every caller passes for `base_hole` (see _bind_param_bases)
+    bound_base: str | None = None
 
 
 @dataclass
@@ -1560,14 +1566,49 @@ def _enclosing_symbol(node: Node, module: str) -> str:
     return f"{module}.module"
 
 
+_ENV_OBJECTS = {"import.meta.env", "process.env", "Bun.env", "Deno.env"}
+
+
 def _collect_consts(tree: Node) -> dict[str, str]:
     consts: dict[str, str] = {}
     for node in walk(tree):
         if node.type != "variable_declarator":
             continue
-        name = _declarator_name(node)
         value = node.child_by_field_name("value")
-        if not name or value is None:
+        name_node = node.child_by_field_name("name")
+        if value is None or name_node is None:
+            continue
+        vtext = text(value).strip()
+        if name_node.type == "object_pattern" and vtext in _ENV_OBJECTS:
+            # const { VITE_API_URL, API: base } = import.meta.env
+            for prop in name_node.named_children:
+                if prop.type == "shorthand_property_identifier_pattern":
+                    consts[text(prop)] = "{" + text(prop) + "}"
+                elif prop.type == "pair_pattern":
+                    key = prop.child_by_field_name("key")
+                    val = prop.child_by_field_name("value")
+                    if key is not None and val is not None and val.type == "identifier":
+                        consts[text(val)] = "{" + _unquote(text(key)) + "}"
+            continue
+        name = _declarator_name(node)
+        if not name:
+            continue
+        if vtext in _ENV_OBJECTS:
+            # const env = import.meta.env → env.X is an env placeholder
+            consts[f"{name}.*env"] = "1"
+            continue
+        if value.type == "object":
+            # export const config = { apiUrl: import.meta.env.VITE_API_URL }
+            for pair in value.named_children:
+                if pair.type != "pair":
+                    continue
+                key = pair.child_by_field_name("key")
+                pval = pair.child_by_field_name("value")
+                if key is None or pval is None:
+                    continue
+                v, _u = _resolve_js_string(pval, consts)
+                if v is not None:
+                    consts[f"{name}.{_unquote(text(key))}"] = v
             continue
         val, unresolved = _resolve_js_string(value, consts)
         if val is not None:
@@ -2923,6 +2964,7 @@ def _collect_route_literals(
                 same_repo=same_repo,
                 helper=is_helper,
                 explicit_base=bool(value) and (value.startswith("{") or "://" in value),
+                base_hole=(_HOLE.match(value).group(1) if value and _HOLE.match(value) else None),
             )
         )
 
@@ -3106,10 +3148,37 @@ def _helper_source(
     return None
 
 
+def _import_plain_consts(
+    consts_by_mod: dict[str, dict[str, str]],
+    import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
+) -> None:
+    """`import { API_URL, config } from '@/config'` → the values (env
+    placeholders, URLs, paths, object props) are known in the importer."""
+
+    def usable(v: str) -> bool:
+        return v.startswith(("{", "/", "http://", "https://"))
+
+    for module, specs in import_specs_by_mod.items():
+        consts = consts_by_mod.setdefault(module, {})
+        for local, (src_mod, orig) in specs.items():
+            if orig == "*":
+                continue
+            src = consts_by_mod.get(src_mod) or consts_by_mod.get(f"{src_mod}.index") or {}
+            val = src.get(orig)
+            if val is not None and usable(val) and local not in consts:
+                consts[local] = val
+            if f"{orig}.*env" in src:
+                consts.setdefault(f"{local}.*env", "1")
+            for key, kval in src.items():
+                if key.startswith(f"{orig}.") and not key.endswith(("()", "()#params", ".*env")) and usable(kval):
+                    consts.setdefault(f"{local}.{key[len(orig) + 1:]}", kval)
+
+
 def _import_path_helpers(
     consts_by_mod: dict[str, dict[str, str]],
     import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
 ) -> None:
+    _import_plain_consts(consts_by_mod, import_specs_by_mod)
     for module, specs in import_specs_by_mod.items():
         consts = consts_by_mod.setdefault(module, {})
         for local, (src_mod, orig) in specs.items():
@@ -3215,3 +3284,28 @@ def _bind_param_bases(analysis: JsAnalysis, fn_nodes: dict[str, Node]) -> None:
         if not concrete:
             continue
         call.url = value.rstrip("/") + call.url[m.end():]
+    for lit in analysis.route_literals:
+        if not lit.base_hole:
+            continue
+        bound = _common_concrete_arg(sites.get(lit.symbol) or [], fn_nodes.get(lit.symbol), lit.base_hole)
+        if bound:
+            lit.bound_base = bound
+
+
+def _common_concrete_arg(callers: list, fn_node: Node | None, param: str) -> str | None:
+    params = _fn_param_names(fn_node)
+    if param not in params or not callers:
+        return None
+    idx = params.index(param)
+    values = {hc.args[idx] if idx < len(hc.args) else None for hc in callers}
+    if len(values) != 1:
+        return None
+    value = next(iter(values))
+    if not value:
+        return None
+    lead = _HOLE.match(value)
+    if value.startswith(("http://", "https://")) or (
+        lead is not None and lead.end() == len(value) and _ENV_LIKE.match(lead.group(1))
+    ):
+        return value
+    return None
