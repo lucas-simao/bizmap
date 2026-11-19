@@ -66,7 +66,7 @@ def test_ts_axios_instance_param_and_class_client(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "bizmap.yaml",
-        "services:\n  catalog:\n    env: VITE_API_URL\n",
+        "services:\n  catalog:\n    env: VITE_API_URL\n    repo: api\n",
     )
     _write(web, "bizmap.yaml", "name: web\ndatabase: platform\n")
     _write(api, "bizmap.yaml", "name: api\ndatabase: platform\n")

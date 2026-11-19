@@ -13,6 +13,9 @@
   `match: full|suffix`, and skipped literals are recorded in
   `route_literal_skipped` with the discarded candidates. `services:` entries
   accept `repo:` when the service key differs from the repo name.
+  **Behavior change:** in multi-repo graphs a service whose key (or `repo:`)
+  is not a scanned repo is treated as not scanned; `bizmap scan` prints a
+  warning naming it.
 
 - **Python phantom unknown reads**: `execute(text("..."), params)` no longer
   adds a `reads <table> [unknown]` next to the exact edges (the `text()` call

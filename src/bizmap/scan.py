@@ -1737,9 +1737,38 @@ def _config_for_root(
 def relink_merged_graph(graph: Graph, services: dict[str, str] | None = None) -> None:
     """Re-run HTTP and queue matching on a (merged) graph using stored call info."""
     services = services or graph.attrs.get("services") or {}
+    _warn_unscanned_services(graph, services)
     _relink_http_from_graph(graph, services)
     _link_route_literals(graph)
     _relink_queues_from_graph(graph, services)
+
+
+def _warn_unscanned_services(graph: Graph, services: dict) -> None:
+    """Warn when a `services:` entry names no scanned repo (multi-repo graphs).
+
+    Calls to such a service stay `target_not_scanned`; if it *is* scanned
+    under another name, the entry needs `repo: <name>`.
+    """
+    repos = {
+        str(n.attrs.get("repo"))
+        for n in graph.nodes.values()
+        if n.type == "entrypoint" and n.attrs.get("repo")
+    }
+    if len(repos) < 1 or not graph.attrs.get("repos"):
+        return
+    warnings = list(graph.attrs.get("warnings") or [])
+    for name, spec in sorted((services or {}).items()):
+        target = str(spec.get("repo") or name) if isinstance(spec, dict) else str(name)
+        if target in repos or target in (graph.attrs.get("repos") or []):
+            continue
+        msg = (
+            f"services: {name} matches no scanned repo; calls to it stay "
+            f"target_not_scanned (add `repo: <name>` if it is scanned under another name)"
+        )
+        if msg not in warnings:
+            warnings.append(msg)
+    if warnings:
+        graph.attrs["warnings"] = warnings
 
 
 def _relink_from_graph(graph: Graph, services: dict[str, str] | None = None) -> None:
