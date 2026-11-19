@@ -119,3 +119,132 @@ func (c *Client) History(id string) error {
     assert [(e.to_id, e.confidence.value) for e in edges] == [
         ("api/entrypoint:http:GET:/api/v1/client/org/settings/users/:id/history", "inferred")
     ], ([e.id for e in edges], graph.attrs.get("unresolved_http"))
+
+
+def _org_factory(web: Path) -> None:
+    _write(
+        web,
+        "src/clients/org.ts",
+        """
+import type { AxiosInstance } from 'axios';
+
+export function createOrgClient(http: AxiosInstance) {
+  const api = {
+    history: (id: string) => http.get(`/org/settings/users/${id}/history`),
+  };
+  return api;
+}
+""",
+    )
+
+
+def test_axios_instance_variants(tmp_path: Path) -> None:
+    """Barrel re-export of the instance, factory called inside a hook, inline
+    axios.create argument, factory returning a variable."""
+    web, api = tmp_path / "web", tmp_path / "api"
+    _write(tmp_path, "bizmap.yaml", "services:\n  api:\n    env: VITE_API_URL\n")
+    _write(api, "server.ts", SERVER)
+    _write(
+        web,
+        "src/http/portal.ts",
+        """
+import axios from 'axios';
+export const portalApi = axios.create({ baseURL: `${import.meta.env.VITE_API_URL}/api/v1/client` });
+""",
+    )
+    _write(web, "src/http/index.ts", "export { portalApi } from './portal';\n")
+    _org_factory(web)
+    _write(
+        web,
+        "src/screens/a.ts",
+        """
+import { portalApi } from '../http';
+import { createOrgClient } from '../clients/org';
+
+export function useOrg() {
+  const client = createOrgClient(portalApi);
+  return { load: (id: string) => client.history(id) };
+}
+""",
+    )
+    _write(
+        web,
+        "src/screens/b.ts",
+        """
+import axios from 'axios';
+import { createOrgClient } from '../clients/org';
+
+export const orgB = createOrgClient(
+  axios.create({ baseURL: `${import.meta.env.VITE_API_URL}/api/v1/client` }),
+);
+""",
+    )
+    graph = scan_paths([web, api], config=tmp_path / "bizmap.yaml")
+    edges = [e for e in graph.edges.values() if e.type == "calls_http" and e.from_id.startswith("web/")]
+    got = sorted({(e.to_id, e.confidence.value) for e in edges})
+    assert got == [("api/entrypoint:http:GET:/api/v1/client/org/settings/users/:id/history", "inferred")], (
+        got,
+        graph.attrs.get("unresolved_http"),
+    )
+    assert not [u for u in graph.attrs.get("unresolved_http") or [] if u.get("reason") == "base_unknown"], graph.attrs.get(
+        "unresolved_http"
+    )
+
+
+def test_go_client_in_service_field_with_constructor_param(tmp_path: Path) -> None:
+    caller, api = tmp_path / "worker", tmp_path / "api"
+    _write(tmp_path, "bizmap.yaml", "services:\n  api:\n    env: API_URL\n")
+    _write(api, "server.ts", SERVER)
+    _write(caller, "go.mod", "module worker\n\ngo 1.22\n")
+    _write(
+        caller,
+        "orgclient/client.go",
+        """
+package orgclient
+
+import "net/http"
+
+type Client struct {
+    base string
+}
+
+func New(baseURL string) *Client {
+    return &Client{base: baseURL}
+}
+
+func (c *Client) History(id string) (*http.Response, error) {
+    return http.Get(c.base + "/api/v1/client/org/settings/users/" + id + "/history")
+}
+""",
+    )
+    _write(
+        caller,
+        "service/service.go",
+        """
+package service
+
+import (
+    "os"
+
+    "worker/orgclient"
+)
+
+type Service struct {
+    org *orgclient.Client
+}
+
+func NewService() *Service {
+    return &Service{org: orgclient.New(os.Getenv("API_URL"))}
+}
+
+func (s *Service) Sync(id string) error {
+    _, err := s.org.History(id)
+    return err
+}
+""",
+    )
+    graph = scan_paths([caller, api], config=tmp_path / "bizmap.yaml")
+    edges = _calls_http(graph, "orgclient.Client.History")
+    assert [(e.to_id, e.confidence.value) for e in edges] == [
+        ("api/entrypoint:http:GET:/api/v1/client/org/settings/users/:id/history", "inferred")
+    ], ([e.id for e in edges], graph.attrs.get("unresolved_http"))
