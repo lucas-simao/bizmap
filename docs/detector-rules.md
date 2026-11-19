@@ -66,7 +66,7 @@ String arguments are resolved from:
 Anything involving a non-literal identifier is marked `unknown`. Truncated
 paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
 
-## Go resolution (v0.1.2)
+## Go resolution (v0.1.3)
 
 - Function **display names** are the directory relative to the scan root,
   always (`internal/services/appointments.Service.Run`). Packages are still
@@ -81,6 +81,13 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   and do not propagate table edges otherwise.
 - Injected **func fields** (`s.ring(...)` with `Service{ring: notify.Send}` or
   a constructor argument) resolve to the single assigned function.
+- **Interface dispatch**: a call on an interface-typed field, parameter, or
+  constructor-injected value (`s.Bell.Changed(e)`) follows every scanned type
+  that has the interface's method set. One implementer → `inferred` call edge;
+  several → edges to all, `inferred`, with `candidates`.
+- **Dynamic SQL**: `for _, q := range []string{"UPDATE a ...", ...}` expands
+  to one SQL site per element. Helpers with a `query`/`q`/`sql` string param
+  bind literals/consts at the call site and attribute tables to the caller.
 - A handler argument that is a **call** unwraps to an inner func/method
   (`wrap(h.Version)`, `mw(handler)`). Factories that take data
   (`profile.StaffPhoto(cfg)`) still resolve to the factory.
@@ -88,8 +95,10 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   must be string-like (literal, const, or concatenation).
 - `func main` is not a writer entrypoint unless it is a detected job or route.
   `bizmap.yaml` is found via `--config`, the scan root, or the git toplevel.
+  `--exclude GLOB` (repeatable) merges with YAML `exclude`. `--profile`
+  prints parse / resolve / sql / propagate timings to stderr.
 
-## Bundled rules (v0.1.2)
+## Bundled rules (v0.1.3)
 
 | File | Status | What it detects |
 | --- | --- | --- |

@@ -47,6 +47,22 @@ SELECT l.*
 FROM appointments a
 JOIN LATERAL (SELECT a.id AS aid, a.status) l ON true
 `)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Query(ctx, `
+SELECT r.notes, l.aid
+FROM appointments a
+LEFT JOIN LATERAL (SELECT a.id AS aid) l ON true
+LEFT JOIN LATERAL (SELECT a.notes AS notes) r ON true
+`)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Query(ctx, `
+SELECT r.notes
+FROM (SELECT notes FROM appointments WHERE id = $1) r
+`, "0")
 	return err
 }
 

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.3 — 2026-11-19
+
+Interface dispatch, dynamic SQL expansion, and alias-scope fixes after a
+private evaluation of v0.1.2. Behavior is generic; tests and fixtures are
+synthetic only (`examples/shop`, `examples/clinic`, tmp fixtures).
+
+### Fixed
+
+- **Go interface dispatch**: calls on interface-typed fields, parameters, and
+  constructor-injected values (`s.Bell.Changed(e)`) follow structural
+  implementers in the scan. One implementer becomes an `inferred` call edge;
+  several become edges to all, `inferred`, with `candidates`.
+- **Dynamic SQL**: `for _, q := range []string{"UPDATE a ...", "DELETE FROM b ..."}`
+  expands into one SQL site per element. Helpers that take a `query`/`q`
+  string (`named(query, args)`, `exec(ctx, q)`) bind literals/consts at each
+  call site and attribute tables to the **caller**.
+- **LATERAL / subquery aliases**: `LEFT JOIN LATERAL (SELECT ...) l ON true`
+  and `(SELECT ...) r` never become table or column nodes (`l`, `r`, `l.x`),
+  including on the sqlglot fallback path. When DDL is present, only
+  schema-known tables (plus catalogs) are table nodes.
+
+### Added
+
+- `--exclude GLOB` (repeatable) on `bizmap scan`, merged with `bizmap.yaml`.
+- `--profile` prints parse / resolve / sql / propagate timings to stderr.
+  Directory walks skip `vendor`/`node_modules`/…, `go.mod` lookup is cached,
+  and AST walks are iterative over named nodes so ~150 Go files stay well
+  under 10s.
+
 ## 0.1.2 — 2026-11-19
 
 Precision fixes after a private evaluation of v0.1.1 on a real Echo + pgx

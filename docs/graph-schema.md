@@ -1,4 +1,4 @@
-# BizMap graph schema (v0.1.2)
+# BizMap graph schema (v0.1.3)
 
 `bizmap scan` writes `bizmap.graph.json`. The graph is fully deterministic: every
 node and edge is produced from source text (SQL, tree-sitter ASTs, comments, or
@@ -8,7 +8,7 @@ an explicit `bizmap.yaml` override). There is no LLM in the loop.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | string | Graph format version (`"0.1.2"`). |
+| `version` | string | Graph format version (`"0.1.3"`). |
 | `generated_at` | string | UTC timestamp. |
 | `schema` | object | Reconstructed database schema (`schema.tables`). |
 | `nodes` | array | Graph nodes (see below). |
@@ -55,7 +55,7 @@ picking an arbitrary match.
 
 | `type` | From | To | Meaning |
 | --- | --- | --- | --- |
-| `calls` | `function` | `function` | Intra-project call (handler → service → repository). |
+| `calls` | `function` | `function` | Intra-project call (handler → service → repository). Interface dispatch uses `inferred` and may list `candidates`. |
 | `reads` | `function` / `entrypoint` / `db_trigger` | `column` or `table` | SQL (or trigger function) reads this data. |
 | `writes` | `function` / `entrypoint` / `db_trigger` | `column` or `table` | SQL (or trigger function) writes this data. |
 | `triggers` | `entrypoint` or `db_trigger` | `function` | HTTP route / ticker job / DB trigger invokes a function. |
@@ -89,7 +89,7 @@ column is written.
 | Value | When |
 | --- | --- |
 | `exact` | Fully static SQL (string literals / const concatenation, including cross-package `pkg.Const`) parsed by sqlglot, or a route/job registration whose handler resolved via type. |
-| `inferred` | Call-graph propagation (table-level), `SELECT *` (table-level, or columns with `--expand-star`), INSERT without a column list, or a writer of table T also writing what a trigger on T writes. |
+| `inferred` | Call-graph propagation (table-level), `SELECT *` (table-level, or columns with `--expand-star`), INSERT without a column list, interface dispatch to a structural implementer, or a writer of table T also writing what a trigger on T writes. |
 | `unknown` | Dynamically built SQL (`"UPDATE t SET " + col` or `"UPDATE "+table+" SET"`), unparsed SQL, an unresolvable route path (`{otherpkg.PendingPath}/setup`, with `unresolved: true`), or an ambiguous handler (candidates listed, no arbitrary pick). FROM-less SELECT is not unknown: it emits no table edge. |
 
 When the same edge is observed twice, the **highest** confidence is kept
@@ -106,19 +106,23 @@ applied in order. Supported PostgreSQL constructs:
 - `DO $$ ... $$` blocks (inner `ALTER`/`CREATE` is applied)
 - `CREATE TRIGGER` + `CREATE FUNCTION` (plpgsql body scanned for `INSERT`/`UPDATE`/`DELETE`/`SELECT`)
 
-Table nodes are created for reconstructed DDL tables, for static SQL that
-names a real identifier, and for system catalogs (`pg_roles`, …) marked
-`external`. CTE / subquery / LATERAL aliases (`l`, `files.file_id`) and SQL
-keywords are never tables. FROM-less SELECT (`SELECT now()`) touches no
-table. Dynamic table names become `table:unknown` with `candidates` when
-determinable, and stay on the origin function only.
+Table nodes are created for reconstructed DDL tables and for system catalogs
+(`pg_roles`, …) marked `external`. When DDL is present, unknown real-looking
+identifiers are not turned into table nodes. Without DDL, static SQL that
+names a real identifier may still create a table node. CTE / subquery /
+LATERAL aliases (`l`, `r`, `l.x`, `files.file_id`) and SQL keywords are never
+tables. FROM-less SELECT (`SELECT now()`) touches no table. Dynamic table
+names become `table:unknown` with `candidates` when determinable, and stay
+on the origin function only.
 
 ## Overrides (`bizmap.yaml`)
 
 Uncertain bits can be completed manually. `bizmap.yaml` is loaded from
 `--config path`, else the scan root, else the git toplevel. Top-level
-`exclude` globs skip files (seed/demo trees) inside the scan root.
+`exclude` globs skip files (seed/demo trees) inside the scan root;
+`bizmap scan --exclude GLOB` (repeatable) is merged with that list.
 `expand_star: true` expands `SELECT *` the same way as the CLI flag.
+`--profile` prints parse / resolve / sql / propagate timings to stderr.
 
 ```yaml
 exclude:

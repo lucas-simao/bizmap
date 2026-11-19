@@ -72,6 +72,18 @@ def main() -> None:
     default=None,
     help="Path to bizmap.yaml (default: scan root, then git toplevel).",
 )
+@click.option(
+    "--exclude",
+    "exclude_globs",
+    multiple=True,
+    help="Exclude glob (repeatable); merged with bizmap.yaml exclude.",
+)
+@click.option(
+    "--profile",
+    "profile_flag",
+    is_flag=True,
+    help="Print phase timings (parse, resolve, sql, propagate) to stderr.",
+)
 def scan_cmd(
     path: Path,
     out_path: Path,
@@ -81,6 +93,8 @@ def scan_cmd(
     expand_star: bool,
     rules_dirs: tuple[Path, ...],
     config_path: Path | None,
+    exclude_globs: tuple[str, ...],
+    profile_flag: bool,
 ) -> None:
     """Scan a codebase and write bizmap.graph.json."""
     graph = scan_path(
@@ -88,6 +102,8 @@ def scan_cmd(
         extra_rules=list(rules_dirs) or None,
         expand_star=True if expand_star else None,
         config=config_path,
+        exclude=list(exclude_globs) or None,
+        profile=profile_flag,
     )
     payload = graph.to_dict()
     out_path.parent.mkdir(parents=True, exist_ok=True)

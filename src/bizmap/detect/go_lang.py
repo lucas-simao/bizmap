@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import codecs
 import re
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 
 import tree_sitter_go as tsgo
@@ -32,6 +34,7 @@ TIME_TICKER_METHODS = {"NewTicker", "Tick"}
 TIME_AFTER = "After"
 HTTP_ROUTE_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "Any", "Match"}
 _PATH_SELECTOR = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\}$")
+SQL_PARAM_NAMES = {"query", "q", "sql"}
 
 
 def _parser() -> Parser:
@@ -44,9 +47,12 @@ class ResolvedString:
     fully_static: bool
     dynamic: bool
     placeholder: str | None = None
+    alternatives: list[str] | None = None
 
     @property
     def usable(self) -> bool:
+        if self.alternatives:
+            return any(t.strip() for t in self.alternatives if t)
         return bool(
             (self.text and self.text.strip()) or (self.placeholder and self.placeholder.strip())
         )
@@ -58,6 +64,12 @@ class ResolvedString:
         if self.placeholder:
             return self.placeholder
         return self.text or ""
+
+    def all_texts(self) -> list[str]:
+        if self.alternatives:
+            return [t for t in self.alternatives if t and str(t).strip()]
+        text = self.path_text
+        return [text] if text and text.strip() else []
 
 
 @dataclass
@@ -128,12 +140,21 @@ class JobHit:
 
 
 @dataclass
+class CallHit:
+    caller: str
+    callee: str
+    evidence: Evidence
+    confidence: Confidence
+    candidates: list[str] = field(default_factory=list)
+
+
+@dataclass
 class GoAnalysis:
     functions: dict[str, GoFunction]
     sql_sites: list[SqlSite]
     routes: list[RouteHit]
     jobs: list[JobHit]
-    calls: list[tuple[str, str, Evidence, Confidence]]
+    calls: list[CallHit]
     situations: dict[str, list[str]] = field(default_factory=dict)
 
 
@@ -153,7 +174,9 @@ class _FileInfo:
     structs: dict[str, dict[str, GoType]]
     functions: list[GoFunction]
     func_type_names: set[str] = field(default_factory=set)
-    struct_func_fields: dict[str, set[str]] = field(default_factory=dict)
+    struct_func_fields: dict[str, set[str]] = field(default_factory=set)
+    interfaces: dict[str, set[str]] = field(default_factory=dict)
+    iface_embeds: dict[str, list[GoType]] = field(default_factory=dict)
 
 
 @dataclass
@@ -168,6 +191,10 @@ class _Indexes:
     func_fields: dict[tuple[str, str], set[str]] = field(default_factory=dict)
     field_funcs: dict[tuple[str, str, str], list[str]] = field(default_factory=dict)
     ctor_field_params: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict)
+    interfaces: dict[tuple[str, str], set[str]] = field(default_factory=dict)
+    implementers: dict[tuple[str, str], list[tuple[str, str]]] = field(default_factory=dict)
+    iface_fields: dict[tuple[str, str], set[str]] = field(default_factory=dict)
+    field_concretes: dict[tuple[str, str, str], list[GoType]] = field(default_factory=dict)
 
 
 def _unquote_go_string(raw: str) -> str:
@@ -202,12 +229,19 @@ def _parse_module_path(gomod: Path) -> str | None:
     return None
 
 
-def _module_for(file: Path) -> tuple[str | None, Path | None]:
-    for parent in [file.parent, *file.parent.parents]:
+@cache
+def _module_for_dir(directory: str) -> tuple[str | None, str | None]:
+    path = Path(directory)
+    for parent in [path, *path.parents]:
         gomod = parent / "go.mod"
         if gomod.is_file():
-            return _parse_module_path(gomod), parent
+            return _parse_module_path(gomod), str(parent)
     return None, None
+
+
+def _module_for(file: Path) -> tuple[str | None, Path | None]:
+    mod, root_s = _module_for_dir(str(file.parent.resolve()))
+    return mod, Path(root_s) if root_s else None
 
 
 def _import_path_for(file: Path, root: Path, pkg_clause: str) -> str:
@@ -404,6 +438,43 @@ def _func_type_names(type_decl: Node) -> set[str]:
     return names
 
 
+def _interface_specs(
+    type_decl: Node, pkg: str, import_path: str, aliases: dict[str, str]
+) -> tuple[dict[str, set[str]], dict[str, list[GoType]]]:
+    """Named interfaces → method names and embedded interface types."""
+    methods: dict[str, set[str]] = {}
+    embeds: dict[str, list[GoType]] = {}
+    for spec in type_decl.named_children:
+        if spec.type != "type_spec":
+            continue
+        name = text(spec.child_by_field_name("name"))
+        typ = spec.child_by_field_name("type")
+        if not name or typ is None or typ.type != "interface_type":
+            continue
+        meths: set[str] = set()
+        embs: list[GoType] = []
+        for elem in typ.named_children:
+            if elem.type == "method_elem":
+                ident = elem.child_by_field_name("name") or next(
+                    (c for c in elem.named_children if c.type in {"field_identifier", "identifier"}),
+                    None,
+                )
+                if ident is not None:
+                    meths.add(text(ident))
+            elif elem.type == "type_elem":
+                inner = elem.named_children[0] if elem.named_children else elem
+                parsed = _parse_type(inner, pkg, import_path, aliases)
+                if parsed:
+                    embs.append(parsed)
+            elif elem.type in {"type_identifier", "qualified_type"}:
+                parsed = _parse_type(elem, pkg, import_path, aliases)
+                if parsed:
+                    embs.append(parsed)
+        methods[name] = meths
+        embeds[name] = embs
+    return methods, embeds
+
+
 def _direct_func_fields(type_decl: Node) -> dict[str, set[str]]:
     """Struct fields whose declared type is ``func(...)``."""
     out: dict[str, set[str]] = {}
@@ -501,6 +572,11 @@ def _path_is_string_like(
     return False
 
 
+def _is_placeholder_token(sql: str) -> bool:
+    stripped = sql.strip()
+    return bool(stripped) and stripped.startswith("{") and stripped.endswith("}") and " " not in stripped
+
+
 def _plus(lv: ResolvedString, rv: ResolvedString) -> ResolvedString:
     if lv.fully_static and rv.fully_static and lv.text is not None and rv.text is not None:
         return ResolvedString(lv.text + rv.text, True, False)
@@ -565,7 +641,52 @@ def _resolve_expr(
         return _resolve_expr(node.named_children[0], env, package_consts, aliases, consts_by_import)
     if node.type == "call_expression":
         return ResolvedString(None, False, True)
+    if node.type == "composite_literal":
+        alts = _composite_string_texts(node, env, package_consts, aliases, consts_by_import)
+        if alts:
+            static = all(s.fully_static for s in alts)
+            texts = [s.path_text for s in alts if s.usable]
+            if len(texts) == 1:
+                return ResolvedString(texts[0], static, not static)
+            return ResolvedString(
+                texts[0] if texts else None,
+                static,
+                not static,
+                alternatives=texts,
+            )
     return ResolvedString(None, False, True)
+
+
+def _composite_string_texts(
+    node: Node,
+    env: dict[str, ResolvedString],
+    package_consts: dict[str, ResolvedString],
+    aliases: dict[str, str],
+    consts_by_import: dict[tuple[str, str], ResolvedString],
+) -> list[ResolvedString]:
+    """String elements of ``[]string{"UPDATE ...", "DELETE ..."}`` (and arrays)."""
+    typ = node.child_by_field_name("type")
+    if typ is not None and typ.type not in {"slice_type", "array_type"}:
+        return []
+    body = None
+    for child in node.named_children:
+        if child.type == "literal_value":
+            body = child
+            break
+    if body is None:
+        return []
+    out: list[ResolvedString] = []
+    for elem in body.named_children:
+        inner = _unwrap_literal(elem) or elem
+        if inner.type == "literal_element" and inner.named_children:
+            inner = inner.named_children[0]
+        resolved = _resolve_expr(inner, env, package_consts, aliases, consts_by_import)
+        if resolved.usable:
+            out.extend(
+                ResolvedString(t, resolved.fully_static, not resolved.fully_static)
+                for t in resolved.all_texts()
+            )
+    return out
 
 
 def _collect_package_strings(root: Node) -> tuple[dict[str, ResolvedString], set[str]]:
@@ -721,10 +842,13 @@ class GoAnalyzer:
         self._local_types_cache: dict[int, dict[str, GoType]] = {}
         self._file_types_cache: dict[str, dict[str, GoType]] = {}
 
-    def analyze(self, files: list[Path], root: Path) -> GoAnalysis:
+    def analyze(
+        self, files: list[Path], root: Path, profile: object | None = None
+    ) -> GoAnalysis:
         self._local_types_cache.clear()
         self._file_types_cache.clear()
         infos: list[_FileInfo] = []
+        t_parse = time.perf_counter()
         for path in files:
             source = path.read_bytes()
             tree = self._parser.parse(source).root_node
@@ -740,12 +864,17 @@ class GoAnalyzer:
             functions: list[GoFunction] = []
             func_type_names: set[str] = set()
             struct_func_fields: dict[str, set[str]] = {}
+            interfaces: dict[str, set[str]] = {}
+            iface_embeds: dict[str, list[GoType]] = {}
             for node in tree.named_children:
                 if node.type == "type_declaration":
                     structs.update(_struct_fields(node, pkg, import_path, aliases))
                     func_type_names.update(_func_type_names(node))
                     for sname, fnames in _direct_func_fields(node).items():
                         struct_func_fields.setdefault(sname, set()).update(fnames)
+                    meths, embs = _interface_specs(node, pkg, import_path, aliases)
+                    interfaces.update(meths)
+                    iface_embeds.update(embs)
                 if node.type in {"function_declaration", "method_declaration"}:
                     functions.append(
                         self._function(node, display, pkg, import_path, aliases, rel(path, root), source)
@@ -768,16 +897,22 @@ class GoAnalyzer:
                     functions=functions,
                     func_type_names=func_type_names,
                     struct_func_fields=struct_func_fields,
+                    interfaces=interfaces,
+                    iface_embeds=iface_embeds,
                 )
             )
 
+        if profile is not None:
+            profile.parse += time.perf_counter() - t_parse
+
+        t_resolve = time.perf_counter()
         idx = self._build_indexes(infos)
         self._collect_func_field_bindings(infos, idx)
 
         sql_sites: list[SqlSite] = []
         routes: list[RouteHit] = []
         jobs: list[JobHit] = []
-        calls: list[tuple[str, str, Evidence, Confidence]] = []
+        calls: list[CallHit] = []
         situations: dict[str, list[str]] = defaultdict(list)
 
         echo_rule = next((r for r in self.rules if r.produce.get("entrypoint", {}).get("kind") == "http"), None)
@@ -801,55 +936,59 @@ class GoAnalyzer:
                     args = call_args(node)
                     evidence = Evidence(file=info.rel, line=line_of(node), symbol=fn.qualname)
 
-                    callee = self._resolve_callee(node, fn, info, idx)
+                    callees = self._resolve_callees(node, fn, info, idx)
                     parent = node.parent
                     is_go = parent is not None and parent.type == "go_statement"
-                    if callee and callee.qualname != fn.qualname and not is_go:
-                        conf = (
-                            Confidence.EXACT
-                            if callee.receiver and fn.receiver
-                            else Confidence.INFERRED
-                        )
-                        calls.append((fn.qualname, callee.qualname, evidence, conf))
-                        for ref in self._const_refs_in_args(args, info, idx):
-                            if ref not in situations[callee.qualname]:
-                                situations[callee.qualname].append(ref)
+                    if callees and not is_go:
+                        for callee, conf, cands in callees:
+                            if callee.qualname == fn.qualname:
+                                continue
+                            calls.append(
+                                CallHit(
+                                    caller=fn.qualname,
+                                    callee=callee.qualname,
+                                    evidence=evidence,
+                                    confidence=conf,
+                                    candidates=list(cands),
+                                )
+                            )
+                            for ref in self._const_refs_in_args(args, info, idx):
+                                if ref not in situations[callee.qualname]:
+                                    situations[callee.qualname].append(ref)
+                    self._sql_from_helper_call(
+                        node, args, fn, info, idx, env, package_consts, sql_sites, callees
+                    )
 
                     if pgx_rule and method_matches(method, (pgx_rule.detect.get("calls") or {}).get("method")):
                         if import_matches(info.imports, pgx_rule.when):
                             spec = (pgx_rule.detect.get("calls") or {}).get("arguments", {}).get("sql", {})
                             arg_i = int(spec.get("index", 1))
                             sql_node = args[arg_i] if len(args) > arg_i else None
+                            if self._is_sql_param_ident(fn, sql_node):
+                                continue
                             resolved = _resolve_expr(
                                 sql_node, env, package_consts, info.import_aliases, idx.consts_by_import
                             )
-                            sql_text = resolved.path_text if resolved.usable else ""
-                            if sql_text and (looks_like_sql(sql_text) or resolved.dynamic):
-                                sql_sites.append(
-                                    SqlSite(
-                                        function=fn,
-                                        sql=sql_text,
-                                        dynamic=resolved.dynamic or not resolved.fully_static,
-                                        evidence=Evidence(
-                                            file=info.rel, line=line_of(node), symbol=fn.qualname
-                                        ),
-                                        fully_static=resolved.fully_static,
-                                    )
-                                )
-                            elif sql_node is not None and not resolved.fully_static:
-                                guess = sql_text
+                            texts = resolved.all_texts() if resolved.usable else []
+                            if not texts and sql_node is not None and not resolved.fully_static:
+                                guess = resolved.path_text
                                 if looks_like_sql(guess) or (
                                     guess and re.search(r"(?i)\b(UPDATE|INSERT|DELETE|SELECT)\b", guess)
                                 ):
+                                    texts = [guess]
+                            for sql_text in texts:
+                                if not sql_text or _is_placeholder_token(sql_text):
+                                    continue
+                                if looks_like_sql(sql_text) or resolved.dynamic:
                                     sql_sites.append(
                                         SqlSite(
                                             function=fn,
-                                            sql=guess,
-                                            dynamic=True,
+                                            sql=sql_text,
+                                            dynamic=resolved.dynamic or not resolved.fully_static or len(texts) > 1,
                                             evidence=Evidence(
                                                 file=info.rel, line=line_of(node), symbol=fn.qualname
                                             ),
-                                            fully_static=False,
+                                            fully_static=resolved.fully_static and len(texts) == 1,
                                         )
                                     )
 
@@ -910,6 +1049,9 @@ class GoAnalyzer:
         if ticker_rule:
             jobs.extend(self._detect_jobs(infos, idx, calls, ticker_rule))
 
+        if profile is not None:
+            profile.resolve += time.perf_counter() - t_resolve
+
         return GoAnalysis(
             functions=idx.fn_index,
             sql_sites=sql_sites,
@@ -929,9 +1071,26 @@ class GoAnalyzer:
         const_names_by_import: dict[str, set[str]] = defaultdict(set)
         func_aliases: set[tuple[str, str]] = set()
         func_fields: dict[tuple[str, str], set[str]] = defaultdict(set)
+        interfaces: dict[tuple[str, str], set[str]] = {}
+        iface_embeds: dict[tuple[str, str], list[GoType]] = {}
         for info in infos:
             for n in info.func_type_names:
                 func_aliases.add((info.import_path, n))
+            for iname, meths in info.interfaces.items():
+                interfaces[(info.import_path, iname)] = set(meths)
+            for iname, embs in info.iface_embeds.items():
+                iface_embeds[(info.import_path, iname)] = list(embs)
+        # Flatten embedded interface method sets.
+        changed = True
+        while changed:
+            changed = False
+            for key, embs in iface_embeds.items():
+                cur = interfaces.setdefault(key, set())
+                for g in embs:
+                    extra = interfaces.get((g.import_path or key[0], g.name), set())
+                    if extra - cur:
+                        cur |= extra
+                        changed = True
         for info in infos:
             for sname, fields in info.structs.items():
                 all_structs[(info.import_path, sname)] = fields
@@ -951,6 +1110,26 @@ class GoAnalyzer:
                     by_method[(fn.import_path, fn.receiver, fn.name)] = fn
                 else:
                     by_func[(fn.import_path, fn.name)] = fn
+        methods_of: dict[tuple[str, str], set[str]] = defaultdict(set)
+        for ip, typ, meth in by_method:
+            methods_of[(ip, typ)].add(meth)
+        implementers: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
+        for iface_key, iface_meths in interfaces.items():
+            if not iface_meths:
+                continue
+            unexported = any(m[:1].islower() for m in iface_meths)
+            for type_key, type_meths in methods_of.items():
+                if type_key in interfaces:
+                    continue
+                if unexported and type_key[0] != iface_key[0]:
+                    continue
+                if iface_meths <= type_meths:
+                    implementers[iface_key].append(type_key)
+        iface_fields: dict[tuple[str, str], set[str]] = defaultdict(set)
+        for (ip, sname), fields in all_structs.items():
+            for fname, gtype in fields.items():
+                if (gtype.import_path or ip, gtype.name) in interfaces:
+                    iface_fields[(ip, sname)].add(fname)
         return _Indexes(
             fn_index=fn_index,
             by_func=by_func,
@@ -962,6 +1141,10 @@ class GoAnalyzer:
             func_fields=dict(func_fields),
             field_funcs=defaultdict(list),
             ctor_field_params=defaultdict(dict),
+            interfaces=interfaces,
+            implementers=dict(implementers),
+            iface_fields=dict(iface_fields),
+            field_concretes=defaultdict(list),
         )
 
     def _function(
@@ -1023,12 +1206,30 @@ class GoAnalyzer:
         idx: _Indexes,
     ) -> None:
         for node in walk(fn.node):
+            if node.type == "range_clause":
+                left = node.child_by_field_name("left")
+                right = node.child_by_field_name("right")
+                raw = []
+                if left is not None:
+                    raw = [text(c) for c in left.named_children if c.type == "identifier"]
+                else:
+                    raw = [text(c) for c in node.named_children if c.type == "identifier"]
+                if right is None or len(raw) < 2:
+                    continue
+                value_name = raw[-1]
+                if not value_name or value_name == "_":
+                    continue
+                resolved = _resolve_expr(
+                    right, env, package_consts, info.import_aliases, idx.consts_by_import
+                )
+                env[value_name] = resolved
+                continue
             if node.type in {"short_var_declaration", "assignment_statement", "const_declaration"}:
                 left = node.child_by_field_name("left")
                 right = node.child_by_field_name("right")
                 if node.type == "const_declaration":
                     continue
-                names: list[str] = []
+                names = []
                 if left:
                     names = [text(c) for c in left.named_children if c.type == "identifier"]
                 else:
@@ -1092,20 +1293,22 @@ class GoAnalyzer:
                 return prefix_of_receiver(recv.child_by_field_name("operand"))
             return ""
 
+        assignments: list[tuple[str, Node]] = []
+        for node in walk(info.tree):
+            if node.type not in {"short_var_declaration", "assignment_statement"}:
+                continue
+            lists = [c for c in node.named_children if c.type == "expression_list"]
+            if len(lists) < 2:
+                continue
+            names = [c for c in lists[0].named_children if c.type == "identifier"]
+            values = lists[1].named_children
+            if not names or not values:
+                continue
+            assignments.append((text(names[0]), values[0]))
         changed = True
         while changed:
             changed = False
-            for node in walk(info.tree):
-                if node.type not in {"short_var_declaration", "assignment_statement"}:
-                    continue
-                lists = [c for c in node.named_children if c.type == "expression_list"]
-                if len(lists) < 2:
-                    continue
-                names = [c for c in lists[0].named_children if c.type == "identifier"]
-                values = lists[1].named_children
-                if not names or not values:
-                    continue
-                val = values[0]
+            for ident, val in assignments:
                 if val.type == "call_expression" and call_callee_name(val) == group_method:
                     args = call_args(val)
                     path = resolve_path(args[path_arg] if len(args) > path_arg else None)
@@ -1116,12 +1319,11 @@ class GoAnalyzer:
                         else None
                     )
                     new_prefix = _join_path(prefix_of_receiver(operand), path)
-                    ident = text(names[0])
                     if prefixes.get(ident) != new_prefix:
                         prefixes[ident] = new_prefix
                         changed = True
                 elif val.type == "call_expression" and call_callee_name(val) in {"New"}:
-                    prefixes.setdefault(text(names[0]), "")
+                    prefixes.setdefault(ident, "")
         return prefixes
 
     def _receiver_prefix(
@@ -1370,17 +1572,77 @@ class GoAnalyzer:
         info: _FileInfo,
         idx: _Indexes,
     ) -> GoFunction | None:
+        hits = self._resolve_callees(call, fn, info, idx)
+        return hits[0][0] if len(hits) == 1 else None
+
+    def _resolve_callees(
+        self,
+        call: Node,
+        fn: GoFunction,
+        info: _FileInfo,
+        idx: _Indexes,
+    ) -> list[tuple[GoFunction, Confidence, list[str]]]:
         name = call_callee_name(call)
         func = call.child_by_field_name("function")
         local_types = self._local_types(fn, info, idx)
         if func is None:
-            return None
+            return []
         if func.type == "identifier":
-            # Unique within this package only — never a project-wide name fallback.
-            return idx.by_func.get((fn.import_path, name))
+            found = idx.by_func.get((fn.import_path, name))
+            if found is None:
+                return []
+            conf = Confidence.EXACT if found.receiver and fn.receiver else Confidence.INFERRED
+            return [(found, conf, [])]
         if func.type == "selector_expression":
-            return self._resolve_selector(func, fn, info, idx, local_types)
-        return None
+            return self._resolve_selector_callees(func, fn, info, idx, local_types, name)
+        return []
+
+    def _resolve_selector_callees(
+        self,
+        func_node: Node,
+        fn: GoFunction,
+        info: _FileInfo,
+        idx: _Indexes,
+        local_types: dict[str, GoType],
+        method: str,
+    ) -> list[tuple[GoFunction, Confidence, list[str]]]:
+        found = self._resolve_selector(func_node, fn, info, idx, local_types)
+        operand = func_node.child_by_field_name("operand")
+        gtype = self._type_of_expr(operand, fn, info, local_types, idx)
+        iface_key = (
+            ((gtype.import_path or fn.import_path), gtype.name) if gtype is not None else None
+        )
+        is_iface = bool(iface_key and iface_key in idx.interfaces)
+        if found is not None and not is_iface:
+            conf = Confidence.EXACT if found.receiver and fn.receiver else Confidence.INFERRED
+            return [(found, conf, [])]
+        if not is_iface or gtype is None or iface_key is None:
+            if found is not None:
+                conf = Confidence.EXACT if found.receiver and fn.receiver else Confidence.INFERRED
+                return [(found, conf, [])]
+            return []
+        impls = list(idx.implementers.get(iface_key) or [])
+        if operand is not None and operand.type == "selector_expression":
+            obj_t = self._type_of_expr(
+                operand.child_by_field_name("operand"), fn, info, local_types, idx
+            )
+            field_n = operand.child_by_field_name("field")
+            if obj_t is not None and field_n is not None:
+                concretes = idx.field_concretes.get(
+                    (obj_t.import_path or "", obj_t.name, text(field_n)), []
+                )
+                unique = list(dict.fromkeys((c.import_path, c.name) for c in concretes))
+                if len(unique) == 1:
+                    impls = [unique[0]]
+        callees: list[GoFunction] = []
+        for ip, typ in impls:
+            gf = idx.by_method.get((ip, typ, method))
+            if gf is not None:
+                callees.append(gf)
+        if not callees:
+            return []
+        cands = [c.qualname for c in callees] if len(callees) > 1 else []
+        return [(c, Confidence.INFERRED, list(cands)) for c in callees]
 
     def _resolve_handler_node(
         self,
@@ -1443,6 +1705,60 @@ class GoAnalyzer:
                 found = resolved
         return found
 
+    def _is_sql_param_ident(self, fn: GoFunction, node: Node | None) -> bool:
+        node = _unwrap_literal(node)
+        if node is None or node.type != "identifier":
+            return False
+        name = text(node)
+        return name in SQL_PARAM_NAMES and name in fn.params
+
+    def _sql_param_index(self, callee: GoFunction) -> int | None:
+        order = [p for p in callee.params if p != callee.receiver_var]
+        for i, name in enumerate(order):
+            if name not in SQL_PARAM_NAMES:
+                continue
+            gtype = callee.params.get(name)
+            if gtype is None or gtype.name == "string":
+                return i
+        return None
+
+    def _sql_from_helper_call(
+        self,
+        call: Node,
+        args: list[Node],
+        fn: GoFunction,
+        info: _FileInfo,
+        idx: _Indexes,
+        env: dict[str, ResolvedString],
+        package_consts: dict[str, ResolvedString],
+        sql_sites: list[SqlSite],
+        callees: list[tuple[GoFunction, Confidence, list[str]]],
+    ) -> None:
+        """Bind query-string arguments at helper call sites onto the caller."""
+        seen: set[str] = set()
+        for callee, _conf, _cands in callees:
+            arg_i = self._sql_param_index(callee)
+            if arg_i is None or arg_i >= len(args):
+                continue
+            resolved = _resolve_expr(
+                args[arg_i], env, package_consts, info.import_aliases, idx.consts_by_import
+            )
+            for sql_text in resolved.all_texts():
+                if not sql_text or sql_text in seen or _is_placeholder_token(sql_text):
+                    continue
+                if not (looks_like_sql(sql_text) or re.search(r"(?i)\b(UPDATE|INSERT|DELETE|SELECT)\b", sql_text)):
+                    continue
+                seen.add(sql_text)
+                sql_sites.append(
+                    SqlSite(
+                        function=fn,
+                        sql=sql_text,
+                        dynamic=resolved.dynamic or not resolved.fully_static,
+                        evidence=Evidence(file=info.rel, line=line_of(call), symbol=fn.qualname),
+                        fully_static=resolved.fully_static and len(resolved.all_texts()) == 1,
+                    )
+                )
+
     def _resolve_func_expr(
         self,
         node: Node | None,
@@ -1469,12 +1785,10 @@ class GoAnalyzer:
                         inner = node.child_by_field_name("operand") or (
                             node.named_children[0] if node.named_children else None
                         )
-                        if inner is None or inner.type != "composite_literal":
-                            continue
-                        lit = inner
-                    if lit.type != "composite_literal":
-                        continue
-                    self._bind_composite(lit, fn, info, idx)
+                        if inner is not None and inner.type == "composite_literal":
+                            lit = inner
+                    if lit.type == "composite_literal":
+                        self._bind_composite(lit, fn, info, idx)
         for info in infos:
             for fn in info.functions:
                 for node in walk(fn.node):
@@ -1491,7 +1805,8 @@ class GoAnalyzer:
             return
         ip = gtype.import_path or fn.import_path
         func_fields = idx.func_fields.get((ip, gtype.name), set())
-        if not func_fields:
+        iface_fields = idx.iface_fields.get((ip, gtype.name), set())
+        if not func_fields and not iface_fields:
             return
         body = None
         for child in lit.named_children:
@@ -1500,6 +1815,7 @@ class GoAnalyzer:
                 break
         if body is None:
             return
+        local_types = self._local_types(fn, info, idx)
         for keyed in body.named_children:
             if keyed.type != "keyed_element":
                 continue
@@ -1507,16 +1823,26 @@ class GoAnalyzer:
             val_node = keyed.child_by_field_name("value")
             key_ident = _unwrap_literal(key_node)
             fname = text(key_ident) if key_ident is not None else ""
-            if not fname or fname not in func_fields:
+            if not fname:
                 continue
             val = _unwrap_literal(val_node)
-            resolved = self._resolve_func_expr(val, fn, info, idx)
-            if resolved is not None:
-                idx.field_funcs[(ip, gtype.name, fname)].append(resolved.qualname)
-            elif val is not None and val.type == "identifier":
-                pname = text(val)
-                if pname in fn.params:
-                    idx.ctor_field_params[(fn.import_path, fn.name)][fname] = pname
+            if fname in func_fields:
+                resolved = self._resolve_func_expr(val, fn, info, idx)
+                if resolved is not None:
+                    idx.field_funcs[(ip, gtype.name, fname)].append(resolved.qualname)
+                elif val is not None and val.type == "identifier":
+                    pname = text(val)
+                    if pname in fn.params:
+                        idx.ctor_field_params[(fn.import_path, fn.name)][fname] = pname
+            if fname in iface_fields:
+                if val is not None:
+                    concrete = self._infer_value_type(val, fn, info, local_types, idx)
+                    if concrete is not None and (concrete.import_path, concrete.name) not in idx.interfaces:
+                        idx.field_concretes[(ip, gtype.name, fname)].append(concrete)
+                if val is not None and val.type == "identifier":
+                    pname = text(val)
+                    if pname in fn.params:
+                        idx.ctor_field_params[(fn.import_path, fn.name)][fname] = pname
 
     def _bind_constructor_call(
         self, call: Node, fn: GoFunction, info: _FileInfo, idx: _Indexes
@@ -1531,15 +1857,23 @@ class GoAnalyzer:
         param_order = [p for p in callee.params if p != callee.receiver_var]
         ret = callee.return_type
         ret_ip = ret.import_path or callee.import_path
+        local_types = self._local_types(fn, info, idx)
+        iface_fields = idx.iface_fields.get((ret_ip, ret.name), set())
+        func_fields = idx.func_fields.get((ret_ip, ret.name), set())
         for fname, pname in mapping.items():
             if pname not in param_order:
                 continue
             i = param_order.index(pname)
             if i >= len(args):
                 continue
-            resolved = self._resolve_func_expr(args[i], fn, info, idx)
-            if resolved is not None:
-                idx.field_funcs[(ret_ip, ret.name, fname)].append(resolved.qualname)
+            if fname in func_fields:
+                resolved = self._resolve_func_expr(args[i], fn, info, idx)
+                if resolved is not None:
+                    idx.field_funcs[(ret_ip, ret.name, fname)].append(resolved.qualname)
+            if fname in iface_fields:
+                concrete = self._infer_value_type(args[i], fn, info, local_types, idx)
+                if concrete is not None and (concrete.import_path, concrete.name) not in idx.interfaces:
+                    idx.field_concretes[(ret_ip, ret.name, fname)].append(concrete)
 
     def _const_refs_in_args(self, args: list[Node], info: _FileInfo, idx: _Indexes) -> list[str]:
         refs: list[str] = []
@@ -1578,12 +1912,12 @@ class GoAnalyzer:
         self,
         infos: list[_FileInfo],
         idx: _Indexes,
-        calls: list[tuple[str, str, Evidence, Confidence]],
+        calls: list[CallHit],
         ticker_rule: Rule,
     ) -> list[JobHit]:
         callees_of: dict[str, set[str]] = defaultdict(set)
-        for caller, callee, _ev, _conf in calls:
-            callees_of[caller].add(callee)
+        for hit in calls:
+            callees_of[hit.caller].add(hit.callee)
         jobs: list[JobHit] = []
         seen_handlers: set[str] = set()
         for info in infos:
