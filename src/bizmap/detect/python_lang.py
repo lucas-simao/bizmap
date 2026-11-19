@@ -116,11 +116,11 @@ def _declared_source_roots(files: list[Path], root: Path) -> list[Path]:
 def _python_module_names(files: list[Path], root: Path) -> dict[Path, str]:
     """Importable module name per file.
 
-    1. Inside a package (`__init__.py` chain): dotted path from the parent of
-       the highest package directory (`src/reports/layers/asset.py` →
-       `reports.layers.asset`).
-    2. Under a declared source root (see `_declared_source_roots`): relative
-       to that root (namespace packages in `src/`).
+    1. Under a source root — declared (see `_declared_source_roots`) or any
+       ancestor directory named `src` — relative to that root, with or without
+       `__init__.py` (PEP 420 namespace packages).
+    2. Inside a package (`__init__.py` chain): dotted path from the parent of
+       the highest package directory.
     3. Otherwise: relative to the scan root, as before.
     Names that would collide fall back to (3) for every file involved.
     """
@@ -130,6 +130,23 @@ def _python_module_names(files: list[Path], root: Path) -> dict[Path, str]:
     for path in files:
         full = path.resolve()
         fallback = _module_name(rel(path, root))
+        # 1. a source root wins over a partial `__init__.py` chain (PEP 420
+        #    namespace packages: `src/extractor/` without `__init__.py`,
+        #    `src/extractor/synthesis/` with one → `extractor.synthesis`)
+        hit = next((sr for sr in src_roots if sr in full.parents), None)
+        if hit is None:
+            hit = next(
+                (
+                    d
+                    for d in full.parents
+                    if d.name == "src" and (d == root or root in d.parents)
+                ),
+                None,
+            )
+        if hit is not None:
+            names[path] = _module_name(full.relative_to(hit).as_posix())
+            continue
+        # 2. regular packages: from the parent of the highest package dir
         top: Path | None = None
         d = full.parent
         while (d / "__init__.py").is_file() and (d == root or root in d.parents):
@@ -140,8 +157,7 @@ def _python_module_names(files: list[Path], root: Path) -> dict[Path, str]:
         if top is not None and top != root:
             names[path] = _module_name(full.relative_to(top.parent).as_posix())
             continue
-        hit = next((sr for sr in src_roots if sr in full.parents), None)
-        names[path] = _module_name(full.relative_to(hit).as_posix()) if hit else fallback
+        names[path] = fallback
     counts: dict[str, int] = {}
     for name in names.values():
         counts[name] = counts.get(name, 0) + 1
@@ -897,6 +913,8 @@ class PythonAnalyzer:
             for fn in fns:
                 analysis.functions[fn.qualname] = fn
             parsed.append((path, rel_file, source, tree, module, imap, fns))
+
+        _remap_imports_by_suffix(imaps, set(imaps))
 
         yaml_consts = {
             str(k): ResolvedString(str(v), True, False) for k, v in (constants or {}).items()
@@ -4322,3 +4340,55 @@ def _link_unscanned_sinks(
                                 sink_not_scanned=True,
                             )
                         )
+
+
+
+# ---------------------------------------------------------------------------
+# Import → scanned module, by unique suffix (layout safety net).
+# ---------------------------------------------------------------------------
+
+
+def _suffix_module(name: str, scanned: set[str], cache: dict[str, str | None]) -> str | None:
+    """`extractor.synthesis._utils` ↔ `synthesis._utils`, `backend.app.x` ↔
+    `app.x`: the unique scanned module that shares a 2+ segment suffix."""
+    if name in scanned:
+        return name
+    if name in cache:
+        return cache[name]
+    parts = name.split(".")
+    hits: set[str] = set()
+    for mod in scanned:
+        mparts = mod.split(".")
+        k = min(len(parts), len(mparts))
+        if k < 2:
+            continue
+        if parts[-k:] == mparts[-k:] and (k == len(parts) or k == len(mparts)):
+            hits.add(mod)
+    out = next(iter(hits)) if len(hits) == 1 else None
+    cache[name] = out
+    return out
+
+
+def _remap_imports_by_suffix(imaps: dict[str, ImportMap], scanned: set[str]) -> None:
+    cache: dict[str, str | None] = {}
+    for imap in imaps.values():
+        for alias, mod in list(imap.modules.items()):
+            if mod not in scanned:
+                hit = _suffix_module(mod, scanned, cache)
+                if hit:
+                    imap.modules[alias] = hit
+        for local, (mod, orig) in list(imap.from_names.items()):
+            full = f"{mod}.{orig}"
+            if mod in scanned or full in scanned:
+                continue
+            sub = _suffix_module(full, scanned, cache)
+            if sub:
+                # `from pkg.sub import module`
+                head, _, tail = sub.rpartition(".")
+                imap.from_names[local] = (head, tail) if head else (sub, orig)
+                if not head:
+                    imap.modules.setdefault(local, sub)
+                continue
+            hit = _suffix_module(mod, scanned, cache)
+            if hit:
+                imap.from_names[local] = (hit, orig)

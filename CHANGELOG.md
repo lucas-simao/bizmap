@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **Namespace packages under `src/` (regression from the package-roots
+  change)**: a source root now wins over a partial `__init__.py` chain, and
+  any `src/` directory counts as a source root even without a `pyproject`. With
+  `src/extractor/` lacking `__init__.py` and `src/extractor/synthesis/` having
+  one, the module is `extractor.synthesis._utils` (it was
+  `synthesis._utils`), so `from extractor.synthesis._utils import …` resolves.
+  **Node ids change**: Python modules under `src/` lose the `src.` prefix.
+- **Import suffix fallback**: an imported module that is not a scanned module
+  name is remapped to the unique scanned module sharing a 2+ segment suffix
+  (`backend.app.repo` ↔ `app.repo` when scanning `backend/`), for
+  `import`, `from … import name` and `from pkg import module`.
+
 - **`sink_not_scanned` no longer downgrades literal SQL**: the edge
   confidence describes the SQL (a literal stays `exact`); the unscanned
   executor is carried by the `sink_not_scanned: true` flag.

@@ -113,3 +113,85 @@ def stock(conn):
     assert "table:a" in _reach(graph, function_id("panels.sales.compute"))
     assert "table:b" not in _reach(graph, function_id("panels.sales.compute"))
     assert "table:b" in _reach(graph, function_id("panels.stock.compute"))
+
+
+def test_py_namespace_package_partial_init(tmp_path: Path) -> None:
+    """Evaluation repro: src/extractor/ has NO __init__.py (PEP 420), but
+    src/extractor/synthesis/ has one. `from extractor.synthesis._utils import
+    build_body` must resolve (no pyproject needed: `src/` is a source root)."""
+    _write(tmp_path, "schema.sql", "CREATE TABLE bodies (id text, body text);\n")
+    _write(tmp_path, "services/extract/src/extractor/synthesis/__init__.py")
+    _write(
+        tmp_path,
+        "services/extract/src/extractor/synthesis/_utils.py",
+        """
+from sqlalchemy import text
+
+
+def build_body(conn, body_id):
+    return conn.execute(text("SELECT id, body FROM bodies WHERE id = :i"), {"i": body_id})
+""",
+    )
+    _write(
+        tmp_path,
+        "services/extract/src/extractor/api.py",
+        """
+from fastapi import FastAPI
+
+from extractor.synthesis._utils import build_body
+
+app = FastAPI()
+
+
+@app.get("/bodies/{body_id}")
+def get_body(body_id: str, conn=None):
+    return build_body(conn, body_id)
+""",
+    )
+    graph = scan_path(tmp_path)
+    assert function_id("extractor.synthesis._utils.build_body") in graph.nodes
+    assert "table:bodies" in _reach(graph, "entrypoint:http:GET:/bodies/{body_id}")
+    node = graph.get(function_id("extractor.api.get_body"))
+    assert not (node.attrs.get("unresolved_calls") or []), node.attrs.get("unresolved_calls")
+
+
+def test_import_prefix_outside_scan_root_resolves_by_unique_suffix(tmp_path: Path) -> None:
+    """Scanning `backend/` while the code imports `backend.app.repo`."""
+    root = tmp_path / "backend"
+    _write(root, "schema.sql", "CREATE TABLE notes (id text);\n")
+    _write(
+        root,
+        "app/repo.py",
+        """
+from sqlalchemy import text
+
+
+def load_notes(conn):
+    return conn.execute(text("SELECT id FROM notes"))
+""",
+    )
+    _write(
+        root,
+        "app/api.py",
+        """
+from fastapi import FastAPI
+
+from backend.app import repo
+from backend.app.repo import load_notes
+
+app = FastAPI()
+
+
+@app.get("/notes")
+def notes(conn=None):
+    return repo.load_notes(conn)
+
+
+@app.get("/notes2")
+def notes2(conn=None):
+    return load_notes(conn)
+""",
+    )
+    graph = scan_path(root)
+    assert "table:notes" in _reach(graph, "entrypoint:http:GET:/notes")
+    assert "table:notes" in _reach(graph, "entrypoint:http:GET:/notes2")
