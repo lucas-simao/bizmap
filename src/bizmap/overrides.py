@@ -27,6 +27,7 @@ class ScanConfig:
     services: dict[str, Any] = field(default_factory=dict)
     repos: list[str] = field(default_factory=list)
     constants: dict[str, str] = field(default_factory=dict)
+    workspace: Path | None = None
 
 
 def git_toplevel(start: Path) -> Path | None:
@@ -70,7 +71,62 @@ def find_overrides(root: Path, config: Path | None = None) -> Path | None:
     return None
 
 
+def _workspace_config(root: Path, own: Path | None, max_up: int = 4) -> tuple[Path, dict] | None:
+    """The nearest ancestor bizmap.yaml whose ``repos:`` lists ``root``.
+
+    Lets ``bizmap scan web`` (one repo) see the ``services:`` / ``database:``
+    declared once at the workspace level, so per-repo scans + ``registry
+    merge`` give the same graph as a joint scan.
+    """
+    root = root.resolve()
+    for depth, parent in enumerate(root.parents):
+        if depth >= max_up:
+            break
+        candidate = _yaml_in(parent)
+        if candidate is None or (own is not None and candidate.resolve() == own.resolve()):
+            continue
+        try:
+            data = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        repos = data.get("repos") or []
+        if isinstance(repos, str):
+            repos = [repos]
+        listed = set()
+        for item in repos:
+            target = Path(str(item))
+            target = target if target.is_absolute() else (parent / target)
+            listed.add(target.resolve())
+        if root in listed:
+            return candidate, data
+    return None
+
+
 def load_scan_config(root: Path, config: Path | None = None) -> ScanConfig:
+    cfg = _load_scan_config(root, config=config)
+    if config is not None:
+        return cfg
+    ws = _workspace_config(root, cfg.path)
+    if ws is None:
+        return cfg
+    ws_path, data = ws
+    services = data.get("services") or {}
+    if isinstance(services, dict):
+        merged = {str(k): v for k, v in services.items() if v is not None}
+        merged.update(cfg.services)
+        cfg.services = merged
+    database = data.get("database")
+    if isinstance(database, dict):
+        database = database.get("name") or database.get("id")
+    if not cfg.database and database:
+        cfg.database = str(database)
+    cfg.workspace = ws_path
+    return cfg
+
+
+def _load_scan_config(root: Path, config: Path | None = None) -> ScanConfig:
     path = find_overrides(root, config=config)
     if path is None:
         return ScanConfig()
