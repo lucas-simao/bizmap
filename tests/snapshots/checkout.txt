@@ -37,7 +37,7 @@ function web/function:src.checkout.placeOrder
 function web/function:src.checkout.pollOrder
 table table:invoices
 table table:orders
-# edges (57)
+# edges (54)
 calls api/function:main.ExpireJob.Run -> api/function:main.Repo.ExpirePending [exact]
 calls api/function:main.Handler.CreateOrder -> api/function:main.Billing.CreateInvoice [exact]
 calls api/function:main.Handler.CreateOrder -> api/function:main.Repo.InsertOrder [exact]
@@ -63,11 +63,8 @@ reads api/function:main.Repo.GetOrder -> column:orders.id [exact]
 reads api/function:main.Repo.GetOrder -> column:orders.status [exact]
 reads api/function:main.Repo.GetOrder -> column:orders.total_cents [exact]
 reads api/function:main.Repo.MarkPaid -> column:orders.id [exact]
-reads billing/entrypoint:http:POST:/invoices -> table:invoices [inferred]
 reads billing/entrypoint:http:POST:/webhooks/payment -> table:invoices [inferred]
-reads billing/function:app.create_invoice -> table:invoices [unknown]
 reads billing/function:app.payment_webhook -> column:invoices.id [exact]
-reads billing/function:app.payment_webhook -> table:invoices [unknown]
 triggers api/entrypoint:http:GET:/api/orders/:id -> api/function:main.Handler.GetOrder [exact]
 triggers api/entrypoint:http:POST:/api/orders -> api/function:main.Handler.CreateOrder [exact]
 triggers api/entrypoint:http:POST:/api/orders/:id/paid -> api/function:main.Handler.MarkPaid [exact]
