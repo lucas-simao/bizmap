@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`report --redact` leaked schema names**: `via` values such as
+  `db_trigger:<name>` were printed in clear. Every name from code or schema is
+  now hashed (`db_trigger:h:…`); only counts, edge types, entrypoint kinds,
+  reasons, and the fixed derivation names (`route_literal`, `sql_reference`, …)
+  stay readable. New `--salt-file PATH` creates a private random salt on first
+  use and reuses it, so redacted runs are comparable; without a salt each run
+  uses a random one (documented in the CLI note).
+
 - **Cross-service false positives (route literals and traced clients)**: a
   call whose base resolves to a `services:` entry now matches only that
   service's routes; if the service was not scanned it stays
