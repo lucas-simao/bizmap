@@ -13,6 +13,14 @@
 
 ### Added
 
+- **`examples/checkout`**: web (TypeScript + axios) → api (Go + Echo + pgx,
+  ticker job) → billing (Python + FastAPI) → api, one database. Used by the
+  README demo, covered by a chain test and a golden snapshot; CI prints its
+  Mermaid diagram, `why orders.status`, and report.
+- **README rewrite**: problem-first pitch, 3-service demo with real output,
+  stack matrix, comparison, coverage report. Detector-by-detector detail
+  moved to `docs/how-it-works.md`.
+
 - **`bizmap report`** (`--json`, `--redact`, `--salt`): coverage of a scan —
   entrypoints reaching a table/collection (by kind, with the list that does
   not), `calls_http` by derivation and cross-repo, `unresolved_http` by reason
