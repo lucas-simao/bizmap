@@ -26,9 +26,7 @@ func main() {
 
 	e := echo.New()
 	api := e.Group("/api")
-	api.POST("/orders", h.CreateOrder)
-	api.GET("/orders/:id", h.GetOrder)
-	api.POST("/orders/:id/paid", h.MarkPaid)
+	registerOrderRoutes(api, h)
 
 	go expire.Run(ctx)
 

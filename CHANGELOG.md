@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **Go Echo groups nested inside a function that receives the group**
+  (regression exposed by whole-path matching): `s := g.Group("/org/settings")`
+  where `g` is a `*echo.Group` parameter now keeps the caller's prefix
+  (`/api/v1/client/org/settings/...`), at any depth and across packages; local
+  groups are recomputed whenever a parameter prefix arrives from a caller.
+  `examples/checkout` registers its order routes this way, and a test names
+  every expected cross-service link that goes missing.
+- **Go routes with an empty path** (`orders.POST("", h)`, the group root)
+  were dropped; found by the new checkout link guard.
+
 - **Base passed as a parameter → `inferred`, in real shapes**: caller
   arguments now resolve through env aliases (`const env = import.meta.env;
   env.VITE_API_URL`), env destructuring (`const { VITE_API_URL } =
