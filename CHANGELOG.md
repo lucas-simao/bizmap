@@ -50,6 +50,18 @@
 
 ### Added
 
+- **Python function tables**: a call through a dict/list of functions
+  (`BUILDERS[kind](conn)`, `BUILDERS.get(kind)(...)`, `b = BUILDERS[k]; b()`,
+  `for f in BUILDERS.values(): f()`, imported or `module.BUILDERS`,
+  `functools.partial` members) calls every member (`inferred`), so dashboard
+  endpoints that dispatch to `_build_x()` builders reach their tables.
+- **Reach definition in `bizmap report`**: printed in the text output and as
+  `entrypoints.definition` in JSON — any-confidence `reads`/`writes` from the
+  entrypoint (propagated through calls and DB triggers, not across
+  `calls_http`) to a named table/column/view/collection; tables missing from
+  the DDL count, `table:unknown` does not and is reported separately as
+  `reaching_only_unknown`.
+
 - **`examples/checkout`**: web (TypeScript + axios) → api (Go + Echo + pgx,
   ticker job) → billing (Python + FastAPI) → api, one database. Used by the
   README demo, covered by a chain test and a golden snapshot; CI prints its

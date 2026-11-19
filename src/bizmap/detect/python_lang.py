@@ -960,6 +960,7 @@ class PythonAnalyzer:
             )
             self._detect_main_worker(analysis, tree, module, fns, enclosing, rel_file)
 
+        _link_function_tables(analysis, parsed)
         _link_sql_references(analysis, parsed, consts_by_module, dicts_by_module)
         unique: dict[tuple, PySqlSite] = {}
         for site in analysis.sql_sites:
@@ -3449,3 +3450,146 @@ def _link_sql_references(
                 via=via,
             )
         )
+
+
+
+# ---------------------------------------------------------------------------
+# Function tables: `BUILDERS = {"x": _build_x, ...}; BUILDERS[kind](...)`.
+# A call through a dict/list of functions calls every function in it
+# (`inferred`), so lineage reaches the tables each one touches.
+# ---------------------------------------------------------------------------
+
+
+def _fn_ref(node: Node, module: str, imap: ImportMap, functions: dict) -> str | None:
+    if node.type == "identifier":
+        name = text(node)
+        local = f"{module}.{name}"
+        if local in functions:
+            return local
+        if name in imap.from_names:
+            mod, orig = imap.from_names[name]
+            target = f"{mod}.{orig}"
+            if target in functions:
+                return target
+        return None
+    if node.type == "attribute":
+        obj = node.child_by_field_name("object")
+        attr = node.child_by_field_name("attribute")
+        if obj is not None and attr is not None and obj.type == "identifier":
+            mod = imap.modules.get(text(obj))
+            if mod and f"{mod}.{text(attr)}" in functions:
+                return f"{mod}.{text(attr)}"
+        return None
+    if node.type == "call" and call_callee_name(node) == "partial":
+        pos = call_posargs(node)
+        return _fn_ref(pos[0], module, imap, functions) if pos else None
+    return None
+
+
+def _table_members(value: Node, module: str, imap: ImportMap, functions: dict) -> list[str]:
+    elems: list[Node] = []
+    if value.type == "dictionary":
+        for pair in value.named_children:
+            if pair.type == "pair":
+                v = pair.child_by_field_name("value")
+                if v is not None:
+                    elems.append(v)
+    elif value.type in {"list", "tuple", "set"}:
+        elems = list(value.named_children)
+    out: list[str] = []
+    for el in elems:
+        ref = _fn_ref(el, module, imap, functions)
+        if ref and ref not in out:
+            out.append(ref)
+    return out
+
+
+def _link_function_tables(analysis: PyAnalysis, parsed: list) -> None:
+    functions = analysis.functions
+    tables: dict[str, dict[str, list[str]]] = {}
+    for _path, _rf, _src, tree, module, imap, _fns in parsed:
+        local: dict[str, list[str]] = {}
+        for name, value in collect_module_assignments(tree):
+            members = _table_members(value, module, imap, functions)
+            if members:
+                local[name] = members
+        tables[module] = local
+
+    existing = {(c, d) for c, d, _e, _k in analysis.calls}
+
+    for _path, rel_file, _src, _tree, module, imap, fns in parsed:
+        visible = dict(tables.get(module) or {})
+        for alias, (mod, orig) in imap.from_names.items():
+            if orig in (tables.get(mod) or {}):
+                visible[alias] = tables[mod][orig]
+
+        def table_of(node: Node | None, *, visible=visible, imap=imap) -> list[str] | None:
+            if node is None:
+                return None
+            if node.type == "identifier":
+                return visible.get(text(node))
+            if node.type == "attribute":
+                obj = node.child_by_field_name("object")
+                attr = node.child_by_field_name("attribute")
+                if obj is not None and attr is not None and obj.type == "identifier":
+                    mod = imap.modules.get(text(obj))
+                    if mod:
+                        return (tables.get(mod) or {}).get(text(attr))
+                    if text(obj) in imap.from_names:
+                        src_mod, orig = imap.from_names[text(obj)]
+                        return (tables.get(f"{src_mod}.{orig}") or {}).get(text(attr))
+            return None
+
+        def lookup(expr: Node | None) -> list[str] | None:
+            """`T[k]`, `T.get(k)`, `T.get(k, d)` → members of T."""
+            if expr is None:
+                return None
+            if expr.type == "subscript":
+                return table_of(expr.child_by_field_name("value"))
+            if expr.type == "call" and call_callee_name(expr) == "get":
+                func = expr.child_by_field_name("function")
+                obj = func.child_by_field_name("object") if func is not None else None
+                return table_of(obj)
+            return None
+
+        for fn in fns:
+            fdef = fn.node
+            if fdef.type == "decorated_definition":
+                fdef = fdef.child_by_field_name("definition") or fdef
+            local_alias: dict[str, list[str]] = {}
+            for node in walk(fdef):
+                owner = _enclosing_fn_node(node)
+                if owner is None or (owner.start_byte, owner.end_byte) != (fdef.start_byte, fdef.end_byte):
+                    continue
+                if node.type == "assignment":
+                    left = node.child_by_field_name("left")
+                    members = lookup(node.child_by_field_name("right"))
+                    if left is not None and left.type == "identifier" and members:
+                        local_alias[text(left)] = members
+                elif node.type == "for_statement":
+                    left = node.child_by_field_name("left")
+                    right = node.child_by_field_name("right")
+                    members = table_of(right)
+                    if members is None and right is not None and right.type == "call":
+                        if call_callee_name(right) in {"values", "items"}:
+                            func = right.child_by_field_name("function")
+                            members = table_of(func.child_by_field_name("object") if func is not None else None)
+                    if members and left is not None:
+                        names = [n for n in walk(left) if n.type == "identifier"]
+                        if names:
+                            local_alias[text(names[-1])] = members
+                elif node.type == "call":
+                    func = node.child_by_field_name("function")
+                    members = None
+                    if func is not None:
+                        members = lookup(func)
+                        if members is None and func.type == "identifier":
+                            members = local_alias.get(text(func))
+                    if not members:
+                        continue
+                    ev = Evidence(file=rel_file, line=line_of(node), symbol=fn.qualname)
+                    for callee in members:
+                        if callee == fn.qualname or (fn.qualname, callee) in existing:
+                            continue
+                        existing.add((fn.qualname, callee))
+                        analysis.calls.append((fn.qualname, callee, ev, Confidence.INFERRED))

@@ -49,6 +49,8 @@ def test_build_report_counts() -> None:
     assert rep["http"]["unresolved_top_keys"] == [{"key": "BILLING_URL", "count": 1}]
     assert rep["data_links_by_via"] == {"sql_reference": 1}
     assert rep["unresolved_calls"] == 1
+    assert rep["entrypoints"]["reaching_only_unknown"] == 0
+    assert "table:unknown" in rep["entrypoints"]["definition"]
     text = format_report(rep)
     assert "reaching a table/collection: 1 (33.3%)" in text
 
@@ -169,3 +171,21 @@ def test_salt_file_makes_redacted_runs_comparable(tmp_path: Path) -> None:
         return json.loads(text[text.index("{") :])
 
     assert _json(first.output) == _json(second.output)
+
+
+
+def test_reach_counts_unknown_only_separately() -> None:
+    graph = {
+        "nodes": [
+            {"id": "entrypoint:http:GET:/a", "type": "entrypoint", "kind": "http", "method": "GET", "path": "/a"},
+            {"id": "entrypoint:http:GET:/b", "type": "entrypoint", "kind": "http", "method": "GET", "path": "/b"},
+        ],
+        "edges": [
+            {"id": "x", "type": "reads", "from": "entrypoint:http:GET:/a", "to": "table:unknown", "confidence": "unknown"},
+            {"id": "y", "type": "reads", "from": "entrypoint:http:GET:/b", "to": "table:ext", "confidence": "inferred"},
+        ],
+    }
+    ep = build_report(graph)["entrypoints"]
+    assert ep["reaching_data"] == 1
+    assert ep["reaching_only_unknown"] == 1
+    assert "reaching only table:unknown" in format_report(build_report(graph))
