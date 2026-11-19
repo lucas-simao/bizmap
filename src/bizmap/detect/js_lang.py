@@ -1348,7 +1348,7 @@ class JsAnalyzer:
             # variable). Record the call with an explicit hole instead of
             # dropping it: it becomes `unresolved_http` (`path_dynamic`).
             expr = re.sub(r"[\s{}]+", " ", text(args[0])).strip()[:60] or "path"
-            path_val = "{" + (expr if "(" in expr else expr + "()") + "}"
+            path_val = "/{" + (expr if "(" in expr else expr + "()") + "}"
             path_unresolved = True
         composed = _join_route(base, path_val) if path_val else base
         if not composed or not _looks_like_http_path(composed):
