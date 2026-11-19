@@ -1,0 +1,17 @@
+id: go.ticker.job
+language: go
+framework: stdlib
+description: >
+  Background jobs started as `go x.Run(ctx)` whose Run method uses time.NewTicker.
+status: active
+detect:
+  go_call:
+    method: Run
+  requires_inside_callee:
+    calls:
+      method: NewTicker
+      receiver: time
+produce:
+  entrypoint:
+    kind: scheduled_job
+    handler: "{handler}"

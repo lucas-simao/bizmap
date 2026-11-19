@@ -1,0 +1,28 @@
+# Stub for v0.2 (JavaScript/TypeScript tree-sitter engine).
+# This file documents the intended rule shape so the community can add
+# Express (and other Node frameworks) without inventing a new format.
+id: express.routes
+language: javascript
+framework: express
+description: Express HTTP routes (app.get("/path", handler)). Not executed in v0.1.
+status: stub
+when:
+  imports:
+    contains: express
+detect:
+  calls:
+    method:
+      in: [get, post, put, patch, delete, use, all]
+    arguments:
+      path:
+        index: 0
+        capture: string
+      handler:
+        index: -1
+        capture: ident_or_function
+produce:
+  entrypoint:
+    kind: http
+    method: "{method}"
+    path: "{path}"
+    handler: "{handler}"

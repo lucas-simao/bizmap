@@ -1,0 +1,24 @@
+id: pgx.v5.sql
+language: go
+framework: pgx
+description: >
+  pgx v5 raw SQL via tx.Exec/Query/QueryRow(ctx, sql, args).
+  SQL argument is captured from literals and same-package const concatenation.
+status: active
+when:
+  imports:
+    contains: github.com/jackc/pgx
+    optional: true
+detect:
+  calls:
+    method:
+      regex: "^(Exec|Query|QueryRow)$"
+    arguments:
+      sql:
+        index: 1
+        capture: string_or_ident
+produce:
+  sql:
+    dialect: postgres
+    source: "{sql}"
+    caller: "{enclosing_function}"
