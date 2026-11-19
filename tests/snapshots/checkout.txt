@@ -1,0 +1,98 @@
+# nodes (38)
+column column:invoices.amount_cents
+column column:invoices.id
+column column:invoices.order_id
+column column:invoices.provider_ref
+column column:invoices.status
+column column:orders.created_at
+column column:orders.id
+column column:orders.paid_at
+column column:orders.status
+column column:orders.total_cents
+column column:orders.user_id
+entrypoint api/entrypoint:http:GET:/api/orders/:id
+entrypoint api/entrypoint:http:POST:/api/orders
+entrypoint api/entrypoint:http:POST:/api/orders/:id/paid
+entrypoint api/entrypoint:job:main.ExpireJob.Run
+entrypoint billing/entrypoint:http:POST:/invoices
+entrypoint billing/entrypoint:http:POST:/webhooks/payment
+function api/function:main.Billing.CreateInvoice
+function api/function:main.ExpireJob.Run
+function api/function:main.Handler.CreateOrder
+function api/function:main.Handler.GetOrder
+function api/function:main.Handler.MarkPaid
+function api/function:main.NewBilling
+function api/function:main.NewExpireJob
+function api/function:main.NewHandler
+function api/function:main.NewRepo
+function api/function:main.Repo.ExpirePending
+function api/function:main.Repo.GetOrder
+function api/function:main.Repo.InsertOrder
+function api/function:main.Repo.MarkPaid
+function api/function:main.main
+function billing/function:app.create_invoice
+function billing/function:app.payment_webhook
+function web/function:src.api.client.module
+function web/function:src.checkout.placeOrder
+function web/function:src.checkout.pollOrder
+table table:invoices
+table table:orders
+# edges (57)
+calls api/function:main.ExpireJob.Run -> api/function:main.Repo.ExpirePending [exact]
+calls api/function:main.Handler.CreateOrder -> api/function:main.Billing.CreateInvoice [exact]
+calls api/function:main.Handler.CreateOrder -> api/function:main.Repo.InsertOrder [exact]
+calls api/function:main.Handler.GetOrder -> api/function:main.Repo.GetOrder [exact]
+calls api/function:main.Handler.MarkPaid -> api/function:main.Repo.MarkPaid [exact]
+calls api/function:main.main -> api/function:main.NewBilling [inferred]
+calls api/function:main.main -> api/function:main.NewExpireJob [inferred]
+calls api/function:main.main -> api/function:main.NewHandler [inferred]
+calls api/function:main.main -> api/function:main.NewRepo [inferred]
+calls_http api/function:main.Billing.CreateInvoice -> billing/entrypoint:http:POST:/invoices [inferred]
+calls_http billing/function:app.payment_webhook -> api/entrypoint:http:POST:/api/orders/:id/paid [inferred]
+calls_http web/function:src.checkout.placeOrder -> api/entrypoint:http:POST:/api/orders [inferred]
+calls_http web/function:src.checkout.pollOrder -> api/entrypoint:http:GET:/api/orders/:id [inferred]
+reads api/entrypoint:http:GET:/api/orders/:id -> table:orders [inferred]
+reads api/entrypoint:http:POST:/api/orders/:id/paid -> table:orders [inferred]
+reads api/entrypoint:job:main.ExpireJob.Run -> table:orders [inferred]
+reads api/function:main.ExpireJob.Run -> table:orders [inferred]
+reads api/function:main.Handler.GetOrder -> table:orders [inferred]
+reads api/function:main.Handler.MarkPaid -> table:orders [inferred]
+reads api/function:main.Repo.ExpirePending -> column:orders.created_at [exact]
+reads api/function:main.Repo.ExpirePending -> column:orders.status [exact]
+reads api/function:main.Repo.GetOrder -> column:orders.id [exact]
+reads api/function:main.Repo.GetOrder -> column:orders.status [exact]
+reads api/function:main.Repo.GetOrder -> column:orders.total_cents [exact]
+reads api/function:main.Repo.MarkPaid -> column:orders.id [exact]
+reads billing/entrypoint:http:POST:/invoices -> table:invoices [inferred]
+reads billing/entrypoint:http:POST:/webhooks/payment -> table:invoices [inferred]
+reads billing/function:app.create_invoice -> table:invoices [unknown]
+reads billing/function:app.payment_webhook -> column:invoices.id [exact]
+reads billing/function:app.payment_webhook -> table:invoices [unknown]
+triggers api/entrypoint:http:GET:/api/orders/:id -> api/function:main.Handler.GetOrder [exact]
+triggers api/entrypoint:http:POST:/api/orders -> api/function:main.Handler.CreateOrder [exact]
+triggers api/entrypoint:http:POST:/api/orders/:id/paid -> api/function:main.Handler.MarkPaid [exact]
+triggers api/entrypoint:job:main.ExpireJob.Run -> api/function:main.ExpireJob.Run [exact]
+triggers billing/entrypoint:http:POST:/invoices -> billing/function:app.create_invoice [exact]
+triggers billing/entrypoint:http:POST:/webhooks/payment -> billing/function:app.payment_webhook [exact]
+writes api/entrypoint:http:POST:/api/orders -> table:orders [inferred]
+writes api/entrypoint:http:POST:/api/orders/:id/paid -> table:orders [inferred]
+writes api/entrypoint:job:main.ExpireJob.Run -> table:orders [inferred]
+writes api/function:main.ExpireJob.Run -> table:orders [inferred]
+writes api/function:main.Handler.CreateOrder -> table:orders [inferred]
+writes api/function:main.Handler.MarkPaid -> table:orders [inferred]
+writes api/function:main.Repo.ExpirePending -> column:orders.status [exact]
+writes api/function:main.Repo.InsertOrder -> column:orders.id [exact]
+writes api/function:main.Repo.InsertOrder -> column:orders.status [exact]
+writes api/function:main.Repo.InsertOrder -> column:orders.total_cents [exact]
+writes api/function:main.Repo.InsertOrder -> column:orders.user_id [exact]
+writes api/function:main.Repo.MarkPaid -> column:orders.paid_at [exact]
+writes api/function:main.Repo.MarkPaid -> column:orders.status [exact]
+writes billing/entrypoint:http:POST:/invoices -> table:invoices [inferred]
+writes billing/entrypoint:http:POST:/webhooks/payment -> table:invoices [inferred]
+writes billing/function:app.create_invoice -> column:invoices.amount_cents [exact]
+writes billing/function:app.create_invoice -> column:invoices.id [exact]
+writes billing/function:app.create_invoice -> column:invoices.order_id [exact]
+writes billing/function:app.create_invoice -> column:invoices.status [exact]
+writes billing/function:app.payment_webhook -> column:invoices.provider_ref [exact]
+writes billing/function:app.payment_webhook -> column:invoices.status [exact]
+# unresolved_http (0)

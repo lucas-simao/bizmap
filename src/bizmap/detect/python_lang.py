@@ -1591,6 +1591,19 @@ class PythonAnalyzer:
         for arg in args:
             if arg.type == "keyword_argument":
                 arg = arg.child_by_field_name("value") or arg
+            if arg.type == "call":
+                inner_name = call_callee_name(arg)
+                if inner_name == "text":
+                    # execute(text("...")): the SQL is the text() argument,
+                    # not an unresolved call expression.
+                    inner_pos = call_posargs(arg)
+                    if not inner_pos:
+                        continue
+                    arg = inner_pos[0]
+                elif inner_name in _SQLALCHEMY_BUILDERS:
+                    # select()/insert()/update()/delete() are handled by the
+                    # SQLAlchemy detector; their source text is not SQL.
+                    continue
             for res in _sql_arg_sources(arg, resolve, imap, local_dicts, dicts_by_module):
                 sql_val = res.path_text if res.usable else ""
                 if res.fully_static and res.text and looks_like_sql(res.text):
@@ -2225,6 +2238,22 @@ def _collections_in_chain(call: Node, resolve) -> list[str]:
         break
     names.reverse()
     return names
+
+
+_SQLALCHEMY_BUILDERS = {
+    "select",
+    "insert",
+    "update",
+    "delete",
+    "union",
+    "union_all",
+    "exists",
+    "values",
+    "where",
+    "returning",
+    "on_conflict_do_update",
+    "on_conflict_do_nothing",
+}
 
 
 def _sql_arg_sources(

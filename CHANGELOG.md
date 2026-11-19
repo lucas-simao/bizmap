@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Python phantom unknown reads**: `execute(text("..."), params)` no longer
+  adds a `reads <table> [unknown]` next to the exact edges (the `text()` call
+  was also read as unresolved SQL), and SQLAlchemy builders
+  (`update(T).where(...).values(...)`, `insert(...)`, `delete(...)`) no
+  longer produce `table:unknown` because their source text contains
+  `UPDATE`/`INSERT`/`DELETE`.
+
 ### Added
 
 - **`bizmap report`** (`--json`, `--redact`, `--salt`): coverage of a scan —
