@@ -1,0 +1,245 @@
+# nodes (105)
+column column:appointments.id
+column column:appointments.notes
+column column:appointments.patient_id
+column column:appointments.status
+column column:attachments.appointment_id
+column column:attachments.file_id
+column column:attachments.id
+column column:audit_log.action
+column column:audit_log.id
+column column:audit_log.payload
+column column:email_prefs.id
+column column:email_prefs.path
+column column:email_prefs.patient_id
+column column:notifications.body
+column column:notifications.id
+column column:patients.email
+column column:patients.id
+column column:patients.name
+column column:patients.status
+column column:pg_roles.rolname
+column column:photos.id
+column column:photos.patient_id
+column column:photos.url
+entrypoint entrypoint:http:GET:/api/appointments
+entrypoint entrypoint:http:GET:/api/appointments/:id
+entrypoint entrypoint:http:GET:/api/patients
+entrypoint entrypoint:http:GET:/api/patients/:id
+entrypoint entrypoint:http:GET:/api/version
+entrypoint entrypoint:http:GET:/email-prefs
+entrypoint entrypoint:http:GET:/profile/photo
+entrypoint entrypoint:http:PATCH:/api/appointments/:id
+entrypoint entrypoint:http:POST:/api/appointments
+entrypoint entrypoint:http:POST:/api/patients
+entrypoint entrypoint:http:POST:/api/pending/setup
+entrypoint entrypoint:job:cmd/server.go.func:L53
+entrypoint entrypoint:job:cmd/server.go.func:L58
+entrypoint entrypoint:job:cmd/server.runLoop
+entrypoint entrypoint:job:jobs.ExpireJob.Run
+entrypoint entrypoint:job:jobs.Poller.Run
+entrypoint entrypoint:job:jobs.Start
+function function:cmd/server.go.func:L53
+function function:cmd/server.go.func:L58
+function function:cmd/server.main
+function function:cmd/server.runLoop
+function function:consent.Item.Current
+function function:controllers/orders.Handler.Create
+function function:controllers/orders.Handler.Get
+function function:controllers/orders.Handler.List
+function function:controllers/orders.Handler.Setup
+function function:controllers/orders.Handler.Update
+function function:controllers/orders.Handler.Version
+function function:controllers/orders.Handler.options
+function function:controllers/orders.New
+function function:controllers/orders.NewHandler
+function function:controllers/orders.Wrap
+function function:controllers/users.Handler.Create
+function function:controllers/users.Handler.Get
+function function:controllers/users.Handler.List
+function function:controllers/users.Handler.Prefs
+function function:controllers/users.New
+function function:exits.Service.Now
+function function:jobs.ExpireJob.Run
+function function:jobs.NewExpire
+function function:jobs.Poller.Run
+function function:jobs.Start
+function function:middleware.Current
+function function:notify.Send
+function function:profile.StaffPhoto
+function function:repositories/orders.New
+function function:repositories/orders.Repo.BindTenant
+function function:repositories/orders.Repo.Create
+function function:repositories/orders.Repo.Expire
+function function:repositories/orders.Repo.Files
+function function:repositories/orders.Repo.Get
+function function:repositories/orders.Repo.List
+function function:repositories/orders.Repo.PatchDynamic
+function function:repositories/orders.Repo.Setup
+function function:repositories/orders.Repo.StaffCheck
+function function:repositories/orders.Repo.Update
+function function:repositories/orders.Repo.WriteAudit
+function function:repositories/users.New
+function function:repositories/users.Repo.Create
+function function:repositories/users.Repo.Get
+function function:repositories/users.Repo.List
+function function:repositories/users.Repo.Prefs
+function function:services/orders.New
+function function:services/orders.Service.Create
+function function:services/orders.Service.Get
+function function:services/orders.Service.List
+function function:services/orders.Service.Setup
+function function:services/orders.Service.Update
+function function:services/users.New
+function function:services/users.Service.Create
+function function:services/users.Service.Get
+function function:services/users.Service.List
+function function:services/users.Service.Prefs
+table table:appointments
+table table:attachments
+table table:audit_log
+table table:email_prefs
+table table:notifications
+table table:patients
+table table:pg_roles
+table table:photos
+table table:unknown
+# edges (137)
+calls function:cmd/server.main -> function:controllers/orders.New [inferred]
+calls function:cmd/server.main -> function:controllers/orders.Wrap [inferred]
+calls function:cmd/server.main -> function:controllers/users.New [inferred]
+calls function:cmd/server.main -> function:jobs.NewExpire [inferred]
+calls function:cmd/server.main -> function:profile.StaffPhoto [inferred]
+calls function:cmd/server.main -> function:repositories/orders.New [inferred]
+calls function:cmd/server.main -> function:repositories/orders.Repo.Expire [inferred]
+calls function:cmd/server.main -> function:repositories/users.New [inferred]
+calls function:cmd/server.main -> function:services/orders.New [inferred]
+calls function:cmd/server.main -> function:services/users.New [inferred]
+calls function:controllers/orders.Handler.Create -> function:controllers/orders.Handler.options [exact]
+calls function:controllers/orders.Handler.Create -> function:services/orders.Service.Create [exact]
+calls function:controllers/orders.Handler.Get -> function:services/orders.Service.Get [exact]
+calls function:controllers/orders.Handler.List -> function:services/orders.Service.List [exact]
+calls function:controllers/orders.Handler.Setup -> function:services/orders.Service.Setup [exact]
+calls function:controllers/orders.Handler.Update -> function:services/orders.Service.Update [exact]
+calls function:controllers/users.Handler.Create -> function:services/users.Service.Create [exact]
+calls function:controllers/users.Handler.Get -> function:services/users.Service.Get [exact]
+calls function:controllers/users.Handler.List -> function:services/users.Service.List [exact]
+calls function:controllers/users.Handler.Prefs -> function:services/users.Service.Prefs [exact]
+calls function:jobs.ExpireJob.Run -> function:repositories/orders.Repo.Expire [exact]
+calls function:jobs.Poller.Run -> function:repositories/orders.Repo.Expire [exact]
+calls function:services/orders.Service.Create -> function:notify.Send [inferred]
+calls function:services/orders.Service.Create -> function:repositories/orders.Repo.BindTenant [exact]
+calls function:services/orders.Service.Create -> function:repositories/orders.Repo.Create [exact]
+calls function:services/orders.Service.Create -> function:repositories/orders.Repo.WriteAudit [exact]
+calls function:services/orders.Service.Get -> function:repositories/orders.Repo.Get [exact]
+calls function:services/orders.Service.List -> function:repositories/orders.Repo.List [exact]
+calls function:services/orders.Service.Setup -> function:repositories/orders.Repo.Setup [exact]
+calls function:services/orders.Service.Update -> function:repositories/orders.Repo.Update [exact]
+calls function:services/orders.Service.Update -> function:repositories/orders.Repo.WriteAudit [exact]
+calls function:services/users.Service.Create -> function:repositories/users.Repo.Create [exact]
+calls function:services/users.Service.Get -> function:repositories/users.Repo.Get [exact]
+calls function:services/users.Service.List -> function:repositories/users.Repo.List [exact]
+calls function:services/users.Service.Prefs -> function:repositories/users.Repo.Prefs [exact]
+reads entrypoint:http:GET:/api/appointments -> table:appointments [inferred]
+reads entrypoint:http:GET:/api/appointments/:id -> table:appointments [inferred]
+reads entrypoint:http:GET:/api/patients -> table:patients [inferred]
+reads entrypoint:http:GET:/api/patients/:id -> table:patients [inferred]
+reads entrypoint:http:GET:/email-prefs -> table:email_prefs [inferred]
+reads entrypoint:http:GET:/profile/photo -> table:photos [inferred]
+reads entrypoint:http:PATCH:/api/appointments/:id -> table:appointments [inferred]
+reads entrypoint:job:jobs.ExpireJob.Run -> table:appointments [inferred]
+reads entrypoint:job:jobs.Poller.Run -> table:appointments [inferred]
+reads function:controllers/orders.Handler.Get -> table:appointments [inferred]
+reads function:controllers/orders.Handler.List -> table:appointments [inferred]
+reads function:controllers/orders.Handler.Update -> table:appointments [inferred]
+reads function:controllers/users.Handler.Get -> table:patients [inferred]
+reads function:controllers/users.Handler.List -> table:patients [inferred]
+reads function:controllers/users.Handler.Prefs -> table:email_prefs [inferred]
+reads function:jobs.ExpireJob.Run -> table:appointments [inferred]
+reads function:jobs.Poller.Run -> table:appointments [inferred]
+reads function:profile.StaffPhoto -> column:photos.id [exact]
+reads function:profile.StaffPhoto -> column:photos.patient_id [exact]
+reads function:profile.StaffPhoto -> column:photos.url [exact]
+reads function:repositories/orders.Repo.Expire -> column:appointments.status [exact]
+reads function:repositories/orders.Repo.Files -> column:attachments.appointment_id [exact]
+reads function:repositories/orders.Repo.Files -> column:attachments.file_id [exact]
+reads function:repositories/orders.Repo.Get -> column:appointments.id [exact]
+reads function:repositories/orders.Repo.Get -> column:appointments.status [exact]
+reads function:repositories/orders.Repo.List -> column:appointments.id [exact]
+reads function:repositories/orders.Repo.List -> column:appointments.notes [exact]
+reads function:repositories/orders.Repo.List -> column:appointments.status [exact]
+reads function:repositories/orders.Repo.StaffCheck -> column:pg_roles.rolname [exact]
+reads function:repositories/orders.Repo.Update -> column:appointments.id [exact]
+reads function:repositories/orders.Repo.Update -> column:appointments.status [exact]
+reads function:repositories/users.Repo.Get -> column:patients.email [exact]
+reads function:repositories/users.Repo.Get -> column:patients.id [exact]
+reads function:repositories/users.Repo.Get -> column:patients.name [exact]
+reads function:repositories/users.Repo.Get -> column:patients.status [exact]
+reads function:repositories/users.Repo.List -> table:patients [inferred]
+reads function:repositories/users.Repo.Prefs -> column:email_prefs.id [exact]
+reads function:repositories/users.Repo.Prefs -> column:email_prefs.path [exact]
+reads function:repositories/users.Repo.Prefs -> column:email_prefs.patient_id [exact]
+reads function:services/orders.Service.Get -> table:appointments [inferred]
+reads function:services/orders.Service.List -> table:appointments [inferred]
+reads function:services/orders.Service.Update -> table:appointments [inferred]
+reads function:services/users.Service.Get -> table:patients [inferred]
+reads function:services/users.Service.List -> table:patients [inferred]
+reads function:services/users.Service.Prefs -> table:email_prefs [inferred]
+triggers entrypoint:http:GET:/api/appointments -> function:controllers/orders.Handler.List [exact]
+triggers entrypoint:http:GET:/api/appointments/:id -> function:controllers/orders.Handler.Get [exact]
+triggers entrypoint:http:GET:/api/patients -> function:controllers/users.Handler.List [exact]
+triggers entrypoint:http:GET:/api/patients/:id -> function:controllers/users.Handler.Get [exact]
+triggers entrypoint:http:GET:/api/version -> function:controllers/orders.Handler.Version [exact]
+triggers entrypoint:http:GET:/email-prefs -> function:controllers/users.Handler.Prefs [exact]
+triggers entrypoint:http:GET:/profile/photo -> function:profile.StaffPhoto [exact]
+triggers entrypoint:http:PATCH:/api/appointments/:id -> function:controllers/orders.Handler.Update [exact]
+triggers entrypoint:http:POST:/api/appointments -> function:controllers/orders.Handler.Create [exact]
+triggers entrypoint:http:POST:/api/patients -> function:controllers/users.Handler.Create [exact]
+triggers entrypoint:http:POST:/api/pending/setup -> function:controllers/orders.Handler.Setup [exact]
+triggers entrypoint:job:cmd/server.go.func:L53 -> function:cmd/server.go.func:L53 [exact]
+triggers entrypoint:job:cmd/server.go.func:L58 -> function:cmd/server.go.func:L58 [exact]
+triggers entrypoint:job:cmd/server.runLoop -> function:cmd/server.runLoop [exact]
+triggers entrypoint:job:jobs.ExpireJob.Run -> function:jobs.ExpireJob.Run [exact]
+triggers entrypoint:job:jobs.Poller.Run -> function:jobs.Poller.Run [exact]
+triggers entrypoint:job:jobs.Start -> function:jobs.Start [exact]
+writes entrypoint:http:PATCH:/api/appointments/:id -> table:appointments [inferred]
+writes entrypoint:http:PATCH:/api/appointments/:id -> table:audit_log [inferred]
+writes entrypoint:http:POST:/api/appointments -> table:appointments [inferred]
+writes entrypoint:http:POST:/api/appointments -> table:audit_log [inferred]
+writes entrypoint:http:POST:/api/appointments -> table:notifications [inferred]
+writes entrypoint:http:POST:/api/patients -> table:patients [inferred]
+writes entrypoint:http:POST:/api/pending/setup -> table:appointments [inferred]
+writes entrypoint:job:jobs.ExpireJob.Run -> table:appointments [inferred]
+writes entrypoint:job:jobs.Poller.Run -> table:appointments [inferred]
+writes function:controllers/orders.Handler.Create -> table:appointments [inferred]
+writes function:controllers/orders.Handler.Create -> table:audit_log [inferred]
+writes function:controllers/orders.Handler.Create -> table:notifications [inferred]
+writes function:controllers/orders.Handler.Setup -> table:appointments [inferred]
+writes function:controllers/orders.Handler.Update -> table:appointments [inferred]
+writes function:controllers/orders.Handler.Update -> table:audit_log [inferred]
+writes function:controllers/users.Handler.Create -> table:patients [inferred]
+writes function:jobs.ExpireJob.Run -> table:appointments [inferred]
+writes function:jobs.Poller.Run -> table:appointments [inferred]
+writes function:notify.Send -> column:notifications.body [exact]
+writes function:repositories/orders.Repo.Create -> column:appointments.id [exact]
+writes function:repositories/orders.Repo.Create -> column:appointments.patient_id [exact]
+writes function:repositories/orders.Repo.Create -> column:appointments.status [exact]
+writes function:repositories/orders.Repo.Expire -> column:appointments.status [exact]
+writes function:repositories/orders.Repo.PatchDynamic -> table:unknown [unknown]
+writes function:repositories/orders.Repo.Setup -> column:appointments.id [exact]
+writes function:repositories/orders.Repo.Setup -> column:appointments.patient_id [exact]
+writes function:repositories/orders.Repo.Setup -> column:appointments.status [exact]
+writes function:repositories/orders.Repo.Update -> column:appointments.status [exact]
+writes function:repositories/orders.Repo.WriteAudit -> column:audit_log.action [exact]
+writes function:repositories/users.Repo.Create -> column:patients.email [exact]
+writes function:repositories/users.Repo.Create -> column:patients.id [exact]
+writes function:repositories/users.Repo.Create -> column:patients.name [exact]
+writes function:repositories/users.Repo.Create -> column:patients.status [exact]
+writes function:services/orders.Service.Create -> table:appointments [inferred]
+writes function:services/orders.Service.Create -> table:audit_log [inferred]
+writes function:services/orders.Service.Create -> table:notifications [inferred]
+writes function:services/orders.Service.Setup -> table:appointments [inferred]
+writes function:services/orders.Service.Update -> table:appointments [inferred]
+writes function:services/orders.Service.Update -> table:audit_log [inferred]
+writes function:services/users.Service.Create -> table:patients [inferred]
+# unresolved_http (0)

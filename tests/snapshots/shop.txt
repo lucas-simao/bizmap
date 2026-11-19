@@ -1,0 +1,204 @@
+# nodes (64)
+column column:audit_log.action
+column column:audit_log.created_at
+column column:audit_log.id
+column column:audit_log.payload
+column column:audit_log.table_name
+column column:inventory.qty
+column column:inventory.sku
+column column:inventory.updated_at
+column column:order_items.id
+column column:order_items.order_id
+column column:order_items.qty
+column column:order_items.sku
+column column:order_items.unit_cents
+column column:orders.created_at
+column column:orders.id
+column column:orders.notes
+column column:orders.status
+column column:orders.total_cents
+column column:orders.user_id
+column column:users.created_at
+column column:users.email
+column column:users.id
+column column:users.name
+column column:users.status
+db_trigger db_trigger:trg_order_items_inventory
+db_trigger db_trigger:trg_orders_audit
+entrypoint entrypoint:http:GET:/api/orders/:id
+entrypoint entrypoint:http:GET:/api/users/:id
+entrypoint entrypoint:http:GET:/reports/low-stock
+entrypoint entrypoint:http:POST:/api/orders
+entrypoint entrypoint:http:POST:/api/users
+entrypoint entrypoint:job:jobs.ExpireJob.Run
+function function:cmd/shop.main
+function function:handlers.Handler.CreateOrder
+function function:handlers.Handler.CreateUser
+function function:handlers.Handler.GetOrder
+function function:handlers.Handler.GetUser
+function function:handlers.New
+function function:jobs.ExpireJob.Run
+function function:jobs.ExpireJob.expire
+function function:jobs.NewExpire
+function function:python.worker.FakeConn.execute
+function function:python.worker.connect
+function function:python.worker.low_stock
+function function:repository.New
+function function:repository.Repo.ExpirePendingOrders
+function function:repository.Repo.GetOrder
+function function:repository.Repo.GetUser
+function function:repository.Repo.InsertOrder
+function function:repository.Repo.InsertUser
+function function:repository.Repo.ListActiveUsers
+function function:repository.Repo.UpdateUserField
+function function:service.New
+function function:service.Service.CreateOrder
+function function:service.Service.CreateUser
+function function:service.Service.GetOrder
+function function:service.Service.GetUser
+function function:sql.decrement_inventory
+function function:sql.log_order_change
+table table:audit_log
+table table:inventory
+table table:order_items
+table table:orders
+table table:users
+# edges (137)
+calls function:cmd/shop.main -> function:handlers.New [inferred]
+calls function:cmd/shop.main -> function:jobs.NewExpire [inferred]
+calls function:cmd/shop.main -> function:repository.New [inferred]
+calls function:cmd/shop.main -> function:service.New [inferred]
+calls function:handlers.Handler.CreateOrder -> function:service.Service.CreateOrder [exact]
+calls function:handlers.Handler.CreateUser -> function:service.Service.CreateUser [exact]
+calls function:handlers.Handler.GetOrder -> function:service.Service.GetOrder [exact]
+calls function:handlers.Handler.GetUser -> function:service.Service.GetUser [exact]
+calls function:jobs.ExpireJob.Run -> function:jobs.ExpireJob.expire [exact]
+calls function:jobs.ExpireJob.expire -> function:repository.Repo.ExpirePendingOrders [exact]
+calls function:python.worker.low_stock -> function:python.worker.connect [inferred]
+calls function:service.Service.CreateOrder -> function:repository.Repo.GetUser [exact]
+calls function:service.Service.CreateOrder -> function:repository.Repo.InsertOrder [exact]
+calls function:service.Service.CreateUser -> function:repository.Repo.InsertUser [exact]
+calls function:service.Service.GetOrder -> function:repository.Repo.GetOrder [exact]
+calls function:service.Service.GetUser -> function:repository.Repo.GetUser [exact]
+reads db_trigger:trg_order_items_inventory -> column:inventory.sku [exact]
+reads entrypoint:http:GET:/api/orders/:id -> table:order_items [inferred]
+reads entrypoint:http:GET:/api/orders/:id -> table:orders [inferred]
+reads entrypoint:http:GET:/api/users/:id -> table:users [inferred]
+reads entrypoint:http:GET:/reports/low-stock -> table:inventory [inferred]
+reads entrypoint:http:POST:/api/orders -> table:inventory [inferred]
+reads entrypoint:http:POST:/api/orders -> table:users [inferred]
+reads entrypoint:job:jobs.ExpireJob.Run -> table:orders [inferred]
+reads function:handlers.Handler.CreateOrder -> table:inventory [inferred]
+reads function:handlers.Handler.CreateOrder -> table:users [inferred]
+reads function:handlers.Handler.GetOrder -> table:order_items [inferred]
+reads function:handlers.Handler.GetOrder -> table:orders [inferred]
+reads function:handlers.Handler.GetUser -> table:users [inferred]
+reads function:jobs.ExpireJob.Run -> table:orders [inferred]
+reads function:jobs.ExpireJob.expire -> table:orders [inferred]
+reads function:python.worker.low_stock -> column:inventory.qty [exact]
+reads function:python.worker.low_stock -> column:inventory.sku [exact]
+reads function:repository.Repo.ExpirePendingOrders -> column:orders.created_at [exact]
+reads function:repository.Repo.ExpirePendingOrders -> column:orders.status [exact]
+reads function:repository.Repo.GetOrder -> column:order_items.id [exact]
+reads function:repository.Repo.GetOrder -> column:order_items.order_id [exact]
+reads function:repository.Repo.GetOrder -> column:order_items.qty [exact]
+reads function:repository.Repo.GetOrder -> column:order_items.sku [exact]
+reads function:repository.Repo.GetOrder -> column:order_items.unit_cents [exact]
+reads function:repository.Repo.GetOrder -> column:orders.id [exact]
+reads function:repository.Repo.GetOrder -> column:orders.notes [exact]
+reads function:repository.Repo.GetOrder -> column:orders.status [exact]
+reads function:repository.Repo.GetOrder -> column:orders.total_cents [exact]
+reads function:repository.Repo.GetOrder -> column:orders.user_id [exact]
+reads function:repository.Repo.GetUser -> column:users.email [exact]
+reads function:repository.Repo.GetUser -> column:users.id [exact]
+reads function:repository.Repo.GetUser -> column:users.name [exact]
+reads function:repository.Repo.GetUser -> column:users.status [exact]
+reads function:repository.Repo.InsertOrder -> column:inventory.qty [exact]
+reads function:repository.Repo.InsertOrder -> column:inventory.sku [exact]
+reads function:repository.Repo.ListActiveUsers -> column:users.email [exact]
+reads function:repository.Repo.ListActiveUsers -> column:users.id [exact]
+reads function:repository.Repo.ListActiveUsers -> column:users.status [exact]
+reads function:service.Service.CreateOrder -> table:inventory [inferred]
+reads function:service.Service.CreateOrder -> table:users [inferred]
+reads function:service.Service.GetOrder -> table:order_items [inferred]
+reads function:service.Service.GetOrder -> table:orders [inferred]
+reads function:service.Service.GetUser -> table:users [inferred]
+reads function:sql.decrement_inventory -> column:inventory.sku [exact]
+triggers db_trigger:trg_order_items_inventory -> function:sql.decrement_inventory [exact]
+triggers db_trigger:trg_orders_audit -> function:sql.log_order_change [exact]
+triggers entrypoint:http:GET:/api/orders/:id -> function:handlers.Handler.GetOrder [exact]
+triggers entrypoint:http:GET:/api/users/:id -> function:handlers.Handler.GetUser [exact]
+triggers entrypoint:http:GET:/reports/low-stock -> function:python.worker.low_stock [exact]
+triggers entrypoint:http:POST:/api/orders -> function:handlers.Handler.CreateOrder [exact]
+triggers entrypoint:http:POST:/api/users -> function:handlers.Handler.CreateUser [exact]
+triggers entrypoint:job:jobs.ExpireJob.Run -> function:jobs.ExpireJob.Run [exact]
+writes db_trigger:trg_order_items_inventory -> column:inventory.qty [exact]
+writes db_trigger:trg_order_items_inventory -> column:inventory.updated_at [exact]
+writes db_trigger:trg_orders_audit -> column:audit_log.action [exact]
+writes db_trigger:trg_orders_audit -> column:audit_log.payload [exact]
+writes db_trigger:trg_orders_audit -> column:audit_log.table_name [exact]
+writes entrypoint:http:POST:/api/orders -> column:audit_log.action [inferred]
+writes entrypoint:http:POST:/api/orders -> column:audit_log.payload [inferred]
+writes entrypoint:http:POST:/api/orders -> column:audit_log.table_name [inferred]
+writes entrypoint:http:POST:/api/orders -> column:inventory.qty [inferred]
+writes entrypoint:http:POST:/api/orders -> column:inventory.updated_at [inferred]
+writes entrypoint:http:POST:/api/orders -> table:order_items [inferred]
+writes entrypoint:http:POST:/api/orders -> table:orders [inferred]
+writes entrypoint:http:POST:/api/users -> table:users [inferred]
+writes entrypoint:job:jobs.ExpireJob.Run -> column:audit_log.action [inferred]
+writes entrypoint:job:jobs.ExpireJob.Run -> column:audit_log.payload [inferred]
+writes entrypoint:job:jobs.ExpireJob.Run -> column:audit_log.table_name [inferred]
+writes entrypoint:job:jobs.ExpireJob.Run -> table:orders [inferred]
+writes function:handlers.Handler.CreateOrder -> column:audit_log.action [inferred]
+writes function:handlers.Handler.CreateOrder -> column:audit_log.payload [inferred]
+writes function:handlers.Handler.CreateOrder -> column:audit_log.table_name [inferred]
+writes function:handlers.Handler.CreateOrder -> column:inventory.qty [inferred]
+writes function:handlers.Handler.CreateOrder -> column:inventory.updated_at [inferred]
+writes function:handlers.Handler.CreateOrder -> table:order_items [inferred]
+writes function:handlers.Handler.CreateOrder -> table:orders [inferred]
+writes function:handlers.Handler.CreateUser -> table:users [inferred]
+writes function:jobs.ExpireJob.Run -> column:audit_log.action [inferred]
+writes function:jobs.ExpireJob.Run -> column:audit_log.payload [inferred]
+writes function:jobs.ExpireJob.Run -> column:audit_log.table_name [inferred]
+writes function:jobs.ExpireJob.Run -> table:orders [inferred]
+writes function:jobs.ExpireJob.expire -> column:audit_log.action [inferred]
+writes function:jobs.ExpireJob.expire -> column:audit_log.payload [inferred]
+writes function:jobs.ExpireJob.expire -> column:audit_log.table_name [inferred]
+writes function:jobs.ExpireJob.expire -> table:orders [inferred]
+writes function:repository.Repo.ExpirePendingOrders -> column:audit_log.action [inferred]
+writes function:repository.Repo.ExpirePendingOrders -> column:audit_log.payload [inferred]
+writes function:repository.Repo.ExpirePendingOrders -> column:audit_log.table_name [inferred]
+writes function:repository.Repo.ExpirePendingOrders -> column:orders.status [exact]
+writes function:repository.Repo.InsertOrder -> column:audit_log.action [inferred]
+writes function:repository.Repo.InsertOrder -> column:audit_log.payload [inferred]
+writes function:repository.Repo.InsertOrder -> column:audit_log.table_name [inferred]
+writes function:repository.Repo.InsertOrder -> column:inventory.qty [inferred]
+writes function:repository.Repo.InsertOrder -> column:inventory.updated_at [inferred]
+writes function:repository.Repo.InsertOrder -> column:order_items.id [exact]
+writes function:repository.Repo.InsertOrder -> column:order_items.order_id [exact]
+writes function:repository.Repo.InsertOrder -> column:order_items.qty [exact]
+writes function:repository.Repo.InsertOrder -> column:order_items.sku [exact]
+writes function:repository.Repo.InsertOrder -> column:order_items.unit_cents [exact]
+writes function:repository.Repo.InsertOrder -> column:orders.id [exact]
+writes function:repository.Repo.InsertOrder -> column:orders.status [exact]
+writes function:repository.Repo.InsertOrder -> column:orders.total_cents [exact]
+writes function:repository.Repo.InsertOrder -> column:orders.user_id [exact]
+writes function:repository.Repo.InsertUser -> column:users.email [exact]
+writes function:repository.Repo.InsertUser -> column:users.id [exact]
+writes function:repository.Repo.InsertUser -> column:users.name [exact]
+writes function:repository.Repo.InsertUser -> column:users.status [exact]
+writes function:repository.Repo.UpdateUserField -> table:users [unknown]
+writes function:service.Service.CreateOrder -> column:audit_log.action [inferred]
+writes function:service.Service.CreateOrder -> column:audit_log.payload [inferred]
+writes function:service.Service.CreateOrder -> column:audit_log.table_name [inferred]
+writes function:service.Service.CreateOrder -> column:inventory.qty [inferred]
+writes function:service.Service.CreateOrder -> column:inventory.updated_at [inferred]
+writes function:service.Service.CreateOrder -> table:order_items [inferred]
+writes function:service.Service.CreateOrder -> table:orders [inferred]
+writes function:service.Service.CreateUser -> table:users [inferred]
+writes function:sql.decrement_inventory -> column:inventory.qty [exact]
+writes function:sql.decrement_inventory -> column:inventory.updated_at [exact]
+writes function:sql.log_order_change -> column:audit_log.action [exact]
+writes function:sql.log_order_change -> column:audit_log.payload [exact]
+writes function:sql.log_order_change -> column:audit_log.table_name [exact]
+# unresolved_http (0)
