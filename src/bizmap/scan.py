@@ -1372,9 +1372,15 @@ def _link_route_literals(graph: Graph) -> None:
             if known:
                 service = service_for_url(known[0], graph.attrs.get("services") or {})
                 own = [eid for eid in hits if service and route_home.get(eid, ("", ""))[0] == service]
+                same_repo_hits = [eid for eid in hits if route_home.get(eid, ("", ""))[0] == repo]
                 if len(own) == 1:
                     hits = own
                     confidence = Confidence.INFERRED
+                elif service is None and len(same_repo_hits) == 1:
+                    # An env base not declared in `services:` says nothing about
+                    # which service it is; a single match in the caller's own repo
+                    # (a self-call) is kept as heuristic. Other repos stay out.
+                    hits = same_repo_hits
                 else:
                     skipped.append(
                         {
@@ -1402,6 +1408,8 @@ def _link_route_literals(graph: Graph) -> None:
                 evidence=Evidence.from_dict(ev_raw),
                 via="route_literal",
                 match="full" if path_template_match(rpath, path) else "suffix",
+                **({"via_helper": lit["via_helper"]} if lit.get("via_helper") else {}),
+                **({"origin": lit["origin"]} if lit.get("origin") else {}),
             )
             existing[node.id].add(target)
         if skipped:
@@ -2012,16 +2020,35 @@ def _scan_one(
             language="javascript",
             client_unknown=bool(getattr(call, "client_unknown", False)),
         )
+    callers_of: dict[str, list] = defaultdict(list)
+    for hc in getattr(js_analysis, "helper_calls", None) or []:
+        if hc.caller != hc.callee:
+            callers_of[hc.callee].append(hc)
     for lit in js_analysis.route_literals:
+        base_item = {
+            "path": lit.path,
+            "method": lit.method,
+            "same_repo": True if lit.same_repo else None,
+            "evidence": {"file": lit.file, "line": lit.line, "symbol": lit.symbol},
+        }
+        sites = callers_of.get(lit.symbol) if getattr(lit, "helper", False) else None
+        if sites:
+            # Path helper: the request is made by whoever calls it.
+            for hc in sites:
+                item = dict(base_item)
+                item["method"] = hc.method or lit.method
+                item["evidence"] = {"file": hc.file, "line": hc.line, "symbol": hc.caller}
+                item["via_helper"] = lit.symbol
+                _stash_route_literal(
+                    graph, function_id(hc.caller), item, name=hc.caller, language="javascript"
+                )
+            continue
+        if getattr(lit, "helper", False):
+            base_item["origin"] = "path_helper"
         _stash_route_literal(
             graph,
             function_id(lit.symbol),
-            {
-                "path": lit.path,
-                "method": lit.method,
-                "same_repo": True if lit.same_repo else None,
-                "evidence": {"file": lit.file, "line": lit.line, "symbol": lit.symbol},
-            },
+            base_item,
             name=lit.symbol,
             language="javascript",
         )
