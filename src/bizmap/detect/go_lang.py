@@ -159,6 +159,15 @@ class UnresolvedCall:
 
 
 @dataclass
+class GoHttpCall:
+    function: GoFunction
+    method: str
+    url: str
+    evidence: Evidence
+    unresolved: bool = False
+
+
+@dataclass
 class GoAnalysis:
     functions: dict[str, GoFunction]
     sql_sites: list[SqlSite]
@@ -167,6 +176,7 @@ class GoAnalysis:
     calls: list[CallHit]
     situations: dict[str, list[str]] = field(default_factory=dict)
     unresolved_calls: list[UnresolvedCall] = field(default_factory=list)
+    http_calls: list[GoHttpCall] = field(default_factory=list)
 
 
 @dataclass
@@ -588,6 +598,41 @@ def _is_placeholder_token(sql: str) -> bool:
     return bool(stripped) and stripped.startswith("{") and stripped.endswith("}") and " " not in stripped
 
 
+_SPRINTF_VERB = re.compile(r"%[#+\-\d\.]*[svqTdWxXefgGct]")
+
+
+def _sprintf(
+    fmt: str,
+    arg_nodes: list[Node],
+    env: dict[str, ResolvedString],
+    package_consts: dict[str, ResolvedString],
+    aliases: dict[str, str],
+    consts_by_import: dict[tuple[str, str], ResolvedString],
+) -> ResolvedString:
+    result = fmt
+    unresolved = False
+    for arg in arg_nodes:
+        m = _SPRINTF_VERB.search(result)
+        if not m:
+            break
+        resolved = _resolve_expr(arg, env, package_consts, aliases, consts_by_import)
+        if resolved.fully_static and resolved.text is not None:
+            repl = resolved.text
+        else:
+            repl = resolved.placeholder or (
+                "{" + (resolved.path_text.strip("{}") or "arg") + "}"
+            )
+            unresolved = True
+        result = result[: m.start()] + repl + result[m.end() :]
+    still = bool(_SPRINTF_VERB.search(result))
+    return ResolvedString(
+        result if not unresolved else None,
+        not unresolved and not still,
+        unresolved or still,
+        placeholder=result if (unresolved or still) else None,
+    )
+
+
 def _plus(lv: ResolvedString, rv: ResolvedString) -> ResolvedString:
     if lv.fully_static and rv.fully_static and lv.text is not None and rv.text is not None:
         return ResolvedString(lv.text + rv.text, True, False)
@@ -630,7 +675,9 @@ def _resolve_expr(
         if operand is not None and operand.type == "identifier" and field_n is not None:
             pkg = text(operand)
             name = text(field_n)
-            ip = aliases.get(pkg)
+            ip = aliases.get(pkg) or ""
+            if (ip == "net/http" or pkg == "http") and name.startswith("Method") and len(name) > 6:
+                return ResolvedString(name[6:].upper(), True, False)
             found = _lookup_const(ip, name, consts_by_import)
             if found and found.usable:
                 return found
@@ -651,7 +698,26 @@ def _resolve_expr(
     if node.type == "expression_list" and node.named_children:
         return _resolve_expr(node.named_children[0], env, package_consts, aliases, consts_by_import)
     if node.type == "call_expression":
-        return ResolvedString(None, False, True)
+        method = call_callee_name(node)
+        args = call_args(node)
+        func = node.child_by_field_name("function")
+        operand = None
+        if func is not None and func.type == "selector_expression":
+            operand = func.child_by_field_name("operand")
+        recv = text(operand) if operand is not None else ""
+        ip = aliases.get(recv) or ""
+        if method == "Sprintf" and args and (ip == "fmt" or recv == "fmt"):
+            fmt_res = _resolve_expr(args[0], env, package_consts, aliases, consts_by_import)
+            fmt_text = fmt_res.path_text if fmt_res.usable else ""
+            if fmt_text:
+                return _sprintf(fmt_text, args[1:], env, package_consts, aliases, consts_by_import)
+        if method in {"Getenv", "LookupEnv"} and args and (ip == "os" or recv == "os"):
+            key = _resolve_expr(args[0], env, package_consts, aliases, consts_by_import)
+            if key.fully_static and key.text:
+                return ResolvedString(None, False, True, placeholder="{" + key.text + "}")
+            if key.placeholder:
+                return ResolvedString(None, False, True, placeholder=key.placeholder)
+        return ResolvedString(None, False, True, placeholder=f"{{{text(node)[:48]}}}")
     if node.type == "composite_literal":
         alts = _composite_string_texts(node, env, package_consts, aliases, consts_by_import)
         if alts:
@@ -802,6 +868,28 @@ def _import_paths(root: Node) -> tuple[list[str], dict[str, str]]:
     return imports, aliases
 
 
+def _call_lhs_names(call: Node) -> list[str]:
+    """Names assigned from ``req, _ := http.NewRequest(...)``."""
+    parent = call.parent
+    while parent is not None and parent.type == "expression_list":
+        parent = parent.parent
+    if parent is None or parent.type not in {"short_var_declaration", "assignment_statement"}:
+        return []
+    left = parent.child_by_field_name("left")
+    if left is None:
+        lists = [c for c in parent.named_children if c.type == "expression_list"]
+        left = lists[0] if lists else None
+    if left is None:
+        return []
+    names: list[str] = []
+    for child in left.named_children:
+        if child.type == "identifier":
+            raw = text(child)
+            if raw and raw != "_":
+                names.append(raw)
+    return names
+
+
 def _in_loop(node: Node) -> bool:
     parent = node.parent
     while parent is not None:
@@ -925,6 +1013,7 @@ class GoAnalyzer:
         jobs: list[JobHit] = []
         calls: list[CallHit] = []
         unresolved_calls: list[UnresolvedCall] = []
+        http_calls: list[GoHttpCall] = []
         situations: dict[str, list[str]] = defaultdict(list)
 
         echo_rule = next((r for r in self.rules if r.produce.get("entrypoint", {}).get("kind") == "http"), None)
@@ -952,6 +1041,7 @@ class GoAnalyzer:
                 env = dict(package_consts)
                 self._scan_function_env(fn, env, package_consts, info, idx)
                 prefix_map = prefix_by_fn.get(fn.qualname) or {}
+                req_vars: dict[str, tuple[str, str, bool]] = {}
                 for node in walk(fn.node):
                     if node.type != "call_expression":
                         continue
@@ -1079,6 +1169,19 @@ class GoAnalyzer:
                                     )
                                 )
 
+                    self._record_go_http(
+                        node,
+                        method,
+                        args,
+                        fn,
+                        info,
+                        idx,
+                        env,
+                        package_consts,
+                        req_vars,
+                        http_calls,
+                    )
+
         if ticker_rule:
             jobs.extend(self._detect_jobs(infos, idx, calls, ticker_rule))
 
@@ -1093,6 +1196,7 @@ class GoAnalyzer:
             calls=calls,
             situations=dict(situations),
             unresolved_calls=unresolved_calls,
+            http_calls=http_calls,
         )
 
     def _build_indexes(self, infos: list[_FileInfo]) -> _Indexes:
@@ -1283,6 +1387,79 @@ class GoAnalyzer:
                     value_node, env, package_consts, info.import_aliases, idx.consts_by_import
                 )
                 env[names[0]] = resolved
+
+    def _record_go_http(
+        self,
+        node: Node,
+        method: str,
+        args: list[Node],
+        fn: GoFunction,
+        info: _FileInfo,
+        idx: _Indexes,
+        env: dict[str, ResolvedString],
+        package_consts: dict[str, ResolvedString],
+        req_vars: dict[str, tuple[str, str, bool]],
+        http_calls: list[GoHttpCall],
+    ) -> None:
+        func = node.child_by_field_name("function")
+        operand = None
+        if func is not None and func.type == "selector_expression":
+            operand = func.child_by_field_name("operand")
+        recv = text(operand) if operand is not None else ""
+        ip = info.import_aliases.get(recv) or ""
+        is_net_http = ip == "net/http" or recv == "http"
+        evidence = Evidence(file=info.rel, line=line_of(node), symbol=fn.qualname)
+
+        def emit(http_method: str, url: str, unresolved: bool) -> None:
+            if not url:
+                return
+            if not (
+                url.startswith("/")
+                or url.startswith("{")
+                or "://" in url
+                or "/" in url
+            ):
+                return
+            http_calls.append(
+                GoHttpCall(
+                    function=fn,
+                    method=http_method or "GET",
+                    url=url,
+                    evidence=evidence,
+                    unresolved=unresolved or "{" in url,
+                )
+            )
+
+        def resolve(n: Node | None) -> ResolvedString:
+            return _resolve_expr(n, env, package_consts, info.import_aliases, idx.consts_by_import)
+
+        if is_net_http and method in {"NewRequest", "NewRequestWithContext"} and args:
+            if method == "NewRequest":
+                mres = resolve(args[0]) if args else ResolvedString("GET", True, False)
+                ures = resolve(args[1]) if len(args) > 1 else ResolvedString(None, False, True)
+            else:
+                mres = resolve(args[1]) if len(args) > 1 else ResolvedString("GET", True, False)
+                ures = resolve(args[2]) if len(args) > 2 else ResolvedString(None, False, True)
+            http_method = (mres.path_text or "GET").upper()
+            if http_method.startswith("METHOD"):
+                http_method = http_method[6:]
+            url = ures.path_text
+            unresolved = (not ures.fully_static) or "{" in url
+            emit(http_method, url, unresolved)
+            for name in _call_lhs_names(node):
+                req_vars[name] = (http_method, url, unresolved)
+            return
+        if is_net_http and method in {"Get", "Post", "Head", "PostForm"} and args:
+            http_method = "POST" if method.startswith("Post") else method.upper()
+            ures = resolve(args[0])
+            emit(http_method, ures.path_text, not ures.fully_static)
+            return
+        if method == "Do" and args:
+            arg = args[0]
+            arg_name = text(arg) if arg.type == "identifier" else ""
+            if arg_name in req_vars:
+                return
+            # Request built elsewhere: no URL to attach.
 
     def _group_opts(self, echo_rule: Rule | None) -> tuple[str, int]:
         group_method = "Group"

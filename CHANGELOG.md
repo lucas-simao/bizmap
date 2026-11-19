@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.2.4 — 2026-11-19
+
+Chained TypeScript routers, Deno/Edge serve call-graphs, outbound HTTP compose,
+and cross-repo rematch after a private evaluation of v0.2.3. Behavior is generic;
+tests and fixtures are synthetic only (`orders`, `users`, `tenants`,
+`documents`, `jobs`, `items`).
+
+### Fixed
+
+- **Chained Hono-style routers**: `export const app = new Hono().use('*', mw).get('/a', h).post('/b', h)`
+  (with or without type args such as `new Hono<{Bindings: B}>()`) again
+  records each `.get/.post/.put/.patch/.delete/.all`. `_is_router_factory`
+  walks the member-call chain to `new Hono()` / `express()` / `Router()` /
+  `fastify()`. `.route('/x', sub)` and `.basePath('/v1')` apply prefixes.
+  `client.get` / `axios.get` / `Map.get` stay outbound HTTP, not routes.
+- **Deno/Edge `serve`**: `serve(async (req) => …)`, `Deno.serve(handler)`,
+  and HOF wrappers `serve(withAuth(async (req) => …))` emit call edges from
+  the handler body into imported helpers, so `supabase.from` / SQL in those
+  modules reaches tables on the Edge entrypoint.
+- **Go outbound HTTP**: `http.NewRequest` / `NewRequestWithContext(method, url, body)`,
+  `client.Do`, and `http.Get` / `http.Post` resolve urls from const / env /
+  `fmt.Sprintf` / string concat into `calls_http` (or `unresolved_http`).
+- **TS HTTP compose**: `axios.create` / `ky.create` / `ofetch.create`
+  `{baseURL}` then `api.get('/x')` becomes `base+'/x'`. Wrapper functions
+  `request(path)` that prepend a base const/env compose the same way.
+- **Python injected callables**: `deps.run_query(Q)`, `self.run_query`, and
+  dataclass `Callable` fields follow to the unique function so SQL reaches
+  tables. Dynamic Firestore `collection(name)` is `collection:unknown`.
+  `@patch("x.x.logger")` is not an HTTP entrypoint — only decorators on a
+  known FastAPI/Flask app, APIRouter, or Blueprint.
+- **Registry merge rematch**: `bizmap registry merge` re-runs HTTP and queue
+  matching from each function's `http_calls` / `unresolved_http`, so merging
+  per-repo graphs yields the same cross-repo links as a joint scan.
+- **Multi-path names**: `bizmap scan a b c --config shared.yaml` keeps each
+  repo's own name (per-repo `bizmap.yaml` or path basename), not the shared
+  config `name:`.
+- **Persisted unresolved HTTP**: unmatched outbound calls are stored on the
+  caller and as top-level `unresolved_http` in the graph JSON, so stderr
+  counts match the graph.
+
+### Changed
+
+- Graph format **0.2.4**. Top-level `unresolved_http` (and optional `queues`)
+  round-trip in `bizmap.graph.json`. Function nodes keep `http_calls` for
+  rematch.
+
 ## 0.2.3 — 2026-11-19
 
 Precision and hang fixes after a private evaluation of v0.2.1/v0.2.2.

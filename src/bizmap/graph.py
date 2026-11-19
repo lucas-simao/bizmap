@@ -19,7 +19,7 @@ CONFIDENCE_RANK = {
 }
 
 
-GRAPH_VERSION = "0.2.3"
+GRAPH_VERSION = "0.2.4"
 NODE_TYPES = (
     "entrypoint",
     "function",
@@ -205,6 +205,12 @@ class Graph:
         services = self.attrs.get("services")
         if services:
             payload["services"] = services
+        queues = self.attrs.get("queues")
+        if queues:
+            payload["queues"] = queues
+        unresolved = self.attrs.get("unresolved_http")
+        if unresolved:
+            payload["unresolved_http"] = unresolved
         return payload
 
     @classmethod
@@ -219,6 +225,8 @@ class Graph:
         graph.attrs["database"] = graph.database
         graph.attrs["repos"] = data.get("repos") or []
         graph.attrs["services"] = data.get("services") or {}
+        graph.attrs["queues"] = data.get("queues") or {}
+        graph.attrs["unresolved_http"] = data.get("unresolved_http") or []
         for raw in data.get("nodes") or []:
             node_id = raw["id"]
             node_type = raw["type"]

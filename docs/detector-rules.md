@@ -136,25 +136,29 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `--exclude GLOB` (repeatable) merges with YAML `exclude`. `--profile`
   prints parse / resolve / sql / propagate timings to stderr.
 
-## JavaScript / TypeScript resolution (v0.2.3)
+## JavaScript / TypeScript resolution (v0.2.4)
 
 - `.js` / `.mjs` / `.cjs` use tree-sitter-javascript; `.ts` / `.tsx` use
   tree-sitter-typescript (`language_typescript` / `language_tsx`).
 - Express / Fastify / Hono: routes require a known app/router receiver
-  (`express()`, `Router()`, `fastify()`, `new Hono()`, or typed as such)
-  and a string-literal or resolvable const path. `client.get`, `api.post`,
-  `axios.get`, `fetch`, and `Map.get` / `.delete` are outbound
-  `calls_http`, not routes. Inline-arrow handlers attribute
-  `supabase.from('t')` access to the route.
+  (`express()`, `Router()`, `fastify()`, `new Hono()`, chained
+  `new Hono().use().get()`, or typed as such) and a string-literal or
+  resolvable const path. `.basePath('/v1')` and `.route('/x', sub)` apply
+  prefixes. `client.get`, `api.post`, `axios.get`, `fetch`, and `Map.get`
+  / `.delete` are outbound `calls_http`, not routes. `axios.create` /
+  `ky.create` / `ofetch.create` `{baseURL}` compose with later `.get('/x')`.
+  Inline-arrow handlers attribute `supabase.from('t')` access to the route.
 - Supabase JS: `supabase.from('t').select|insert|update|delete|upsert`
   emits table reads/writes; `.rpc('fn')` calls `function:sql.fn` when
   that SQL function exists.
 - `pg` / `postgres` `client.query('SELECT …')` is analyzed as SQL.
-- Supabase Edge Functions: `Deno.serve` / `serve(handler)` in
+- Supabase Edge Functions: `Deno.serve` / `serve(handler)` (including
+  `serve(withAuth(async (req) => …))`) in
   `supabase/functions/<name>/index.ts` become HTTP
-  `entrypoint:http:POST:/functions/v1/<name>`.
+  `entrypoint:http:POST:/functions/v1/<name>`, with call edges from the
+  handler body into imported helpers.
 
-## Bundled rules (v0.2.3)
+## Bundled rules (v0.2.4)
 
 | File | Status | What it detects |
 | --- | --- | --- |
