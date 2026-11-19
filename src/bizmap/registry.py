@@ -6,13 +6,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 from bizmap.graph import (
+    GRAPH_VERSION,
     Edge,
     Graph,
     Node,
     edge_id,
 )
 
-SHARED_PREFIXES = ("table:", "column:", "collection:", "db_trigger:")
+SHARED_PREFIXES = ("table:", "column:", "collection:", "db_trigger:", "view:")
 
 
 def repo_name_of(graph: Graph, fallback: str = "repo") -> str:
@@ -76,14 +77,15 @@ def qualify_graph(graph: Graph, repo: str | None = None, *, share_data: bool = F
     return out
 
 
-def merge_graphs(graphs: list[Graph], *, version: str = "0.2.0") -> Graph:
+def merge_graphs(graphs: list[Graph], *, version: str | None = None) -> Graph:
     """Merge graphs. Tables/collections share ids when ``database`` matches."""
     merged = Graph()
-    merged.version = version
+    merged.version = version or GRAPH_VERSION
     merged.generated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     repos: list[str] = []
     databases: set[str] = set()
     schema_tables: dict[str, Any] = {}
+    schema_views: dict[str, Any] = {}
     for graph in graphs:
         db = database_of(graph)
         if db:
@@ -120,6 +122,9 @@ def merge_graphs(graphs: list[Graph], *, version: str = "0.2.0") -> Graph:
                         pols.append(p)
                 if pols:
                     schema_tables[tname]["policies"] = pols
+        for vname, vspec in (qualified.schema.get("views") or {}).items():
+            if vname not in schema_views:
+                schema_views[vname] = vspec
         for nid, node in qualified.nodes.items():
             existing = merged.nodes.get(nid)
             if existing:
@@ -140,6 +145,8 @@ def merge_graphs(graphs: list[Graph], *, version: str = "0.2.0") -> Graph:
                 **edge.attrs,
             )
     merged.schema = {"tables": schema_tables}
+    if schema_views:
+        merged.schema["views"] = schema_views
     merged.attrs["repos"] = repos
     if len(databases) == 1:
         merged.database = next(iter(databases))

@@ -105,14 +105,17 @@ flowchart LR
   GET_stock -->|reads inferred| inventory
 ```
 
-## How it works (v0.2.0)
+## How it works (v0.2.1)
 
 1. **Schema replayer** — applies `schema.sql` / migration folders in order
-   (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`,
-   drop/add constraints, `DO $$` blocks) and extracts `CREATE TRIGGER` plus the
-   tables/columns their plpgsql functions write. Also `CREATE POLICY`,
-   `ENABLE ROW LEVEL SECURITY`, and Alembic `upgrade()` chains (schema role,
-   not runtime writers).
+   (`CREATE TABLE IF NOT EXISTS`, quoted/schema-qualified pg_dump identifiers,
+   `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, drop/add constraints, `DO $$`
+   blocks) and extracts `CREATE TRIGGER` plus the tables/columns their plpgsql
+   functions write. Comments, string literals, DECLARE'd variables, INTO
+   targets, and PL/pgSQL keywords are never table nodes. `CREATE VIEW` /
+   `CREATE MATERIALIZED VIEW` become `view` nodes with `derives_from` edges.
+   Also `CREATE POLICY`, `ENABLE ROW LEVEL SECURITY`, and Alembic `upgrade()`
+   chains (schema role, not runtime writers) including `op.execute` of views.
 2. **Go detector** — Echo v4 routes (`group.POST(path, handler)` with group
    prefixes, cross-package consts, factory handlers, and wrappers such as
    `wrap(h.Version)`). Method names must be exactly `GET`/`POST`/…/`Any`/`Match`
@@ -125,9 +128,13 @@ flowchart LR
 3. **Python detector** — FastAPI/Flask routes (module/imported consts, `+`,
    f-strings, `APIRouter` / `include_router` prefixes). Unresolvable path
    pieces stay `{name}` placeholders (`unresolved`, never truncated).
-   SQLAlchemy Core/ORM usage and `text()`/`execute()` SQL. Firebase
-   Functions + Firestore collections. Celery / RQ / Cloud Tasks / Pub/Sub
-   and `while True` workers. `supabase.rpc("fn")` links to SQL functions.
+   SQLAlchemy Core/ORM usage and `text()`/`execute()` SQL, plus SQL strings
+   held in module dicts (`QUERIES["a"]`) and callables injected as arguments
+   or dataclass fields. Firebase Functions + Firestore collections, including
+   document refs (`ref.set` after `collection().document()`), transactions,
+   and batches. Celery / RQ / Cloud Tasks / Pub/Sub (enqueue linked to the
+   consumer by URL suffix or `queues:`) and `while True` workers.
+   `supabase.rpc("fn")` links to SQL functions.
 4. **JavaScript detector** — Express `app.get("/path", handler)`, `fetch()`,
    and `supabase.rpc`. `.ts` files are parsed with the JavaScript grammar.
 5. **Call graph** — handler → service → repository using typed locals,
@@ -138,7 +145,9 @@ flowchart LR
    Reads/writes propagate to HTTP and job entrypoints as table-level
    `inferred` edges; `table:unknown` does not. HTTP clients emit
    `calls_http` when the URL matches a scanned route (optionally via
-   `services:` base URLs). Queue produce sites emit `enqueues`.
+   `services:` base URLs, env var names, or hostnames). Unmatched client
+   calls print `N unresolved HTTP calls` with the env/host keys seen.
+   Queue produce sites emit `enqueues` and `triggers` the matched consumer.
 6. **SQL** — named columns stay column-level; `SELECT *` and column-less
    INSERT are table-level. FROM-less SELECT (`now()`, `set_config`) touches
    no table. CTE/subquery/LATERAL aliases (`l`, `r`, `l.x`) are never tables.
@@ -151,8 +160,8 @@ flowchart LR
    merged graph lists writers and readers from every service.
 8. **Overrides** — `bizmap.yaml` (`--config`, scan root, or git toplevel)
    fills in `why`, extra edges, `exclude` globs, `expand_star`, plus
-   `name`, `database`, `services`, and `repos`. `--exclude GLOB` merges
-   with YAML. `--profile` times each scan phase.
+   `name`, `database`, `services`, `queues`, and `repos`. `--exclude GLOB`
+   merges with YAML. `--profile` times each scan phase.
 
 ### Performance
 
@@ -185,8 +194,10 @@ table and collection names (`orders`, `users`, `tenants`, `notifications`,
 ## Roadmap
 
 - **v0.2** — Python stacks (SQLAlchemy/Alembic, FastAPI/Flask, Firebase,
-  queues), Express/`fetch` (JS grammar), and a cross-repo registry. **This
-  release.**
+  queues), Express/`fetch` (JS grammar), and a cross-repo registry.
+- **v0.2.1** — Quoted DDL, PL/pgSQL junk-table suppression, SQL dicts /
+  callable injection, views, Firestore document refs, queue→consumer
+  links, env-based `services:`. **This release.**
 - **v0.3** — GitHub Action that warns when a PR changes a writer of a column
   that another in-flight PR also touches (“lineage conflict”).
 - **v0.4** — MCP server so agents can query `why orders.status` without

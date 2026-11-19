@@ -125,6 +125,17 @@ def scan_cmd(
     click.echo(
         f"wrote {out_path}  ({len(payload['nodes'])} nodes, {len(payload['edges'])} edges)"
     )
+    unresolved = graph.attrs.get("unresolved_http") or []
+    if unresolved:
+        keys: list[str] = []
+        seen: set[str] = set()
+        for item in unresolved:
+            for key in item.get("keys") or []:
+                if key not in seen:
+                    seen.add(key)
+                    keys.append(str(key))
+        suffix = f" ({', '.join(keys)})" if keys else ""
+        click.echo(f"{len(unresolved)} unresolved HTTP calls{suffix}")
     if mermaid_flag or mermaid_focus:
         mmd_path = out_path.with_suffix(".mmd")
         mmd_path.write_text(

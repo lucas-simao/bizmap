@@ -1,4 +1,4 @@
-# BizMap graph schema (v0.2.0)
+# BizMap graph schema (v0.2.1)
 
 `bizmap scan` writes `bizmap.graph.json`. The graph is fully deterministic: every
 node and edge is produced from source text (SQL, tree-sitter ASTs, comments, or
@@ -8,7 +8,7 @@ an explicit `bizmap.yaml` override). There is no LLM in the loop.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | string | Graph format version (`"0.2.0"`). |
+| `version` | string | Graph format version (`"0.2.1"`). |
 | `generated_at` | string | UTC timestamp. |
 | `schema` | object | Reconstructed database schema (`schema.tables`). |
 | `nodes` | array | Graph nodes (see below). |
@@ -44,13 +44,14 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 | `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:<kind>:<key>` | `kind` (`http` \| `scheduled_job` \| `firestore` \| `celery_task` \| `worker` \| `pubsub` \| `cloud_task` \| `firebase_http` \| `firebase_call`), `method`, `path`, `symbol`, `why`, `evidence`, optional `confidence`, `candidates`, `unresolved` (const path not in the scan), optional `collection` / `event` |
 | `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch) |
 | `table` | `table:<name>` | `name`; optional `external` (system catalogs), `candidates` (dynamic/`unknown`), `rls`, `policies` |
+| `view` | `view:<name>` | `name`, `kind: view`, optional `materialized` |
 | `column` | `column:<table>.<column>` | `table`, `name`, `data_type`, `nullable`, optional `why` |
 | `db_trigger` | `db_trigger:<name>` | `name`, `table`, `timing`, `events`, `function`, `evidence` |
 | `collection` | `collection:<name>` | `name` (Firestore collection) |
 | `queue` | `queue:<kind>:<name>` | `kind` (`celery` \| `rq` \| `cloud_tasks` \| `pubsub` \| `firestore`), `name` |
 
 On a merged registry graph, function / entrypoint / queue ids are prefixed
-with the repo (`catalog/function:db.create_order`). Table, column,
+with the repo (`catalog/function:db.create_order`). Table, column, view,
 collection, and `db_trigger` ids stay unprefixed when every contributing
 graph declares the same `database`.
 
@@ -74,8 +75,9 @@ picking an arbitrary match.
 | `reads` | `function` / `entrypoint` / `db_trigger` | `column`, `table`, or `collection` | SQL, ORM, or Firestore reads this data. |
 | `writes` | `function` / `entrypoint` / `db_trigger` | `column`, `table`, or `collection` | SQL, ORM, or Firestore writes this data. |
 | `triggers` | `entrypoint` or `db_trigger` (or a collection writer) | `function` / `entrypoint` | HTTP route / ticker job / DB trigger / Firestore writer invokes a function. |
-| `calls_http` | `function` | `entrypoint` | HTTP client URL matched a scanned route (same repo or via `services:`). |
+| `calls_http` | `function` | `entrypoint` | HTTP client URL matched a scanned route (same repo or via `services:` env/host/URL). |
 | `enqueues` | `function` | `queue` | Celery/RQ/Cloud Tasks/Pub/Sub produce site. |
+| `derives_from` | `view` | `table` or `view` | View (or materialized view) is defined from these base relations. |
 
 Column-level `reads`/`writes` are emitted only when the SQL names columns.
 `SELECT *` and INSERT without a column list are **table-level** (unless
@@ -121,7 +123,12 @@ applied in order. Supported PostgreSQL constructs:
 - `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` / `DROP COLUMN`
 - `ALTER TABLE ... ADD/DROP CONSTRAINT` (including `FOREIGN KEY`)
 - `DO $$ ... $$` blocks (inner `ALTER`/`CREATE` is applied)
-- `CREATE TRIGGER` + `CREATE FUNCTION` (plpgsql body scanned for `INSERT`/`UPDATE`/`DELETE`/`SELECT`)
+- `CREATE TRIGGER` + `CREATE FUNCTION` (quoted / schema-qualified pg_dump
+  identifiers; plpgsql body scanned for `INSERT`/`UPDATE`/`DELETE`/`SELECT`
+  after comments, string literals, DECLARE variables, and INTO targets are
+  stripped)
+- `CREATE VIEW` / `CREATE MATERIALIZED VIEW` (and Alembic `op.execute` of the
+  same) as `view` nodes with `derives_from` edges
 - `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`
 - `CREATE POLICY ... ON table` (name, command, role, `USING` / `WITH CHECK`)
 - Alembic Python revisions (`op.create_table`, `add_column`, `drop_*`, `execute`) applied in `down_revision` order; those functions are `role: schema` and listed by `why` as **defined/altered by**, not runtime writers
@@ -129,10 +136,13 @@ applied in order. Supported PostgreSQL constructs:
 Table nodes are created for reconstructed DDL tables and for system catalogs
 (`pg_roles`, `pg_catalog.*`, `information_schema.*`, `pg_*`) marked
 `external`. When DDL is present, unknown real-looking
-identifiers are not turned into table nodes. Without DDL, static SQL that
+identifiers are not turned into table nodes (the origin function may list
+them under `unresolved` instead). Schema-qualified names and tables created
+in migrations still become nodes. Without DDL, static SQL that
 names a real identifier may still create a table node. CTE / subquery /
-LATERAL aliases (`l`, `r`, `l.x`, `files.file_id`) and SQL keywords are never
-tables. FROM-less SELECT (`SELECT now()`) touches no table. Dynamic table
+LATERAL aliases (`l`, `r`, `l.x`, `files.file_id`), SQL keywords, and
+PL/pgSQL keywords / DECLARE'd variables are never tables. FROM-less SELECT
+(`SELECT now()`) touches no table. Dynamic table
 names become `table:unknown` with `candidates` when determinable, and stay
 on the origin function only.
 
@@ -150,7 +160,12 @@ name: catalog
 database: platform
 services:
   catalog: http://catalog.internal
-  worker: http://worker.internal
+  billing:
+    url: http://billing.internal
+    env: BILLING_URL
+queues:
+  ingest: ingest
+  jobs: on_jobs
 repos:
   - catalog
   - worker
@@ -170,5 +185,9 @@ overrides:
 ## Mermaid
 
 `bizmap scan --mermaid` writes an **entrypoint → table** rollup (readable on
-large graphs). `--mermaid-focus TABLE` shows functions, columns, and
-entrypoints around one table. `--mermaid-limit N` caps node count.
+large graphs). `--mermaid-focus TABLE` shows functions, columns, views, and
+entrypoints around one table or view. `--mermaid-limit N` caps node count.
+
+`bizmap scan` prints `N unresolved HTTP calls (ENV, host, …)` after the
+graph write when client URLs did not match a scanned route or `services:`
+entry. Declare the missing env/host in `services:` to resolve them.

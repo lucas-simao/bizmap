@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
+import re
+from typing import Any
 from urllib.parse import urlparse
+
+_PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
+_ENV_GET = re.compile(
+    r"""(?:os\.)?(?:environ(?:\.get)?|getenv)\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]"""
+)
+_ENV_SUB = re.compile(
+    r"""(?:os\.)?environ\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]"""
+)
+_SETTINGS = re.compile(r"""(?:settings|config|conf)\.([A-Za-z_][A-Za-z0-9_]*)""")
 
 
 def normalize_path(path: str) -> str:
@@ -21,22 +32,90 @@ def normalize_path(path: str) -> str:
     return raw or "/"
 
 
-def strip_service_base(url: str, services: dict[str, str]) -> str:
+def _service_fields(name: str, spec: Any) -> tuple[str, list[str], list[str]]:
+    """Return (url, env names, hosts) for a services: entry."""
+    envs: list[str] = []
+    hosts: list[str] = []
+    url = ""
+    if isinstance(spec, dict):
+        url = str(spec.get("url") or spec.get("base") or spec.get("host") or "")
+        env = spec.get("env") or spec.get("env_var") or spec.get("environ")
+        if isinstance(env, list):
+            envs.extend(str(x) for x in env if x)
+        elif env:
+            envs.append(str(env))
+        host = spec.get("host") or spec.get("hostname")
+        if host:
+            hosts.append(str(host))
+    elif spec is not None:
+        url = str(spec)
+    if url and "://" in url:
+        parsed = urlparse(url)
+        if parsed.netloc:
+            hosts.append(parsed.netloc.split("@")[-1])
+    elif url and "." in url and "/" not in url and url.isidentifier() is False:
+        hosts.append(url)
+    envs.append(name)
+    if name.isidentifier() and name.upper() != name:
+        envs.append(name.upper())
+        envs.append(name.upper() + "_URL" if not name.upper().endswith("_URL") else name.upper())
+    snake = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
+    if snake:
+        envs.append(snake)
+        envs.append(snake.upper())
+        if not snake.upper().endswith("_URL"):
+            envs.append(snake.upper() + "_URL")
+            envs.append(snake + "_url")
+    # unique, preserve order
+    seen: set[str] = set()
+    env_out: list[str] = []
+    for e in envs:
+        if e and e not in seen:
+            seen.add(e)
+            env_out.append(e)
+    host_out: list[str] = []
+    seen_h: set[str] = set()
+    for h in hosts:
+        key = h.lower()
+        if h and key not in seen_h:
+            seen_h.add(key)
+            host_out.append(h)
+    return url, env_out, host_out
+
+
+def expand_service_prefixes(services: dict[str, Any] | None) -> list[str]:
+    """Prefixes to strip from a client URL, including env/settings placeholders."""
+    prefixes: list[str] = []
+    for name, spec in (services or {}).items():
+        url, envs, hosts = _service_fields(str(name), spec)
+        if url:
+            prefixes.append(url)
+            prefixes.append(url.rstrip("/"))
+        prefixes.append("{" + str(name) + "}")
+        for env in envs:
+            prefixes.append("{" + env + "}")
+            prefixes.append("{os.environ[\"" + env + "\"]}")
+            prefixes.append("{os.environ['" + env + "']}")
+            prefixes.append("{os.environ.get(\"" + env + "\")}")
+            prefixes.append("{os.environ.get('" + env + "')}")
+            prefixes.append("{os.getenv(\"" + env + "\")}")
+            prefixes.append("{os.getenv('" + env + "')}")
+            prefixes.append("{settings." + env + "}")
+            prefixes.append("{settings." + env.lower() + "}")
+            prefixes.append("{config." + env.lower() + "}")
+        for host in hosts:
+            prefixes.append("http://" + host)
+            prefixes.append("https://" + host)
+            prefixes.append(host)
+    prefixes.sort(key=len, reverse=True)
+    return prefixes
+
+
+def strip_service_base(url: str, services: dict[str, Any] | None) -> str:
     """Remove a configured service base URL or `{ENV}` / `{name}` prefix."""
     if not url:
         return url
-    candidates: list[tuple[str, str]] = []
-    for name, base in (services or {}).items():
-        if not base:
-            continue
-        candidates.append((name, str(base)))
-        candidates.append((name, "{" + name + "}"))
-        if str(base).isidentifier():
-            candidates.append((name, "{" + str(base) + "}"))
-            candidates.append((name, str(base)))
-    # longest prefix first
-    candidates.sort(key=lambda kv: len(kv[1]), reverse=True)
-    for _name, prefix in candidates:
+    for prefix in expand_service_prefixes(services):
         if not prefix:
             continue
         if url.lower().startswith(str(prefix).lower()):
@@ -46,6 +125,20 @@ def strip_service_base(url: str, services: dict[str, str]) -> str:
     if parsed.scheme and parsed.netloc:
         return parsed.path or "/"
     return url
+
+
+def path_without_placeholders(path: str) -> str:
+    """Drop leading `{ENV}` segments so `/ingest` remains from `{WORKER_URL}/ingest`."""
+    raw = normalize_path(path)
+    parts = [p for p in raw.split("/") if p]
+    kept: list[str] = []
+    for part in parts:
+        if part.startswith("{") and part.endswith("}"):
+            continue
+        kept.append(part)
+    if not kept:
+        return raw
+    return "/" + "/".join(kept)
 
 
 def path_template_match(template: str, actual: str) -> bool:
@@ -77,17 +170,68 @@ def match_http(
     method: str,
     url: str,
     routes: list[tuple[str, str, str]],
-    services: dict[str, str] | None = None,
+    services: dict[str, Any] | None = None,
 ) -> list[str]:
     """Return entrypoint ids whose method+path match this client call."""
     method_u = (method or "GET").upper()
     if method_u in {"HTTP_METHOD.POST", "HTTPMETHOD.POST"}:
         method_u = "POST"
-    path = normalize_path(strip_service_base(url, services or {}))
+    stripped = strip_service_base(url, services or {})
+    path = normalize_path(stripped)
+    suffix = path_without_placeholders(path)
     hits: list[str] = []
     for eid, rmethod, rpath in routes:
         if rmethod.upper() != method_u:
             continue
-        if path_template_match(rpath, path) or path_template_match(path, rpath):
+        if (
+            path_template_match(rpath, path)
+            or path_template_match(path, rpath)
+            or path_template_match(rpath, suffix)
+            or path_template_match(suffix, rpath)
+        ):
             hits.append(eid)
+            continue
+        # last-segment match for `{ENV}/ingest` vs `/ingest`
+        if suffix.rstrip("/").split("/")[-1:] == normalize_path(rpath).rstrip("/").split("/")[-1:]:
+            if suffix.count("/") == normalize_path(rpath).count("/"):
+                hits.append(eid)
     return hits
+
+
+def unresolved_http_keys(url: str) -> list[str]:
+    """Env var / settings / hostname keys visible in an unmatched client URL."""
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    def add(item: str) -> None:
+        item = (item or "").strip()
+        if not item or item in seen:
+            return
+        seen.add(item)
+        keys.append(item)
+
+    for m in _PLACEHOLDER.finditer(url or ""):
+        inner = m.group(1).strip()
+        env = _ENV_SUB.search(inner) or _ENV_GET.search(inner)
+        if env:
+            add(env.group(1))
+            continue
+        settings = _SETTINGS.search(inner)
+        if settings:
+            add(settings.group(1))
+            continue
+        # os.environ["X"] written without wrapping parse
+        if inner.startswith("os.environ") or inner.startswith("os.getenv"):
+            boxed = _ENV_SUB.search(inner) or _ENV_GET.search(inner)
+            if boxed:
+                add(boxed.group(1))
+                continue
+        add(inner.split(".")[-1] if "." in inner and " " not in inner else inner)
+    for m in _ENV_SUB.finditer(url or ""):
+        add(m.group(1))
+    for m in _ENV_GET.finditer(url or ""):
+        add(m.group(1))
+    parsed = urlparse(url)
+    if parsed.netloc and not parsed.netloc.startswith("{"):
+        add(parsed.netloc.split("@")[-1])
+    return keys

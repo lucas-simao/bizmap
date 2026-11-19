@@ -19,8 +19,18 @@ CONFIDENCE_RANK = {
 }
 
 
-NODE_TYPES = ("entrypoint", "function", "table", "column", "db_trigger", "collection", "queue")
-EDGE_TYPES = ("calls", "reads", "writes", "triggers", "calls_http", "enqueues")
+GRAPH_VERSION = "0.2.1"
+NODE_TYPES = (
+    "entrypoint",
+    "function",
+    "table",
+    "column",
+    "db_trigger",
+    "collection",
+    "queue",
+    "view",
+)
+EDGE_TYPES = ("calls", "reads", "writes", "triggers", "calls_http", "enqueues", "derives_from")
 
 
 def parse_confidence(value: str | Confidence | None) -> Confidence:
@@ -102,7 +112,7 @@ class Graph:
     """Lineage graph: nodes + edges + reconstructed schema."""
 
     def __init__(self) -> None:
-        self.version = "0.2.0"
+        self.version = GRAPH_VERSION
         self.generated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.schema: dict[str, Any] = {"tables": {}}
         self.nodes: dict[str, Node] = {}
@@ -200,7 +210,7 @@ class Graph:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Graph:
         graph = cls()
-        graph.version = str(data.get("version") or "0.2.0")
+        graph.version = str(data.get("version") or GRAPH_VERSION)
         graph.generated_at = str(data.get("generated_at") or graph.generated_at)
         graph.schema = data.get("schema") or {"tables": {}}
         graph.repo = data.get("repo")
@@ -262,3 +272,7 @@ def collection_id(name: str) -> str:
 
 def queue_id(kind: str, name: str) -> str:
     return f"queue:{kind}:{name}"
+
+
+def view_id(name: str) -> str:
+    return f"view:{name.lower()}"

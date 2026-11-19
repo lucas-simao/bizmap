@@ -122,7 +122,7 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `--exclude GLOB` (repeatable) merges with YAML `exclude`. `--profile`
   prints parse / resolve / sql / propagate timings to stderr.
 
-## Bundled rules (v0.2.0)
+## Bundled rules (v0.2.1)
 
 | File | Status | What it detects |
 | --- | --- | --- |
