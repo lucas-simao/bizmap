@@ -254,9 +254,15 @@ def report_cmd(
         if salt_file.exists():
             salt = salt_file.read_text(encoding="utf-8").strip()
         if not salt:
+            import os
+
             salt = secrets.token_hex(16)
             salt_file.parent.mkdir(parents=True, exist_ok=True)
-            salt_file.write_text(salt + "\n", encoding="utf-8")
+            # private from the first byte: 0600, never world/group readable
+            fd = os.open(salt_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(salt + "\n")
+            os.chmod(salt_file, 0o600)
             click.echo(
                 f"note: wrote a new redaction salt to {salt_file}; keep it private and reuse it",
                 err=True,

@@ -387,3 +387,55 @@ def test_service_helpers() -> None:
     assert not base_is_known("{base}/x")
     assert not base_is_known("{window.__CONFIG__.apiBase}/x")
     assert not base_is_known("/x")
+
+
+
+def test_literal_unique_in_own_repo_but_ambiguous_overall_links_nothing(tmp_path: Path) -> None:
+    """web has its own BFF route and billing has the same path: after the
+    merge the literal has two owners, so no `heuristic` edge may survive."""
+    web = tmp_path / "web"
+    billing = tmp_path / "billing"
+    _write(
+        web,
+        "src/bff.ts",
+        """
+import express from 'express';
+const app = express();
+export function bffItem(req: any, res: any) { res.json({}); }
+app.get('/api/v1/items/:id', bffItem);
+""",
+    )
+    _write(
+        web,
+        "src/screens.ts",
+        """
+export async function loadItem(http: any, id: string) {
+  return http.get(`/items/${id}`);
+}
+""",
+    )
+    _write(
+        billing,
+        "app.py",
+        """
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/api/v1/items/{item_id}")
+def get_item(item_id: str):
+    return {}
+""",
+    )
+    alone = scan_path(web)
+    assert _calls_http_from(alone, function_id("src.screens.loadItem")) == {
+        "entrypoint:http:GET:/api/v1/items/:id"
+    }
+    graph = scan_paths([web, billing])
+    fn = function_id("src.screens.loadItem")
+    assert _calls_http_from(graph, fn) == set(), _calls_http_from(graph, fn)
+    node = next(n for n in graph.nodes.values() if n.id.endswith(fn))
+    skipped = node.attrs.get("route_literal_skipped") or []
+    assert skipped and skipped[0]["reason"] == "ambiguous", skipped
+    assert len(skipped[0]["discarded"]) == 2, skipped

@@ -189,3 +189,16 @@ def test_reach_counts_unknown_only_separately() -> None:
     assert ep["reaching_data"] == 1
     assert ep["reaching_only_unknown"] == 1
     assert "reaching only table:unknown" in format_report(build_report(graph))
+
+
+
+def test_salt_file_is_private(tmp_path: Path) -> None:
+    import os
+    import stat
+
+    root = _secret_repo(tmp_path)
+    salt_file = tmp_path / "salt"
+    res = CliRunner().invoke(main, ["report", str(root), "--redact", "--salt-file", str(salt_file)])
+    assert res.exit_code == 0, res.output
+    if os.name == "posix":
+        assert stat.S_IMODE(salt_file.stat().st_mode) == 0o600
