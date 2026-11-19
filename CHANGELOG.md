@@ -4,6 +4,18 @@
 
 ### Added
 
+- **Front-end → API by route literal** (`calls_http`, `inferred`,
+  `via: route_literal`): API-looking strings and templates in JS/TS
+  (`'/orders/' + id`, `` `${base}/orders/${id}` ``) link to the single
+  matching route in the same repo or a joint scan, even when the axios/ky/fetch
+  client was built through DI, registries, or factories the detectors cannot
+  follow. Navigation (`navigate`, `<Link to>`, `path:` keys), comparisons,
+  assets, imports, and route registrations are ignored; suffix matches need
+  2+ literal segments or a method hint; ambiguous literals link nothing.
+  The matching `unresolved_http` entry is removed. Works after
+  `registry merge` (literals are stored on function nodes as
+  `route_literals`).
+
 - **Golden snapshots** (`tests/snapshots/*.txt`, `bizmap.snapshot.summarize`):
   one sorted line per node, edge (with confidence), and unresolved HTTP call
   for every bundled example. Any link gained or lost shows up as a readable
