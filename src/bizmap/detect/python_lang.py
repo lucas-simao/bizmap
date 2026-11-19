@@ -1602,7 +1602,21 @@ class PythonAnalyzer:
                     arg = inner_pos[0]
                 elif inner_name in _SQLALCHEMY_BUILDERS:
                     # select()/insert()/update()/delete() are handled by the
-                    # SQLAlchemy detector; their source text is not SQL.
+                    # SQLAlchemy detector; their source text is not SQL. When
+                    # the model/table cannot be resolved (it lives outside the
+                    # scan), keep an honest `table:unknown` trace instead of
+                    # dropping the access.
+                    if not _builder_resolves(arg, analysis.bindings, analysis.models):
+                        analysis.accesses.append(
+                            PyAccess(
+                                fn,
+                                _builder_kind(arg),
+                                "unknown",
+                                None,
+                                Confidence.UNKNOWN,
+                                evidence,
+                            )
+                        )
                     continue
             for res in _sql_arg_sources(arg, resolve, imap, local_dicts, dicts_by_module):
                 sql_val = res.path_text if res.usable else ""
@@ -2254,6 +2268,36 @@ _SQLALCHEMY_BUILDERS = {
     "on_conflict_do_update",
     "on_conflict_do_nothing",
 }
+
+
+_BUILDER_ROOTS = {"select", "insert", "update", "delete"}
+_BUILDER_WRITES = {"insert", "update", "delete", "values", "on_conflict_do_update"}
+
+
+def _builder_chain(node: Node) -> list[tuple[str, Node]]:
+    """`update(T).where(...).values(...)` → [("values", …), ("where", …), ("update", …)]."""
+    chain: list[tuple[str, Node]] = []
+    cur: Node | None = node
+    while cur is not None and cur.type == "call":
+        chain.append((call_callee_name(cur), cur))
+        func = cur.child_by_field_name("function")
+        if func is not None and func.type == "attribute":
+            cur = func.child_by_field_name("object")
+        else:
+            break
+    return chain
+
+
+def _builder_resolves(node: Node, bindings: dict[str, str], models: dict) -> bool:
+    for name, call in _builder_chain(node):
+        if name in _BUILDER_ROOTS:
+            return any(_resolve_table_ref(a, bindings, models)[0] for a in call_posargs(call))
+    return False
+
+
+def _builder_kind(node: Node) -> str:
+    names = {name for name, _ in _builder_chain(node)}
+    return "write" if names & _BUILDER_WRITES else "read"
 
 
 def _sql_arg_sources(
