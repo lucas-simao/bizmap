@@ -863,6 +863,7 @@ class JsHelperCall:
     file: str
     line: int
     method: str | None = None
+    args: list[str | None] = field(default_factory=list)
 
 
 @dataclass
@@ -900,6 +901,7 @@ class JsAnalyzer:
         constants: dict[str, str] | None = None,
     ) -> JsAnalysis:
         analysis = JsAnalysis()
+        _REEXPORTS.clear()
         yaml_constants = constants or {}
         path_aliases = _ts_path_aliases(root)
         parsed: list[tuple[Path, str, str, Node, bytes]] = []
@@ -940,6 +942,7 @@ class JsAnalyzer:
             imports_by_mod[module] = imports
             import_specs_by_mod[module] = specs
             exports_by_mod[module] = _collect_exports(tree)
+            _REEXPORTS[module] = _collect_reexports(tree, module, path_aliases)
             factories_by_mod[module] = _collect_client_factories(tree, consts)
             class_ctors_by_mod[module] = _collect_class_ctors(tree)
             trees_by_mod[module] = tree
@@ -1020,6 +1023,7 @@ class JsAnalyzer:
             _collect_route_literals(
                 analysis, tree, rel_file, module, consts, routers, imports_by_mod.get(module) or {}
             )
+        _bind_param_bases(analysis, fn_nodes)
         return analysis
 
     def _scan_file(
@@ -2777,6 +2781,7 @@ def _collect_route_literals(
                         file=rel_file,
                         line=line_of(node),
                         method=_literal_method_hint(_literal_top(node), consts),
+                        args=[_resolve_js_string(a, consts)[0] for a in call_args(node)],
                     )
                 )
     for node in walk(tree):
@@ -2919,9 +2924,16 @@ def _collect_path_helpers(tree: Node, consts: dict[str, str]) -> dict[str, str]:
         if not value or any(ch.isspace() for ch in value):
             continue
         lead = _HOLE.match(value)
+        # `seg = (s) => encodeURIComponent(s)`: a transparent segment helper
+        transparent = bool(lead) and lead.end() == len(value) and lead.group(1) in params
         # a leading base placeholder (`{VITE_API_URL}`, `{base}`) is allowed
         base_hole = lead.group(1) if lead and "/" in value[lead.end():] else None
-        if not (value.startswith("/") or base_hole or value.startswith(("http://", "https://"))):
+        if not (
+            transparent
+            or value.startswith("/")
+            or base_hole
+            or value.startswith(("http://", "https://"))
+        ):
             continue
         # Pure: the only holes are the helper's own parameters (plus a leading
         # env/base placeholder such as `{VITE_API_URL}`).
@@ -2933,6 +2945,68 @@ def _collect_path_helpers(tree: Node, consts: dict[str, str]) -> dict[str, str]:
     return out
 
 
+_REEXPORTS: dict[str, tuple[dict[str, tuple[str, str]], list[str]]] = {}
+
+
+def _collect_reexports(
+    tree: Node, module: str, path_aliases: list[tuple[str, list[str]]] | None
+) -> tuple[dict[str, tuple[str, str]], list[str]]:
+    """`export { a as b } from './x'` → {b: (x, a)}; `export * from './y'` → [y]."""
+    named: dict[str, tuple[str, str]] = {}
+    stars: list[str] = []
+    for node in tree.named_children:
+        if node.type != "export_statement":
+            continue
+        raw = text(node)
+        m = re.search(r"""from\s+['"]([^'"]+)['"]""", raw)
+        if not m:
+            continue
+        src = _spec_to_module(m.group(1), module, path_aliases)
+        if re.match(r"export\s+\*\s+from", raw):
+            stars.append(src)
+            continue
+        block = re.search(r"export\s*(?:type\s*)?\{([^}]+)\}", raw)
+        for part in (block.group(1).split(",") if block else []):
+            part = part.strip().replace("type ", "")
+            if not part:
+                continue
+            if " as " in part:
+                orig, alias = (x.strip() for x in re.split(r"\s+as\s+", part, maxsplit=1))
+            else:
+                orig = alias = part
+            named[alias] = (src, orig)
+    return named, stars
+
+
+def _helper_source(
+    consts_by_mod: dict[str, dict[str, str]],
+    mod: str,
+    name: str,
+    depth: int = 0,
+) -> tuple[dict[str, str], str] | None:
+    """Module consts that define helper `name` (directly or as object prefix),
+    following barrels (`index` files, `export … from`)."""
+    if depth > 5:
+        return None
+    for candidate in (mod, f"{mod}.index"):
+        src = consts_by_mod.get(candidate)
+        if src is None:
+            continue
+        if f"{name}()" in src or any(k.startswith(f"{name}.") for k in src):
+            return src, name
+        named, stars = _REEXPORTS.get(candidate, ({}, []))
+        if name in named:
+            nmod, orig = named[name]
+            hit = _helper_source(consts_by_mod, nmod, orig, depth + 1)
+            if hit:
+                return hit
+        for star in stars:
+            hit = _helper_source(consts_by_mod, star, name, depth + 1)
+            if hit:
+                return hit
+    return None
+
+
 def _import_path_helpers(
     consts_by_mod: dict[str, dict[str, str]],
     import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
@@ -2940,7 +3014,18 @@ def _import_path_helpers(
     for module, specs in import_specs_by_mod.items():
         consts = consts_by_mod.setdefault(module, {})
         for local, (src_mod, orig) in specs.items():
-            src = consts_by_mod.get(src_mod) or {}
+            if orig != "*":
+                found = _helper_source(consts_by_mod, src_mod, orig)
+                if found:
+                    src_consts, real = found
+                    if f"{real}()" in src_consts and f"{local}()" not in consts:
+                        consts[f"{local}()"] = src_consts[f"{real}()"]
+                        consts[f"{local}()#params"] = src_consts.get(f"{real}()#params", "")
+                    for skey, sval in src_consts.items():
+                        if skey.startswith(f"{real}.") and (skey.endswith("()") or skey.endswith("()#params")):
+                            consts.setdefault(f"{local}.{skey[len(real) + 1:]}", sval)
+                    continue
+            src = consts_by_mod.get(src_mod) or consts_by_mod.get(f"{src_mod}.index") or {}
             if orig == "*":
                 # `import * as P from './paths'` → P.site(), P.routes.team()
                 for skey, sval in src.items():
@@ -2994,3 +3079,38 @@ def _apply_path_helper(call: Node, consts: dict[str, str]) -> str | None:
                     rep = val
         template = template.replace("{" + param + "}", rep)
     return template
+
+
+
+def _bind_param_bases(analysis: JsAnalysis, fn_nodes: dict[str, Node]) -> None:
+    """`getX(baseUrl, id) → fetch(`${baseUrl}/v1/x/${id}`)`: when every call site
+    passes the same concrete base (env var / absolute URL), compose it into the
+    traced URL so the normal matcher (and `services:`) can resolve it."""
+    sites: dict[str, list[JsHelperCall]] = {}
+    for hc in analysis.helper_calls:
+        sites.setdefault(hc.callee, []).append(hc)
+    for call in analysis.http_calls:
+        m = _HOLE.match(call.url or "")
+        if not m:
+            continue
+        params = _fn_param_names(fn_nodes.get(call.symbol))
+        hole = m.group(1)
+        if hole not in params:
+            continue
+        idx = params.index(hole)
+        callers = sites.get(call.symbol) or []
+        if not callers:
+            continue
+        values = {hc.args[idx] if idx < len(hc.args) else None for hc in callers}
+        if len(values) != 1:
+            continue
+        value = next(iter(values))
+        if not value:
+            continue
+        lead = _HOLE.match(value)
+        concrete = value.startswith(("http://", "https://")) or (
+            lead is not None and lead.end() == len(value) and _ENV_LIKE.match(lead.group(1))
+        )
+        if not concrete:
+            continue
+        call.url = value.rstrip("/") + call.url[m.end():]
