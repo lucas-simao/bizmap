@@ -129,6 +129,11 @@ app = FastAPI()
 def secret_handler(conn):
     conn.execute(text("INSERT INTO secret_table (id, v) VALUES ('a', 'b')"))
     httpx.post(os.environ["SECRET_SVC_URL"] + "/secret-route/sync")
+
+
+@app.get("/secret-route/ping")
+def secret_job():
+    return {}
 ''',
         encoding="utf-8",
     )
