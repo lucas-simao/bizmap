@@ -2,15 +2,26 @@ id: go.ticker.job
 language: go
 framework: stdlib
 description: >
-  Background jobs started as `go x.Run(ctx)` whose Run method uses time.NewTicker.
+  Background jobs started with any `go` statement (function, method, package
+  func, composite-literal receiver, or closure) whose target or a transitive
+  callee uses time.NewTicker / time.Tick / time.After in a loop, or a cron
+  library (robfig/cron, gocron).
 status: active
 detect:
+  go_statement: true
   go_call:
     method: Run
   requires_inside_callee:
     calls:
-      method: NewTicker
+      method:
+        in: [NewTicker, Tick, After]
       receiver: time
+    cron_imports:
+      contains:
+        - github.com/robfig/cron
+        - github.com/go-co-op/gocron
+    cron_methods:
+      in: [AddFunc, AddJob, Schedule, Start]
 produce:
   entrypoint:
     kind: scheduled_job

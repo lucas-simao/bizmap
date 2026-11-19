@@ -17,11 +17,55 @@ def test_update_set_and_where() -> None:
     assert any(a.kind == "read" and a.column == "id" for a in acc)
 
 
-def test_select_star_inferred_from_schema() -> None:
+def test_select_star_is_table_level_by_default() -> None:
     acc = analyze_sql("SELECT * FROM users", schema_columns={"users": ["id", "email"]})
+    reads = [a for a in acc if a.kind == "read"]
+    assert reads
+    assert all(a.column is None for a in reads)
+    assert {a.table for a in reads} == {"users"}
+    assert all(a.confidence == Confidence.INFERRED for a in acc)
+
+
+def test_select_star_expand_flag() -> None:
+    acc = analyze_sql(
+        "SELECT * FROM users", schema_columns={"users": ["id", "email"]}, expand_star=True
+    )
     cols = {a.column for a in acc if a.kind == "read"}
     assert cols == {"id", "email"}
     assert all(a.confidence == Confidence.INFERRED for a in acc)
+
+
+def test_insert_without_columns_is_table_level() -> None:
+    acc = analyze_sql(
+        "INSERT INTO orders VALUES ($1,$2,$3)",
+        schema_columns={"orders": ["id", "user_id", "status"]},
+    )
+    writes = [a for a in acc if a.kind == "write"]
+    assert writes
+    assert all(a.column is None for a in writes)
+    assert {a.table for a in writes} == {"orders"}
+
+
+def test_cte_alias_is_not_a_table() -> None:
+    acc = analyze_sql(
+        "WITH last AS (SELECT id, status FROM orders) SELECT last.status FROM last"
+    )
+    tables = {a.table.lower() for a in acc}
+    assert "last" not in tables
+    assert "orders" in tables
+
+
+def test_dynamic_table_name_is_unknown_not_set() -> None:
+    acc = analyze_sql("UPDATE {table} SET status = $1", dynamic=True)
+    assert acc
+    assert all(a.unknown_table or a.table == "unknown" for a in acc)
+    assert not any(a.table and a.table.lower() == "set" for a in acc)
+
+
+def test_pg_roles_is_external() -> None:
+    acc = analyze_sql("SELECT rolname FROM pg_roles")
+    assert acc
+    assert all(a.external and a.table.lower() == "pg_roles" for a in acc)
 
 
 def test_join_reads_aliased_columns() -> None:

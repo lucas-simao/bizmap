@@ -8,7 +8,7 @@ import click
 
 from bizmap import __version__
 from bizmap.graph import Graph
-from bizmap.mermaid import render_mermaid
+from bizmap.mermaid import DEFAULT_LIMIT, render_mermaid
 from bizmap.scan import scan_path
 from bizmap.why import format_why
 
@@ -36,7 +36,27 @@ def main() -> None:
     "--mermaid",
     "mermaid_flag",
     is_flag=True,
-    help="Also write a Mermaid flowchart next to the JSON (same stem, .mmd).",
+    help="Also write a Mermaid flowchart next to the JSON (entrypoint→table rollup).",
+)
+@click.option(
+    "--mermaid-focus",
+    "mermaid_focus",
+    default=None,
+    help="Restrict the Mermaid diagram to one table and its neighborhood.",
+)
+@click.option(
+    "--mermaid-limit",
+    "mermaid_limit",
+    type=int,
+    default=DEFAULT_LIMIT,
+    show_default=True,
+    help="Max nodes in the Mermaid diagram.",
+)
+@click.option(
+    "--expand-star",
+    "expand_star",
+    is_flag=True,
+    help="Expand SELECT * to every schema column (off by default; table-level otherwise).",
 )
 @click.option(
     "--rules",
@@ -45,18 +65,33 @@ def main() -> None:
     multiple=True,
     help="Extra YAML detector-rule files or directories (repeatable).",
 )
-def scan_cmd(path: Path, out_path: Path, mermaid_flag: bool, rules_dirs: tuple[Path, ...]) -> None:
+def scan_cmd(
+    path: Path,
+    out_path: Path,
+    mermaid_flag: bool,
+    mermaid_focus: str | None,
+    mermaid_limit: int,
+    expand_star: bool,
+    rules_dirs: tuple[Path, ...],
+) -> None:
     """Scan a codebase and write bizmap.graph.json."""
-    graph = scan_path(path, extra_rules=list(rules_dirs) or None)
+    graph = scan_path(
+        path,
+        extra_rules=list(rules_dirs) or None,
+        expand_star=True if expand_star else None,
+    )
     payload = graph.to_dict()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     click.echo(
         f"wrote {out_path}  ({len(payload['nodes'])} nodes, {len(payload['edges'])} edges)"
     )
-    if mermaid_flag:
+    if mermaid_flag or mermaid_focus:
         mmd_path = out_path.with_suffix(".mmd")
-        mmd_path.write_text(render_mermaid(graph), encoding="utf-8")
+        mmd_path.write_text(
+            render_mermaid(graph, focus=mermaid_focus, limit=mermaid_limit),
+            encoding="utf-8",
+        )
         click.echo(f"wrote {mmd_path}")
 
 

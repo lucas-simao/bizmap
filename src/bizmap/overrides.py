@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -13,12 +14,43 @@ from bizmap.graph import (
 )
 
 
+@dataclass
+class ScanConfig:
+    """Scanner options loaded from bizmap.yaml (plus CLI overrides)."""
+
+    exclude: list[str] = field(default_factory=list)
+    expand_star: bool = False
+    path: Path | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 def find_overrides(root: Path) -> Path | None:
     for name in ("bizmap.yaml", "bizmap.yml"):
         candidate = root / name
         if candidate.is_file():
             return candidate
     return None
+
+
+def load_scan_config(root: Path) -> ScanConfig:
+    path = find_overrides(root)
+    if path is None:
+        return ScanConfig()
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        return ScanConfig(path=path)
+    exclude = data.get("exclude") or (data.get("scan") or {}).get("exclude") or []
+    if isinstance(exclude, str):
+        exclude = [exclude]
+    expand = data.get("expand_star")
+    if expand is None:
+        expand = (data.get("scan") or {}).get("expand_star")
+    return ScanConfig(
+        exclude=[str(x) for x in exclude],
+        expand_star=bool(expand),
+        path=path,
+        raw=data,
+    )
 
 
 def apply_overrides(graph: Graph, path: Path) -> None:

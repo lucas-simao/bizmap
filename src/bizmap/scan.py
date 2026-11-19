@@ -17,9 +17,9 @@ from bizmap.graph import (
     table_id,
     trigger_id,
 )
-from bizmap.overrides import apply_overrides, find_overrides
+from bizmap.overrides import apply_overrides, load_scan_config
 from bizmap.schema_replay import Schema, replay_files
-from bizmap.sql_analyze import SqlAccess, analyze_sql
+from bizmap.sql_analyze import SqlAccess, analyze_sql, is_external_table
 
 
 def _add_schema_nodes(graph: Graph, schema: Schema) -> None:
@@ -38,15 +38,42 @@ def _add_schema_nodes(graph: Graph, schema: Schema) -> None:
             )
 
 
-def _ensure_column(graph: Graph, table: str, column: str | None) -> str:
-    if column:
-        cid = column_id(table, column)
+def _ensure_access_target(graph: Graph, schema: Schema, access: SqlAccess) -> str | None:
+    """Create the node an SQL access should point at.
+
+    Named columns on known (or clearly real) tables stay column-level.
+    SELECT * / column-less INSERT stay table-level. CTE aliases are never
+    emitted by sql_analyze; dynamic table names land on ``table:unknown``.
+    """
+    if access.unknown_table or not access.table or access.table.lower() == "unknown":
+        graph.add_node(
+            "table:unknown",
+            "table",
+            name="unknown",
+            candidates=list(access.candidates or []),
+            confidence=Confidence.UNKNOWN.value,
+        )
+        return "table:unknown"
+    tname = access.table.lower()
+    known = tname in {t.lower() for t in schema.tables}
+    external = access.external or is_external_table(tname)
+    if external:
+        tid = table_id(tname)
+        graph.add_node(tid, "table", name=tname, external=True)
+        if access.column:
+            cid = column_id(tname, access.column)
+            graph.add_node(cid, "column", table=tname, name=access.column.lower(), external=True)
+            return cid
+        return tid
+    tid = table_id(tname)
+    if not known:
+        graph.add_node(tid, "table", name=tname)
+    if access.column:
+        cid = column_id(tname, access.column)
         if cid not in graph.nodes:
-            graph.add_node(cid, "column", table=table.lower(), name=column.lower())
-            graph.add_node(table_id(table), "table", name=table.lower())
+            graph.add_node(cid, "column", table=tname, name=access.column.lower())
         return cid
-    tid = table_id(table)
-    graph.add_node(tid, "table", name=table.lower())
+    graph.add_node(tid, "table", name=tname)
     return tid
 
 
@@ -61,6 +88,7 @@ def _add_function_node_go(graph: Graph, fn: GoFunction) -> str:
         "function",
         name=fn.qualname,
         package=fn.package,
+        import_path=fn.import_path,
         language="go",
         why=fn.why,
         evidence={"file": fn.file, "line": fn.line, "symbol": fn.qualname},
@@ -68,33 +96,9 @@ def _add_function_node_go(graph: Graph, fn: GoFunction) -> str:
     return nid
 
 
-def _resolve_handler(expr: str, analysis: GoAnalysis) -> GoFunction | None:
-    name = expr.split(".")[-1]
-    # unique method/function
-    matches = [f for f in analysis.functions.values() if f.name == name]
-    if len(matches) == 1:
-        return matches[0]
-    # Handler.CreateOrder style
-    if "." in expr:
-        recv_hint = expr.split(".")[-2] if expr.count(".") >= 1 else ""
-        typed = [f for f in matches if f.receiver and recv_hint.lower() in (f.receiver.lower(),)]
-        # h.CreateOrder — recv_hint is h, not Handler. Prefer unique name among methods
-        methods = [f for f in matches if f.receiver]
-        if len(methods) == 1:
-            return methods[0]
-        if typed:
-            return typed[0]
-        # HTTP handlers are often on Handler type
-        handlers = [f for f in matches if f.receiver and f.receiver.lower() in {"handler", "handlers"}]
-        if len(handlers) == 1:
-            return handlers[0]
-    if matches:
-        # prefer package handlers
-        for f in matches:
-            if f.package in {"handlers", "handler", "api", "http"}:
-                return f
-        return matches[0]
-    return None
+def _is_func_main(qualname: str) -> bool:
+    """True for the ``func main`` entry (not methods named Main, not jobs)."""
+    return qualname.endswith(".main") and qualname.count(".") == 1
 
 
 def _callers_of(qn: str, reverse: dict[str, set[str]]) -> set[str]:
@@ -119,38 +123,57 @@ def _propagate(
     reverse_calls: dict[str, set[str]],
     evidence_by_fn: dict[str, Evidence],
     entrypoints_by_handler: dict[str, list[str]],
+    schema: Schema,
+    job_functions: set[str],
 ) -> None:
+    """Copy origin accesses up the call graph as **table-level** inferred edges."""
+    table_accesses: list[tuple[str, SqlAccess]] = []
+    seen_tables: set[tuple[str, str]] = set()
+    for access in accesses:
+        tname = "unknown" if access.unknown_table or not access.table else access.table.lower()
+        key = (_kind_edge(access.kind), tname)
+        if key in seen_tables:
+            continue
+        seen_tables.add(key)
+        rolled = SqlAccess(
+            kind=access.kind,
+            table=tname,
+            column=None,
+            confidence=Confidence.INFERRED,
+            raw_sql=access.raw_sql,
+            dynamic=access.dynamic,
+            external=access.external,
+            unknown_table=access.unknown_table or tname == "unknown",
+            candidates=list(access.candidates or []),
+        )
+        table_accesses.append((_kind_edge(access.kind), rolled))
+
     ancestors = _callers_of(origin_fn, reverse_calls)
     for anc in ancestors:
+        if _is_func_main(anc) and anc not in job_functions:
+            continue
         fid = function_id(anc)
         if fid not in graph.nodes:
             continue
         ev = evidence_by_fn.get(anc) or evidence_by_fn.get(origin_fn)
-        for access in accesses:
-            target = _ensure_column(graph, access.table, access.column)
-            graph.add_edge(
-                _kind_edge(access.kind),
-                fid,
-                target,
-                confidence=Confidence.INFERRED,
-                evidence=ev,
-            )
+        for kind, access in table_accesses:
+            target = _ensure_access_target(graph, schema, access)
+            if not target:
+                continue
+            graph.add_edge(kind, fid, target, confidence=Confidence.INFERRED, evidence=ev)
         for ep in entrypoints_by_handler.get(anc, []):
-            for access in accesses:
-                target = _ensure_column(graph, access.table, access.column)
-                graph.add_edge(
-                    _kind_edge(access.kind),
-                    ep,
-                    target,
-                    confidence=Confidence.INFERRED,
-                    evidence=ev,
-                )
-    # origin itself as handler of entrypoints
+            for kind, access in table_accesses:
+                target = _ensure_access_target(graph, schema, access)
+                if not target:
+                    continue
+                graph.add_edge(kind, ep, target, confidence=Confidence.INFERRED, evidence=ev)
     for ep in entrypoints_by_handler.get(origin_fn, []):
-        for access in accesses:
-            target = _ensure_column(graph, access.table, access.column)
+        for kind, access in table_accesses:
+            target = _ensure_access_target(graph, schema, access)
+            if not target:
+                continue
             graph.add_edge(
-                _kind_edge(access.kind),
+                kind,
                 ep,
                 target,
                 confidence=Confidence.INFERRED,
@@ -158,8 +181,15 @@ def _propagate(
             )
 
 
-def _apply_go(graph: Graph, analysis: GoAnalysis, schema: Schema) -> None:
+def _apply_go(
+    graph: Graph,
+    analysis: GoAnalysis,
+    schema: Schema,
+    *,
+    expand_star: bool = False,
+) -> None:
     colmap = schema.column_names()
+    known = set(colmap)
     evidence_by_fn: dict[str, Evidence] = {}
     for fn in analysis.functions.values():
         _add_function_node_go(graph, fn)
@@ -177,11 +207,15 @@ def _apply_go(graph: Graph, analysis: GoAnalysis, schema: Schema) -> None:
         reverse[callee].add(caller)
 
     entrypoints_by_handler: dict[str, list[str]] = defaultdict(list)
+    job_functions: set[str] = {j.handler.qualname for j in analysis.jobs}
 
     for route in analysis.routes:
-        handler = _resolve_handler(route.handler_expr, analysis)
+        handler = route.handler
         key = f"{route.method}:{route.path}"
         eid = entrypoint_id("http", key)
+        conf = route.confidence
+        if route.path_confidence == Confidence.UNKNOWN:
+            conf = Confidence.UNKNOWN
         graph.add_node(
             eid,
             "entrypoint",
@@ -190,6 +224,8 @@ def _apply_go(graph: Graph, analysis: GoAnalysis, schema: Schema) -> None:
             path=route.path,
             symbol=handler.qualname if handler else route.handler_expr,
             why=handler.why if handler else None,
+            confidence=conf.value,
+            candidates=list(route.candidates or []),
             evidence=route.evidence.to_dict(),
         )
         if handler:
@@ -197,7 +233,7 @@ def _apply_go(graph: Graph, analysis: GoAnalysis, schema: Schema) -> None:
                 "triggers",
                 eid,
                 function_id(handler.qualname),
-                confidence=Confidence.EXACT,
+                confidence=route.confidence,
                 evidence=route.evidence,
             )
             entrypoints_by_handler[handler.qualname].append(eid)
@@ -222,6 +258,7 @@ def _apply_go(graph: Graph, analysis: GoAnalysis, schema: Schema) -> None:
             evidence=job.evidence,
         )
         entrypoints_by_handler[handler.qualname].append(eid)
+        job_functions.add(handler.qualname)
 
     for site in analysis.sql_sites:
         fid = function_id(site.function.qualname)
@@ -229,15 +266,24 @@ def _apply_go(graph: Graph, analysis: GoAnalysis, schema: Schema) -> None:
             site.sql,
             schema_columns=colmap,
             dynamic=site.dynamic or not site.fully_static,
+            expand_star=expand_star,
+            known_tables=known,
         )
+        situations = list(dict.fromkeys(analysis.situations.get(site.function.qualname) or []))
+        sit_kwargs: dict = {}
+        if situations:
+            sit_kwargs["situation"] = situations
         for access in accesses:
-            target = _ensure_column(graph, access.table, access.column)
+            target = _ensure_access_target(graph, schema, access)
+            if not target:
+                continue
             graph.add_edge(
                 _kind_edge(access.kind),
                 fid,
                 target,
                 confidence=access.confidence,
                 evidence=site.evidence,
+                **sit_kwargs,
             )
         _propagate(
             graph,
@@ -246,11 +292,20 @@ def _apply_go(graph: Graph, analysis: GoAnalysis, schema: Schema) -> None:
             reverse,
             evidence_by_fn,
             entrypoints_by_handler,
+            schema,
+            job_functions,
         )
 
 
-def _apply_python(graph: Graph, analysis: PyAnalysis, schema: Schema) -> None:
+def _apply_python(
+    graph: Graph,
+    analysis: PyAnalysis,
+    schema: Schema,
+    *,
+    expand_star: bool = False,
+) -> None:
     colmap = schema.column_names()
+    known = set(colmap)
     evidence_by_fn: dict[str, Evidence] = {}
     reverse: dict[str, set[str]] = defaultdict(set)
     for fn in analysis.functions.values():
@@ -292,9 +347,17 @@ def _apply_python(graph: Graph, analysis: PyAnalysis, schema: Schema) -> None:
 
     for site in analysis.sql_sites:
         fid = function_id(site.function.qualname)
-        accesses = analyze_sql(site.sql, schema_columns=colmap, dynamic=site.dynamic)
+        accesses = analyze_sql(
+            site.sql,
+            schema_columns=colmap,
+            dynamic=site.dynamic,
+            expand_star=expand_star,
+            known_tables=known,
+        )
         for access in accesses:
-            target = _ensure_column(graph, access.table, access.column)
+            target = _ensure_access_target(graph, schema, access)
+            if not target:
+                continue
             graph.add_edge(
                 _kind_edge(access.kind),
                 fid,
@@ -309,6 +372,8 @@ def _apply_python(graph: Graph, analysis: PyAnalysis, schema: Schema) -> None:
             reverse,
             evidence_by_fn,
             entrypoints_by_handler,
+            schema,
+            set(),
         )
 
 
@@ -357,7 +422,9 @@ def _apply_db_triggers(graph: Graph, schema: Schema) -> None:
                 evidence=trig.evidence,
             )
             for access in fn.accesses:
-                target = _ensure_column(graph, access.table, access.column)
+                target = _ensure_access_target(graph, schema, access)
+                if not target:
+                    continue
                 graph.add_edge(
                     _kind_edge(access.kind),
                     fid,
@@ -372,7 +439,6 @@ def _apply_db_triggers(graph: Graph, schema: Schema) -> None:
                     confidence=Confidence.EXACT,
                     evidence=trig.evidence,
                 )
-                # original writers of the triggering table inferred-write the trigger targets
                 if access.kind.startswith("write"):
                     for writer_id, ev in writers_by_table.get(trig.table.lower(), []):
                         if writer_id in {fid, tid}:
@@ -395,26 +461,36 @@ def _apply_db_triggers(graph: Graph, schema: Schema) -> None:
             )
 
 
-def scan_path(root: Path, *, extra_rules: list[Path] | None = None) -> Graph:
+def scan_path(
+    root: Path,
+    *,
+    extra_rules: list[Path] | None = None,
+    expand_star: bool | None = None,
+    exclude: list[str] | None = None,
+) -> Graph:
     root = root.resolve()
+    cfg = load_scan_config(root)
+    exclude_pats = list(cfg.exclude)
+    if exclude:
+        exclude_pats.extend(exclude)
+    expand = cfg.expand_star if expand_star is None else expand_star
     rules = load_rules(extra_rules)
     graph = Graph()
 
-    sql_files = discover_sql_files(root)
+    sql_files = discover_sql_files(root, exclude=exclude_pats)
     schema = replay_files(sql_files, root)
     _add_schema_nodes(graph, schema)
 
-    go_files = iter_files(root, [".go"])
-    py_files = iter_files(root, [".py"])
+    go_files = iter_files(root, [".go"], exclude=exclude_pats)
+    py_files = iter_files(root, [".py"], exclude=exclude_pats)
 
     go_analysis = GoAnalyzer(rules).analyze(go_files, root)
     py_analysis = PythonAnalyzer(rules).analyze(py_files, root)
 
-    _apply_go(graph, go_analysis, schema)
-    _apply_python(graph, py_analysis, schema)
+    _apply_go(graph, go_analysis, schema, expand_star=expand)
+    _apply_python(graph, py_analysis, schema, expand_star=expand)
     _apply_db_triggers(graph, schema)
 
-    overrides = find_overrides(root)
-    if overrides:
-        apply_overrides(graph, overrides)
+    if cfg.path:
+        apply_overrides(graph, cfg.path)
     return graph
