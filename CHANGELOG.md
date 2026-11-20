@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.3.6 — 2026-11-20
+
+First version published to PyPI by `.github/workflows/release.yml` (Trusted
+Publishing, on the `v0.3.6` tag). 0.3.3–0.3.5 can be published with
+Actions → Release → Run workflow and the tag name.
+
+### Known limitations
+
+- Webpack `resolve.alias` is not read; Vite `find` regexes other than a simple
+  prefix (`/^@\//`) are ignored.
+- `const lib = require('./x'); lib.a()` is not followed (it can't be told apart
+  from a client instance like `api.get()`); destructured `require` is.
+- Same-named local helpers in two sibling anonymous callbacks share one id
+  (only one node is kept; no false edge).
+- `.sql` schema changes are read from the checkout (`--repo-root`); statements
+  built at runtime are read as written.
 
 ### Fixed
 
