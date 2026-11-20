@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`bizmap mcp`**: a read-only MCP server over stdio for coding agents. It reads
+  the graph JSON (reloaded when it changes), never uses the network or a model,
+  and answers deterministically. Tools: `search`, `call_graph`, `function_data`,
+  `table_usage`, `impact` (same logic as `bizmap impact`) and `why_column`. No new
+  dependency: the JSON-RPC/MCP layer is built in.
+
 ## 0.3.10 — 2026-11-20
 
 ### Fixed
