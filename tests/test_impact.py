@@ -547,10 +547,10 @@ def test_module_and_imported_function_calls(tmp_path: Path) -> None:
         },
     )
     calls = {(e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls"}
-    assert ("function:server.helperOuter", "function:lib.helperTop") in calls, calls
-    assert ("function:server.helperOuter", "function:server.local") in calls, calls
-    assert ("function:server.makeB.run", "function:server.build") in calls, calls
-    assert ("function:server.makeB.inv", "function:stock.fetchStock") in calls, calls
+    assert ("function:svc.server.helperOuter", "function:svc.lib.helperTop") in calls, calls
+    assert ("function:svc.server.helperOuter", "function:svc.server.local") in calls, calls
+    assert ("function:svc.server.makeB.run", "function:svc.server.build") in calls, calls
+    assert ("function:svc.server.makeB.inv", "function:svc.stock.fetchStock") in calls, calls
     # no edges to things that are not scanned functions
     assert not [c for c in calls if c[1].startswith("function:express")], calls
 
