@@ -204,6 +204,20 @@
 
 ### Added
 
+- **Dataclass rosters**: a receiver taken from a roster — a module-level
+  list/tuple/dict of dataclass instances, possibly imported from another
+  module (`for s in SECTIONS`, comprehensions, `roster.SECTIONS[0]`,
+  `.values()`, `enumerate`/`sorted`) — is field dispatch even when a scanned
+  class has a method with the same name (`query`). It links only to the
+  functions assigned to that class's field. (Fixed on the way: the field
+  dispatch pass resolved imports with the last module's import map.)
+
+### Known issues
+
+- The older object-dispatch resolver links `obj.query()` to every function
+  stored in a `query` field even when `obj` is annotated with an unrelated
+  class (tracked by a strict `xfail` test).
+
 - **Python configuration rosters**: functions stored in nested dicts / lists of
   dicts are dispatched through local aliases (`q = cfg["query"]; q(conn)`),
   `cfg.get("query")(…)` and `ROSTER[k]["query"](…)`; a `lambda` value

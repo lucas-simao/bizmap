@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from bizmap.graph import function_id
 from bizmap.scan import scan_path
 
@@ -249,3 +251,151 @@ def report(pid: str, conn=None):
         } <= callees, (fn, callees)
     reach = _reach(graph, "entrypoint:http:GET:/properties/{pid}/report")
     assert {"table:properties", "table:sales", "table:stock"} <= reach, reach
+
+
+def test_dataclass_roster_in_other_module_with_method_name_collision(tmp_path: Path) -> None:
+    """Problem 5: roster = list of dataclasses with `query=fn`, built in another
+    module; a scanned class also has a `query` method. Iterating the roster is
+    still field dispatch."""
+    _write(
+        tmp_path,
+        "schema.sql",
+        SCHEMA + "CREATE TABLE properties (id text, owner text);\n",
+    )
+    _write(
+        tmp_path,
+        "reports/identity.py",
+        """
+from sqlalchemy import text
+
+
+def identity_query(conn, pid):
+    return conn.execute(text("SELECT id, owner FROM properties WHERE id = :p"), {"p": pid})
+""",
+    )
+    _write(
+        tmp_path,
+        "reports/sales.py",
+        """
+from sqlalchemy import text
+
+
+def sales_query(conn, pid):
+    return conn.execute(text("SELECT day, total FROM sales"))
+""",
+    )
+    _write(
+        tmp_path,
+        "config/roster.py",
+        """
+from dataclasses import dataclass
+from typing import Callable
+
+from reports.identity import identity_query
+from reports.sales import sales_query
+
+
+@dataclass
+class Section:
+    key: str
+    query: Callable
+
+
+SECTIONS = [Section("identity", query=identity_query), Section(key="sales", query=sales_query)]
+""",
+    )
+    _write(
+        tmp_path,
+        "repo.py",
+        """
+class PropertyRepo:
+    def query(self, sql):
+        return sql
+""",
+    )
+    _write(
+        tmp_path,
+        "api.py",
+        """
+from fastapi import FastAPI
+
+from config import roster
+from config.roster import SECTIONS
+
+app = FastAPI()
+
+
+@app.get("/properties/{pid}/summary")
+def summary(pid: str, conn=None):
+    return [s.query(conn, pid) for s in SECTIONS]
+
+
+def looped(conn, pid):
+    out = []
+    for section in roster.SECTIONS:
+        out.append(section.query(conn, pid))
+    return out
+
+
+def first(conn):
+    return roster.SECTIONS[0].query(conn, "1")
+
+
+from repo import PropertyRepo
+
+
+def unrelated(repo: PropertyRepo):
+    return repo.query("x")
+""",
+    )
+    graph = scan_path(tmp_path)
+    ident, sales = function_id("reports.identity.identity_query"), function_id("reports.sales.sales_query")
+    for fn in ("api.summary", "api.looped", "api.first"):
+        assert {ident, sales} <= _callees(graph, fn), (fn, _callees(graph, fn))
+    assert {"table:properties", "table:sales"} <= _reach(graph, "entrypoint:http:GET:/properties/{pid}/summary")
+
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "pre-existing (present on main before roster dispatch): the object-dispatch "
+        "resolver links `repo.query()` to every function stored in a `query` field, "
+        "even when `repo` is annotated with an unrelated class"
+    ),
+)
+def test_typed_receiver_is_not_linked_to_field_functions(tmp_path: Path) -> None:
+    _write(tmp_path, "schema.sql", SCHEMA)
+    _write(tmp_path, "builders.py", BUILDERS)
+    _write(
+        tmp_path,
+        "cfg.py",
+        """
+from dataclasses import dataclass
+from typing import Callable
+
+from builders import _build_sales
+
+
+@dataclass
+class Section:
+    query: Callable
+
+
+SECTIONS = [Section(query=_build_sales)]
+""",
+    )
+    _write(tmp_path, "repo.py", "class PropertyRepo:\n    def query(self, sql):\n        return sql\n")
+    _write(
+        tmp_path,
+        "use.py",
+        """
+from repo import PropertyRepo
+
+
+def unrelated(repo: PropertyRepo):
+    return repo.query("x")
+""",
+    )
+    graph = scan_path(tmp_path)
+    assert function_id("builders._build_sales") not in _callees(graph, "use.unrelated")
