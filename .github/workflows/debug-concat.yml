@@ -1,0 +1,41 @@
+name: debug-concat
+on: push
+jobs:
+  prof:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -q -e ".[dev]"
+      - name: time per language and size
+        run: |
+          cat > /tmp/prof.py <<'PY'
+          import cProfile, pstats, io, sys, tempfile, time
+          from pathlib import Path
+          from bizmap.scan import scan_path
+          def chain(n, lit): return " + ".join([lit]*n)
+          cases = {
+            "go_const": ("orders.go", lambda n: 'package shop\n\nconst orderSelect = "SELECT status FROM orders" + ' + chain(n, '" "') + "\n"),
+            "go_body": ("orders.go", lambda n: 'package shop\n\nimport "database/sql"\n\nfunc B(db *sql.DB) {\n\tq := "SELECT id FROM orders" + ' + chain(n, '" "') + "\n\tdb.Query(q)\n}\n"),
+            "js_const": ("orders.ts", lambda n: "const Q = 'SELECT status FROM orders' + " + chain(n, "' '") + ";\nexport function f(p:any){ return p.query(Q) }\n"),
+            "py_const": ("orders.py", lambda n: 'Q = "SELECT status FROM orders" + ' + chain(n, '" "') + "\n\ndef f(cur):\n    cur.execute(Q)\n"),
+            "py_body": ("orders.py", lambda n: 'def f(cur):\n    q = "SELECT id FROM orders" + ' + chain(n, '" "') + "\n    cur.execute(q)\n"),
+          }
+          for name, (fname, gen) in cases.items():
+              for n in (250, 500, 1000):
+                  with tempfile.TemporaryDirectory() as d:
+                      root = Path(d)
+                      (root / "go.mod").write_text("module example.com/shop\n\ngo 1.22\n")
+                      (root / "schema.sql").write_text("CREATE TABLE orders (id int primary key, status text);\n")
+                      (root / fname).write_text(gen(n))
+                      pr = cProfile.Profile() if n == 1000 else None
+                      t = time.perf_counter()
+                      if pr: pr.enable()
+                      scan_path(root)
+                      if pr: pr.disable()
+                      print(f"{name} n={n} {time.perf_counter()-t:.2f}s", flush=True)
+                      if pr:
+                          s = io.StringIO(); pstats.Stats(pr, stream=s).sort_stats("cumtime").print_stats(14); print(s.getvalue()[:3500], flush=True)
+          PY
+          timeout 900 python /tmp/prof.py
