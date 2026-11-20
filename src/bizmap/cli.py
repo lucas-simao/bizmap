@@ -58,7 +58,13 @@ def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
     lines: list[str] = []
     skipped = graph.attrs.get("skipped") or {}
     if skipped:
-        labels = {"generated_dirs": "generated dirs", "generated_files": "generated/minified files", "gitignored": ".gitignored paths"}
+        labels = {
+            "generated_dirs": "generated dirs",
+            "generated_files": "generated/minified files",
+            "gitignored": ".gitignored paths",
+            "go_tests": "Go test files",
+            "go_test_dirs": "Go testdata dirs",
+        }
         bits = [f"{n} {labels.get(k, k)}" for k, n in sorted(skipped.items())]
         lines.append("skipped: " + ", ".join(bits) + "  (scan: include / gitignore / skip_generated in bizmap.yaml)")
         paths = graph.attrs.get("skipped_paths") or {}
