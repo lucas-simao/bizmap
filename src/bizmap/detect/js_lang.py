@@ -1703,36 +1703,69 @@ def _js_why_anchor(fn: Node) -> Node:
     return cur
 
 
+_JS_DIRECTIVE = re.compile(
+    r"^(?:eslint[- ]|eslint$|prettier-ignore|istanbul\s+ignore|c8\s+ignore|v8\s+ignore|biome-ignore|"
+    r"@ts-|ts-(?:ignore|expect-error|nocheck|check)|jshint|jscs:|global\s|noinspection|"
+    r"(?:TODO|FIXME|HACK|XXX)\b)",
+    re.IGNORECASE,
+)
+_JS_LICENSE = re.compile(r"(?i)\b(?:copyright|licen[cs]e[ds]?|spdx-license-identifier)\b|\(c\)\s*\d{4}")
+
+
+def _comment_lines(raw: str) -> list[str]:
+    lines: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        line = re.sub(r"^/\*[*!]?", "", line)
+        line = re.sub(r"\*/$", "", line)
+        line = re.sub(r"^//+", "", line)
+        line = re.sub(r"^\*+", "", line).strip()
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _is_overload_signature(node: Node | None) -> bool:
+    if node is not None and node.type == "export_statement":
+        node = node.named_children[0] if node.named_children else None
+    return node is not None and node.type == "function_signature"
+
+
 def _js_why(fn: Node) -> str | None:
     """`/** Marks an order as paid. */` or `// ...` lines right above the
-    function (a blank line breaks the link). JSDoc `@param`-style tag lines
-    are dropped; the description is kept."""
+    function (a blank line breaks the link). JSDoc `@param`-style tag lines,
+    tool directives (`eslint-…`, `@ts-…`, `TODO`…) and license headers are
+    dropped; a comment trailing code on its line belongs to that code. For a
+    TypeScript overload, the doc above the first signature is used."""
     anchor = _js_why_anchor(fn)
+    # `export function f(a: number): number;` overloads sit above the body
+    first = anchor
+    while _is_overload_signature(first.prev_named_sibling) and first.prev_named_sibling.end_point[0] >= first.start_point[0] - 1:
+        first = first.prev_named_sibling
     comments: list[Node] = []
-    prev = anchor.prev_sibling
-    expect_row = anchor.start_point[0]
+    prev = first.prev_sibling
+    expect_row = first.start_point[0]
     while prev is not None and prev.type == "comment":
         if prev.end_point[0] < expect_row - 1:
             break  # blank line between the comment and what follows it
+        before = prev.prev_sibling
+        if before is not None and before.end_point[0] == prev.start_point[0] and before.type != "comment":
+            break  # `const limit = 5; // max retries`: it documents that line
         comments.append(prev)
         expect_row = prev.start_point[0]
-        prev = prev.prev_sibling
+        prev = before
     if not comments:
         return None
     comments.reverse()
     lines: list[str] = []
     for comment in comments:
         raw = text(comment)
-        for line in raw.splitlines():
-            line = line.strip()
-            line = re.sub(r"^/\*\*?", "", line)
-            line = re.sub(r"\*/$", "", line)
-            line = re.sub(r"^//+", "", line)
-            line = re.sub(r"^\*+", "", line).strip()
-            if line.startswith("@"):
+        if raw.startswith("/*!") or _JS_LICENSE.search(raw):
+            continue  # license / banner header
+        for line in _comment_lines(raw):
+            if line.startswith("@") or _JS_DIRECTIVE.match(line):
                 continue
-            if line:
-                lines.append(line)
+            lines.append(line)
     why = " ".join(lines).strip()
     return why or None
 

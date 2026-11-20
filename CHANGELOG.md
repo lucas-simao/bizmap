@@ -19,7 +19,12 @@
 - **`why` for JS/TS**: a JSDoc block (`/** ... */`, tag lines like `@param`
   dropped) or `//` lines right above a function declaration, a `const` arrow or
   function expression, a class method or an object member become its `why`, as
-  in Python and Go. A blank line between comment and code breaks the link.
+  in Python and Go. A blank line between comment and code breaks the link; a
+  comment trailing code on its line (`const limit = 5; // max retries`), tool
+  directives (`eslint-…`, `prettier-ignore`, `@ts-…`, coverage ignores,
+  `TODO`/`FIXME`/`HACK`) and license headers (`Copyright`, `SPDX`, `/*!`) are
+  not used. A named Express handler's doc is also the route's `why`, and a
+  TypeScript overload set uses the doc above its first signature.
 
 ## 0.3.5 — 2026-11-20
 
