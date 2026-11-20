@@ -1432,3 +1432,56 @@ def test_inline_handlers_sharing_a_column_each_get_their_edges(tmp_path: Path) -
         ep = f"entrypoint:http:POST:{path}"
         assert any(e.from_id == ep and e.to_id == "table:orders" for e in graph.edges.values()), path
     assert not [e for e in graph.edges.values() if e.from_id == "function:svc.server.module" and e.type in {"reads", "writes"}]
+
+
+HONO_CHAIN = {
+    "svc/schema.sql": (
+        "CREATE TABLE orders (id int primary key, status text, note text, qty int);\n"
+        "CREATE TABLE customers (id int primary key, email text);\n"
+        "CREATE TABLE inventory (sku text primary key, stock int);\n"
+    ),
+    "svc/src/routes.ts": (
+        "import { Hono } from 'hono';\n"                                                       # 1
+        "import { Pool } from 'pg';\n"                                                         # 2
+        "const pool = new Pool();\n"                                                           # 3
+        "const mw = async (_c: any, next: any) => next();\n"                                   # 4
+        "export const shopRoute = new Hono()\n"                                                # 5
+        "  .use('*', mw)\n"                                                                    # 6
+        "  // pay\n"                                                                           # 7
+        "  .post('/orders/:id/pay', async (c) => {\n"                                          # 8
+        "    const id = 1;\n"                                                                  # 9
+        "    await pool.query(\"UPDATE orders SET status = 'paid' WHERE id = $1\", [id]);\n"   # 10
+        "    return c.json({ ok: true });\n"                                                   # 11
+        "  })\n"                                                                               # 12
+        "  .post('/customers', async (c) => {\n"                                               # 13
+        "    await pool.query('INSERT INTO customers (email) VALUES ($1)', ['a@b.c']);\n"      # 14
+        "    return c.json({ ok: true });\n"                                                   # 15
+        "  })\n"                                                                               # 16
+        "  // restock\n"                                                                       # 17
+        "  .post('/inventory/:sku/restock', async (c) => {\n"                                  # 18
+        "    const sku = 'x';\n"                                                               # 19
+        "    const n = 1;\n"                                                                   # 20
+        "    // add stock\n"                                                                   # 21
+        "    await pool.query('UPDATE inventory SET stock = stock + $2 WHERE sku = $1', [sku, n]);\n"  # 22
+        "    return c.json({ ok: true });\n"                                                   # 23
+        "  });\n"                                                                              # 24
+    ),
+}
+
+
+def test_hono_chain_handlers_have_their_own_spans(tmp_path: Path) -> None:
+    graph = _scan(tmp_path, HONO_CHAIN)
+
+    def span(path: str) -> tuple:
+        ep = f"entrypoint:http:POST:{path}"
+        h = graph.nodes[next(e.to_id for e in graph.edges.values() if e.type == "triggers" and e.from_id == ep)]
+        return (h.attrs.get("start_line") or h.attrs["evidence"]["line"], h.attrs.get("end_line"))
+
+    assert span("/orders/:id/pay") == (8, 12)
+    assert span("/customers") == (13, 16)
+    assert span("/inventory/:sku/restock") == (18, 24)
+    imp = compute_impact(graph, _added("svc/src/routes.ts", 10) + _added("svc/src/routes.ts", 22))
+    eps = sorted(e for f in imp.functions for e in f.entrypoints)
+    assert eps == ["entrypoint:http:POST:/inventory/:sku/restock", "entrypoint:http:POST:/orders/:id/pay"], eps
+    last = compute_impact(graph, _added("svc/src/routes.ts", 23))
+    assert [e for f in last.functions for e in f.entrypoints] == ["entrypoint:http:POST:/inventory/:sku/restock"]

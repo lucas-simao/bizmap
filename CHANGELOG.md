@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`impact` on chained routes** (`new Hono().use(...).post(a).post(b)`): each
+  inline handler's node spans its own function (from its `.post(` to its `})`),
+  not the chain's first lines, so a changed line maps to the right route (the
+  graph's edges were already right).
+
 ## 0.3.7 — 2026-11-20
 
 ### Fixed
