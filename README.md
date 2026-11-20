@@ -127,11 +127,23 @@ database: checkout            # repos with the same database share table ids
 services:                     # which env var / host points at which service
   billing: { url: http://billing.internal, env: BILLING_URL }
 exclude: [cmd/seed, demo/]
+scan:                         # what is left out by default, and how to bring it back
+  include: ["*_test.go", .yarn]   # skip_generated: false brings everything back
 overrides:                    # anything static analysis cannot see
   columns:
     orders.status:
       why: "Lifecycle: pending → paid | expired"
 ```
+
+Dependency and build folders (`node_modules`, `vendor`, `dist`, `build`, `.venv`)
+are never scanned unless listed in `scan: include`. Left out by default
+(`skip_generated: true`, `gitignore: true`): build caches (`.next`, `.yarn`,
+`.turbo`…, and `out/` / `coverage/` next to a project manifest), minified or
+bundled JS, `.gitignore`d paths, and in Go `*_test.go`, `testdata/`, `mocks/`, `*.pb.go`, `*_mock.go` and files
+headed `// Code generated … DO NOT EDIT.` — except generated data-access code
+(sqlc, or anything that runs `.Exec(` / `.Query…(`), which is always scanned.
+`bizmap scan` names what it skipped; `scan: include:` brings paths back,
+`skip_generated: false` and `gitignore: false` turn the defaults off.
 
 ## Coverage report
 
