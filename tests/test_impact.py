@@ -211,3 +211,25 @@ def test_inline_handlers_and_closures_map(tmp_path: Path) -> None:
     go = hit("svc/main.go", 8)
     assert go and all("main" in f for f in go), go
     assert hit("db/migrations/0001.sql", 4) == ["function:sql.bump"], hit("db/migrations/0001.sql", 4)
+
+
+def test_comment_stays_under_github_limit() -> None:
+    """A huge diff: rows capped, quiet functions summarized, size < max_chars."""
+    from bizmap.graph import Graph
+    from bizmap.impact import FunctionImpact, Impact
+
+    graph = Graph()
+    fns = []
+    for i in range(1300):
+        graph.add_node(f"function:pkg.mod.fn_{i:04d}_" + "x" * 40, "function", name=f"pkg.mod.fn_{i:04d}_" + "x" * 40)
+        writes = [f"column:t{i % 30}.c{j}" for j in range(20)] if i % 3 == 0 else []
+        fns.append(FunctionImpact(function=f"function:pkg.mod.fn_{i:04d}_" + "x" * 40, file="a.py", lines=[1], writes=writes))
+    impact = Impact(functions=fns, unmapped_files=[])
+    md = render_markdown(graph, impact, details_url="https://example.invalid/run/1")
+    assert len(md) < 60000, len(md)
+    assert md.count("\n| `") <= 50
+    assert "changed function(s) reach no route or table" in md
+    assert "more function(s) with impact not shown" in md
+    assert "https://example.invalid/run/1" in md
+    tiny = render_markdown(graph, impact, max_chars=3000)
+    assert len(tiny) <= 3000 and tiny.startswith(MARKER)
