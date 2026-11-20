@@ -1,6 +1,6 @@
 Output out/why.gif
 Source tapes/common.tape
-Set Height 760
+Set Height 420
 Hide
 Type "cd demo && export PS1='\[\e[1;32m\]bizmap-demo\[\e[0m\] $ ' && bizmap scan . -q >/dev/null && clear" Enter
 Show

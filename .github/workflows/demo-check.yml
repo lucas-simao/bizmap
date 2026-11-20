@@ -39,6 +39,7 @@ jobs:
           mkdir -p out
           for t in hero scan report why; do vhs tapes/$t.tape; done
           python render_comment.py /tmp/impact-extra-handler.md out/pr-comment.png 'Order lifecycle handlers (paid, ship, deliver) <span>#4</span>'
+          python render_comment.py /tmp/impact-order-discount.md out/pr-comment-small.png 'Bulk order discount <span>#1</span>'
           python render_comment.py /tmp/impact-migration-multi.md out/pr-comment-schema.png 'Shipping migration (qualified and quoted names, several tables) <span>#3</span>'
           cp /tmp/impact-*.md out/ && cp demo/bizmap.graph.mmd out/
           ls -la out
@@ -46,4 +47,4 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add out && git commit -qm "[assets] recorded from bizmap-demo" && git push -q
+          rm -f out/.keep; git add -A out && git commit -qm "[assets] recorded from bizmap-demo" && git push -q
