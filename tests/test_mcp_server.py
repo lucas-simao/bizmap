@@ -71,7 +71,8 @@ def test_protocol_errors(store: GraphStore) -> None:
 def test_search(store: GraphStore) -> None:
     out = ok(store, "search", query="CreateInvoice")
     assert out["results"][0]["id"].endswith("function:main.Billing.CreateInvoice"), out
-    assert out["results"][0]["file"] == "billing.go"
+    assert out["results"][0]["evidence"].startswith("billing.go:"), out["results"][0]
+    assert out["results"][0]["match"] == "exact"
     routes = ok(store, "search", query="/orders", kind="route")
     assert routes["results"] and all(r["type"] == "entrypoint" for r in routes["results"])
     tables = ok(store, "search", query="invoices", kind="table")
@@ -95,7 +96,9 @@ def test_function_data(store: GraphStore) -> None:
     assert direct["writes"] == [] or all(r["table"] != "invoices" for r in direct["writes"])
     deep = ok(store, "function_data", function="CreateInvoice", transitive=True)
     inv = next(r for r in deep["writes"] if r["table"] == "invoices")
-    assert "amount_cents" in inv["columns"] and inv["confidence"] in {"exact", "inferred", "heuristic", "unknown"}
+    cols = {c["column"]: c for c in inv["columns"]}
+    assert "amount_cents" in cols and inv["confidence"] in {"exact", "inferred", "heuristic", "unknown"}
+    assert cols["amount_cents"]["evidence"].startswith("app.py:") and cols["amount_cents"]["confidence"]
     route = ok(store, "function_data", function="POST /api/orders", transitive=True)
     assert any(r["table"] == "orders" for r in route["writes"]), route
 
@@ -114,7 +117,8 @@ def test_impact_tool(store: GraphStore) -> None:
         f"--- a/{PREFIX}/api/billing.go\n+++ b/{PREFIX}/api/billing.go\n@@ -27,0 +27,1 @@\n+x\n"
     )
     out = ok(store, "impact", diff=diff, markdown=True)
-    assert [f["function"].rsplit(".", 1)[-1] for f in out["functions"]] == ["CreateInvoice"]
+    assert [f["label"].rsplit(".", 1)[-1] for f in out["functions"]] == ["CreateInvoice"]
+    assert out["functions"][0]["changed_lines"] == [27] and out["functions"][0]["evidence"].startswith("billing.go:")
     assert out["markdown"].startswith("<!-- bizmap-impact -->")
 
 
@@ -189,3 +193,84 @@ def test_cli_subprocess(graph_file: Path) -> None:
     assert [r["id"] for r in replies] == [1, 2, 3]
     assert replies[2]["result"]["isError"] is False
     assert "serving" in proc.stderr
+
+
+CONFIDENCES = {"exact", "inferred", "heuristic", "unknown"}
+
+
+def _walk_items(obj, path=""):
+    if isinstance(obj, dict):
+        yield path, obj
+        for k, v in obj.items():
+            yield from _walk_items(v, f"{path}.{k}")
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from _walk_items(v, f"{path}[{i}]")
+
+
+def test_every_item_has_evidence_and_edge_items_have_confidence(store: GraphStore) -> None:
+    payloads = [
+        ok(store, "call_graph", function="CreateInvoice", depth=3),
+        ok(store, "function_data", function="POST /api/orders", transitive=True),
+        ok(store, "table_usage", table="orders"),
+        ok(store, "table_usage", table="invoices.amount_cents"),
+    ]
+    for payload in payloads:
+        for path, item in _walk_items(payload):
+            if "id" in item and item.get("type") in {"function", "entrypoint"} and "node" not in path.split(".")[-1]:
+                assert "evidence" in item, (path, item)
+            if any(k in path for k in ("callers[", "callees[", "entrypoints[", "functions[")) and path.count("[") == 1:
+                assert item.get("confidence") in CONFIDENCES, (path, item)
+            if "columns[" in path or ".writes[" in path or ".reads[" in path:
+                if "column" in item or "table" in item:
+                    assert item.get("confidence") in CONFIDENCES, (path, item)
+                    assert item.get("evidence"), (path, item)
+
+
+def test_limits_totals_and_truncated(store: GraphStore) -> None:
+    full = ok(store, "search", query="a", limit=100)
+    assert full["results_total"] > 3 and full["truncated"] is (full["results_total"] > 100)
+    small = ok(store, "search", query="a", limit=2)
+    assert len(small["results"]) == 2 and small["truncated"] is True
+    assert small["results"] == full["results"][:2]  # same order whatever the limit
+    for bad in (0, 101, "5", True):
+        assert call(store, "search", query="a", limit=bad)["isError"] is True
+
+
+def test_results_are_sorted(store: GraphStore) -> None:
+    out = ok(store, "table_usage", table="orders")
+    ids = [f["id"] for f in out["functions"]]
+    assert ids == sorted(ids)
+    deep = ok(store, "call_graph", function="CreateInvoice", direction="callees", depth=3)
+    keys = [(c["depth"], c["edge"], c["id"]) for c in deep["callees"]]
+    assert keys == sorted(keys)
+
+
+def test_size_cap_on_a_large_graph(tmp_path: Path) -> None:
+    from bizmap.graph import Evidence, Graph
+    from bizmap.mcp_server import MAX_TEXT
+
+    g = Graph()
+    g.add_node("table:orders", "table", name="orders")
+    for i in range(400):
+        g.add_node(f"column:orders.c{i:03d}", "column", table="orders", name=f"c{i:03d}")
+    for i in range(300):
+        fid = f"function:pkg.handlers.a_rather_long_function_name_number_{i:03d}"
+        g.add_node(fid, "function", name=fid.removeprefix("function:"), evidence={"file": f"pkg/handlers_{i:03d}.py", "line": i + 1})
+        for j in range(0, 400, 7):
+            g.add_edge("writes", fid, f"column:orders.c{j:03d}", evidence=Evidence(file=f"pkg/handlers_{i:03d}.py", line=i + 2, symbol=fid))
+    path = tmp_path / "big.json"
+    path.write_text(json.dumps(g.to_dict()), encoding="utf-8")
+    big = GraphStore(path)
+    result = call(big, "table_usage", table="orders", limit=100)
+    assert result["isError"] is False
+    assert len(result["content"][0]["text"]) <= MAX_TEXT
+    payload = result["structuredContent"]
+    assert payload["truncated"] is True and payload["functions_total"] == 300
+
+
+def test_error_messages_are_actionable(store: GraphStore) -> None:
+    missing = call(store, "call_graph", function="doesNotExist")["content"][0]["text"]
+    assert "search" in missing
+    unknown = call(store, "why_column", column="nope.nope")
+    assert unknown["isError"] is True and "search" in unknown["content"][0]["text"]
