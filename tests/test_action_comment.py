@@ -289,3 +289,15 @@ def test_size_cap_keeps_new_sections_bounded() -> None:
         md = render_markdown(g, imp, max_chars=cap, details_url=RUN)
         assert len(md) <= cap, (cap, len(md))
         assert md.startswith(MARKER) and "### BizMap impact" in md
+
+
+def test_dynamic_table_is_a_note_not_data() -> None:
+    g = Graph()
+    g.attrs["repo_roots"] = {"x": "."}
+    f = _fn(g, "", "pkg.purge", "a.py", 1, 9, unresolved_calls=["str.replace", "str | None.rstrip", "Store.save"])
+    g.add_node("table:unknown", "table", name="unknown", candidates=["logs", "events"])
+    g.add_edge("writes", f, "table:unknown", confidence="unknown")
+    md = render_markdown(g, compute_impact(g, _diff(("a.py", 2))))
+    assert _risk(md) == "none" and "**`unknown`**" not in md and "<details" not in md
+    assert "`pkg.purge` builds a table name at runtime (candidates: events, logs)" in md
+    assert "`Store.save`" in md and "str.replace" not in md and "rstrip" not in md

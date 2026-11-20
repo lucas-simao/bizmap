@@ -687,12 +687,32 @@ def _short_fn(graph: Graph, node_id: str, *, repo_prefix: bool = True) -> str:
     return f"{repo}: {short}" if repo_prefix and _multi_repo(graph) and repo else short
 
 
+def _known(ids: list[str]) -> list[str]:
+    """Drop `table:unknown` (a table name built at runtime): it is a note, not data."""
+    return [i for i in ids if i.rpartition("/")[2] != "table:unknown"]
+
+
 def _tables_only(ids: list[str]) -> list[str]:
     """Collapse columns into their table for the diagram."""
     out: set[str] = set()
-    for nid in ids:
+    for nid in _known(ids):
         out.add(_table_of(nid))
     return sorted(out)
+
+
+# receivers whose methods are never in the scanned code (`str.replace`)
+_BUILTIN_RECEIVERS = {
+    "str", "bytes", "int", "float", "bool", "list", "dict", "set", "tuple", "frozenset", "object",
+    "Path", "PurePath", "PurePosixPath", "None", "string", "error", "Array", "Object", "String",
+    "Map", "Set", "Promise", "JSON", "Math", "console", "Number", "Date", "RegExp",
+}
+
+
+def _interesting_call(name: str) -> bool:
+    head = name.split(".", 1)[0].strip()
+    if "|" in head or "[" in head:  # `str | None.rstrip`, `list[int].append`
+        return False
+    return head not in _BUILTIN_RECEIVERS
 
 
 def _table_of(nid: str) -> str:
@@ -800,7 +820,7 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
     for fi in impact.functions:
         for ep in fi.entrypoints:
             ep_fns.setdefault(ep, set()).add(fi.function)
-        for nid, is_write in [(w, True) for w in fi.writes] + [(r, False) for r in fi.reads]:
+        for nid, is_write in [(w, True) for w in _known(fi.writes)] + [(r, False) for r in _known(fi.reads)]:
             use = tables.setdefault(_table_of(nid), _TableUse())
             col = _column_of(nid)
             if is_write:
@@ -893,6 +913,7 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
 
     # what static analysis could not settle, near the change
     notes: list[str] = []
+    call_notes: list[str] = []
     for fid in reached_fns:
         node = graph.nodes[fid]
         for u in node.attrs.get("unresolved_http") or []:
@@ -901,9 +922,12 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
             call = f"{u.get('method') or ''} {u.get('url') or '?'}".strip()
             reason = str(u.get("reason") or "unmatched").replace("_", " ")
             notes.append(f"{_code(_short_fn(graph, fid))} calls {_code(call)} — {reason}")
-        calls = [str(c) for c in node.attrs.get("unresolved_calls") or []]
+        calls = [str(c) for c in node.attrs.get("unresolved_calls") or [] if _interesting_call(str(c))]
         if calls:
-            notes.append(f"{_code(_short_fn(graph, fid))}: unresolved {_plural(len(calls), 'call')} to {_names(calls, 3)}")
+            call_notes.append(
+                f"{_code(_short_fn(graph, fid))}: {_plural(len(calls), 'call')} to {_names(calls, 3)} "
+                "not resolved (no scanned implementation)"
+            )
     for fid in sorted(dyn):
         cands = sorted(dyn[fid])
         tail = f" (candidates: {', '.join(cands[:4])})" if cands else ""
@@ -916,8 +940,9 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
             notes.append(f"{_code(_label(graph, ep))}: handler is ambiguous (several candidates)")
         elif node.attrs.get("unresolved"):
             notes.append(f"{_code(_label(graph, ep))}: route path not fully resolved")
+    notes += call_notes
 
-    columns = len({w for f in impact.functions for w in f.writes + f.reads if _column_of(w)})
+    columns = len({w for f in impact.functions for w in _known(f.writes + f.reads) if _column_of(w)})
     facts = _Facts(
         tables=tables, services=services, ep_fns=ep_fns, direct=direct, fired=fired,
         table_triggers=table_triggers, http=[http[k] for k in sorted(http)], notes=notes,
@@ -1290,6 +1315,7 @@ def render_markdown(
         return out
 
     def cell(ids: list[str], *, data: bool = False) -> str:
+        ids = _known(ids) if data else ids
         if not ids:
             return "—"
         names = data_labels(ids) if data else [_label(graph, i) for i in ids]
@@ -1302,7 +1328,7 @@ def render_markdown(
         label = _code(_label(graph, fi.function))
         callers = sorted(via.get(fi.function, []))
         if callers:
-            names = ", ".join(_code(_label(graph, c)) for c in callers[:3])
+            names = ", ".join(_code(_short_fn(graph, c)) for c in callers[:3])
             more = f" +{len(callers) - 3}" if len(callers) > 3 else ""
             label += f"<br><sub>also changed: {names}{more} (same impact)</sub>"
         return label
