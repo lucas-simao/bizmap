@@ -7,6 +7,13 @@ from pathlib import Path
 import click
 
 from bizmap import __version__, progress
+from bizmap.discover import (
+    DEFAULT_DEPTH,
+    Discovery,
+    discover,
+    format_discovery,
+    load_discover_settings,
+)
 from bizmap.graph import Graph
 from bizmap.impact import compute_impact, render_markdown
 from bizmap.mermaid import DEFAULT_LIMIT, render_mermaid
@@ -151,6 +158,33 @@ def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
     is_flag=True,
     help="No progress lines on stderr (they appear only for scans longer than a few seconds).",
 )
+@click.option(
+    "--discover",
+    "discover_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Find the git repos under DIR (clones and worktrees of the same repo count once) and scan them jointly.",
+)
+@click.option("--list", "list_flag", is_flag=True, help="With --discover: show what would be scanned and why, then stop.")
+@click.option("--json", "json_flag", is_flag=True, help="With --discover --list: print the discovery as JSON.")
+@click.option(
+    "--depth",
+    type=click.IntRange(min=1),
+    default=None,
+    help="With --discover: how many folder levels below DIR to look for repos (default 2).",
+)
+@click.option(
+    "--include",
+    "include_globs",
+    multiple=True,
+    help="With --discover: also treat these folders (relative to DIR) as projects, even without git (repeatable).",
+)
+@click.option(
+    "--prefer",
+    "prefer_paths",
+    multiple=True,
+    help="With --discover: copy to scan when a repo has several (path relative to DIR, repeatable).",
+)
 def scan_cmd(
     path: Path,
     out_path: Path,
@@ -164,14 +198,69 @@ def scan_cmd(
     profile_flag: bool,
     verbose: bool,
     quiet: bool,
+    discover_dir: Path | None,
+    list_flag: bool,
+    json_flag: bool,
+    depth: int | None,
+    include_globs: tuple[str, ...],
+    prefer_paths: tuple[str, ...],
 ) -> None:
-    """Scan one or more codebases and write bizmap.graph.json."""
-    if not path:
-        raise click.UsageError("missing scan path")
-    roots = [Path(p) for p in path]
+    """Scan one or more codebases and write bizmap.graph.json.
+
+    With --discover DIR, find the projects under DIR instead of listing them."""
+    discover_only = [
+        name
+        for name, used in (("--list", list_flag), ("--json", json_flag), ("--depth", depth is not None),
+                           ("--include", bool(include_globs)), ("--prefer", bool(prefer_paths)))
+        if used
+    ]
+    if discover_dir is None and discover_only:
+        raise click.UsageError(f"{', '.join(discover_only)} only work with --discover DIR")
+    if discover_dir is not None:
+        if path:
+            raise click.UsageError("give either PATH... or --discover DIR, not both")
+        if json_flag and not list_flag:
+            raise click.UsageError("--json needs --list (the scan itself always writes JSON to --out)")
+        found = _run_discover(
+            discover_dir, config_path, depth, list(include_globs), list(exclude_globs), list(prefer_paths)
+        )
+        if list_flag:
+            if json_flag:
+                click.echo(json.dumps(found.to_dict(), indent=2, sort_keys=True))
+            else:
+                click.echo(format_discovery(found), nl=False)
+            return
+        chosen = found.chosen
+        if not chosen:
+            raise click.ClickException(
+                f"no projects with supported code found under {discover_dir} "
+                "(see `bizmap scan --discover DIR --list`; --depth N looks deeper)"
+            )
+        click.echo(
+            f"discovered {len(chosen)} project(s): "
+            + ", ".join(f"{g.name}={g.chosen.rel}" for g in chosen if g.chosen)
+        )
+        exclude_globs = ()  # used for discovery; per-repo excludes come from each bizmap.yaml
+        roots = [g.chosen.path for g in chosen if g.chosen]
+        names = {g.chosen.path: g.name for g in chosen if g.chosen}
+    else:
+        if not path:
+            raise click.UsageError("missing scan path (or use --discover DIR)")
+        roots = [Path(p) for p in path]
+        names = None
     if not quiet:
         progress.start()
-    if len(roots) == 1:
+    if discover_dir is not None:
+        graph = scan_paths(
+            roots,
+            extra_rules=list(rules_dirs) or None,
+            expand_star=True if expand_star else None,
+            config=config_path,
+            profile=profile_flag,
+            base=discover_dir,
+            names=names,
+        )
+    elif len(roots) == 1:
         graph = scan_path(
             roots[0],
             extra_rules=list(rules_dirs) or None,
@@ -205,6 +294,28 @@ def scan_cmd(
             encoding="utf-8",
         )
         click.echo(f"wrote {mmd_path}")
+
+
+def _run_discover(
+    root: Path,
+    config_path: Path | None,
+    depth: int | None,
+    include: list[str],
+    exclude: list[str],
+    prefer: list[str],
+) -> Discovery:
+    """Flags win over the `discover:` section of DIR's bizmap.yaml."""
+    try:
+        settings = load_discover_settings(root, config=config_path)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    return discover(
+        root,
+        depth=depth or settings.get("depth") or DEFAULT_DEPTH,
+        include=include or settings.get("include"),
+        exclude=exclude or settings.get("exclude"),
+        prefer=prefer or settings.get("prefer"),
+    )
 
 
 @main.command("why")

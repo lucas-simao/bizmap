@@ -104,6 +104,16 @@ bizmap scan ./web ./api ./billing --out merged.json
 bizmap registry merge web.json api.json billing.json --out merged.json   # same result
 ```
 
+A whole work folder full of clones and worktrees: `--discover` finds the git
+repos, keeps one copy of each (main checkout, default branch, latest commit) and
+scans them together. `--list` shows the choice and why
+([docs/discover.md](docs/discover.md)):
+
+```bash
+bizmap scan --discover ~/work --list
+bizmap scan --discover ~/work --out work.json
+```
+
 A `bizmap.yaml` per repo (or one at the parent) is optional and only fills gaps:
 
 ```yaml
