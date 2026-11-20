@@ -274,3 +274,31 @@ def test_error_messages_are_actionable(store: GraphStore) -> None:
     assert "search" in missing
     unknown = call(store, "why_column", column="nope.nope")
     assert unknown["isError"] is True and "search" in unknown["content"][0]["text"]
+
+
+def test_cli_missing_graph_has_a_useful_error(tmp_path: Path) -> None:
+    from click.testing import CliRunner
+
+    from bizmap.cli import main
+
+    res = CliRunner().invoke(main, ["mcp", "--graph", str(tmp_path / "nope.json")])
+    assert res.exit_code != 0
+    assert "graph not found" in res.output and "bizmap scan" in res.output and "absolute path" in res.output
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    res = CliRunner().invoke(main, ["mcp", "--graph", str(bad)])
+    assert res.exit_code != 0 and "not a BizMap graph" in res.output
+
+
+def test_docs_examples_are_valid_json() -> None:
+    import re
+
+    for doc in (ROOT / "README.md", ROOT / "docs" / "mcp.md"):
+        text = doc.read_text(encoding="utf-8")
+        blocks = re.findall(r"```json\n(.*?)```", text, re.S)
+        mcp_blocks = [b for b in blocks if "mcpServers" in b]
+        assert mcp_blocks, doc
+        for block in mcp_blocks:
+            cfg = json.loads(block)
+            server = cfg["mcpServers"]["bizmap"]
+            assert server["args"][:2] == ["mcp", "--graph"], (doc, server)
