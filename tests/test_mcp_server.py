@@ -233,7 +233,7 @@ def test_limits_totals_and_truncated(store: GraphStore) -> None:
     small = ok(store, "search", query="a", limit=2)
     assert len(small["results"]) == 2 and small["truncated"] is True
     assert small["results"] == full["results"][:2]  # same order whatever the limit
-    for bad in (0, 101, "5", True):
+    for bad in (0, 101, "5", True, 1.0):
         assert call(store, "search", query="a", limit=bad)["isError"] is True
 
 
@@ -302,3 +302,163 @@ def test_docs_examples_are_valid_json() -> None:
             cfg = json.loads(block)
             server = cfg["mcpServers"]["bizmap"]
             assert server["args"][:2] == ["mcp", "--graph"], (doc, server)
+
+
+# ── round 36 regressions ────────────────────────────────────────────────────
+
+
+def test_unicode_surrogates_and_ascii_stdout_do_not_kill_the_server(graph_file: Path) -> None:
+    lines = (
+        '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"query":"\\ud83d"}}}\n'
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"why_column","arguments":{"column":"orders.status"}}}\n'
+        '{"jsonrpc":"2.0","id":3,"method":"ping"}\n'
+    )
+    for enc in ("ascii", "utf-8"):
+        proc = subprocess.run(
+            [sys.executable, "-c", "from bizmap.cli import main; main()", "mcp", "--graph", str(graph_file)],
+            input=lines.encode("utf-8"),
+            capture_output=True,
+            timeout=60,
+            env={**os.environ, "PYTHONIOENCODING": enc},
+        )
+        assert proc.returncode == 0, proc.stderr.decode()
+        replies = [json.loads(line) for line in proc.stdout.decode("ascii").splitlines()]
+        assert [r["id"] for r in replies] == [1, 2, 3], replies
+        assert replies[1]["result"]["isError"] is False
+
+
+def test_invalid_utf8_input_line_is_survivable(graph_file: Path) -> None:
+    raw = b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"query":"\xff\xfe"}}}\n' \
+          b'{"jsonrpc":"2.0","id":2,"method":"ping"}\n'
+    proc = subprocess.run(
+        [sys.executable, "-c", "from bizmap.cli import main; main()", "mcp", "--graph", str(graph_file)],
+        input=raw, capture_output=True, timeout=60,
+    )
+    assert proc.returncode == 0
+    assert [json.loads(x)["id"] for x in proc.stdout.decode().splitlines()] == [1, 2]
+
+
+def test_internal_errors_become_32603(store: GraphStore, monkeypatch) -> None:
+    import bizmap.mcp_server as srv
+
+    def boom(_store, _args):  # noqa: ANN001, ANN202
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setitem(srv._HANDLERS, "search", boom)
+    out = srv._safe_handle(store, {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "search", "arguments": {"query": "x"}}})
+    assert out["error"]["code"] == -32603 and "kaboom" in out["error"]["message"]
+
+
+@pytest.mark.parametrize("body", ["[]", '{"nodes": 5}', '{"x": 1}', '{"nodes": [], "edges": {}}'])
+def test_non_graph_json_is_rejected(tmp_path: Path, body: str) -> None:
+    from click.testing import CliRunner
+
+    from bizmap.cli import main
+
+    path = tmp_path / "g.json"
+    path.write_text(body, encoding="utf-8")
+    res = CliRunner().invoke(main, ["mcp", "--graph", str(path)])
+    assert res.exit_code == 1 and "not a BizMap graph" in res.output, res.output
+
+
+def test_impact_never_reads_outside_repo_root(tmp_path: Path, graph_file: Path) -> None:
+    root = tmp_path / "repo"
+    (root / "db").mkdir(parents=True)
+    (root / "db" / "schema.sql").write_text("CREATE TABLE orders (\n  id SERIAL PRIMARY KEY,\n  status TEXT\n);\n", encoding="utf-8")
+    (tmp_path / "fora").mkdir()
+    (tmp_path / "fora" / "outro.sql").write_text("CREATE TABLE orders (\n  id SERIAL PRIMARY KEY,\n  status TEXT\n);\n", encoding="utf-8")
+    store = GraphStore(graph_file, repo_root=root)
+
+    def diff(path: str) -> str:
+        return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -2,0 +3,1 @@\n+  status TEXT\n"
+
+    for outside in ("../fora/outro.sql", str(tmp_path / "fora" / "outro.sql")):
+        out = ok(store, "impact", diff=diff(outside))
+        assert out["schema_changes"] == [], out
+        assert any("outside --repo-root" in w for w in out.get("warnings", [])), out
+    inside = ok(store, "impact", diff=diff("db/schema.sql"))
+    assert inside["schema_changes"], inside
+
+
+def test_impact_without_repo_root_warns_about_sql(store: GraphStore) -> None:
+    d = "diff --git a/db/schema.sql b/db/schema.sql\n--- a/db/schema.sql\n+++ b/db/schema.sql\n@@ -1,0 +2,1 @@\n+  x int,\n"
+    out = ok(store, "impact", diff=d)
+    assert any("--repo-root" in w for w in out["warnings"]), out
+
+
+def test_method_path_prefers_the_route_over_its_inline_handler(tmp_path: Path) -> None:
+    root = tmp_path / "svc"
+    (root / "src").mkdir(parents=True)
+    (root / "schema.sql").write_text("CREATE TABLE orders (id int primary key, status text);\n", encoding="utf-8")
+    (root / "src" / "server.ts").write_text(
+        "import express from 'express';\nimport { Pool } from 'pg';\nconst pool = new Pool();\nconst app = express();\n"
+        "app.post('/orders/:id/paid', async (req, res) => { await pool.query(\"UPDATE orders SET status = 'paid' WHERE id = $1\", [1]); res.end(); });\n",
+        encoding="utf-8",
+    )
+    path = tmp_path / "g.json"
+    path.write_text(json.dumps(scan_path(root).to_dict()), encoding="utf-8")
+    st = GraphStore(path)
+    cg = ok(st, "call_graph", function="POST /orders/:id/paid")
+    assert cg["node"]["type"] == "entrypoint"
+    fd = ok(st, "function_data", function="POST /orders/:id/paid", transitive=True)
+    assert any(r["table"] == "orders" for r in fd["writes"]), fd
+
+
+@pytest.mark.parametrize(
+    "name,args,fragment",
+    [
+        ("function_data", {"function": "CreateInvoice", "transitive": "false"}, "`transitive` must be a boolean"),
+        ("impact", {"diff": "x", "markdown": "false"}, "`markdown` must be a boolean"),
+        ("search", {"query": 5}, "`query` must be a string"),
+        ("search", {"query": ["a"]}, "`query` must be a string"),
+        ("search", {"query": "x", "extra": 1}, "unknown argument(s): extra"),
+        ("call_graph", {"function": "CreateInvoice", "direction": "up"}, "`direction` must be one of"),
+        ("search", {"query": "x", "limit": 1.5}, "`limit` must be an integer"),
+    ],
+)
+def test_argument_types_are_validated(store: GraphStore, name: str, args: dict, fragment: str) -> None:
+    result = call(store, name, **args)
+    assert result["isError"] is True and fragment in result["content"][0]["text"], result
+
+
+def test_unknown_function_message_says_function_or_route(store: GraphStore) -> None:
+    text = call(store, "call_graph", function="nonexistent")["content"][0]["text"]
+    assert text.startswith("no function or route matches 'nonexistent'"), text
+
+
+def test_why_column_table_lists_users_and_multi_repo_is_ambiguous(tmp_path: Path, store: GraphStore) -> None:
+    table = ok(store, "why_column", column="invoices")["text"]
+    assert "writers:" in table and "(none)" not in table.split("readers:")[0], table
+    from bizmap.scan import scan_paths
+
+    for repo in ("shop", "inventory"):
+        d = tmp_path / repo
+        d.mkdir()
+        (d / "schema.sql").write_text("CREATE TABLE orders (id SERIAL PRIMARY KEY, status TEXT);\n", encoding="utf-8")
+        (d / "orders.py").write_text("def mark_paid(cur):\n    cur.execute(\"UPDATE orders SET status = 'paid'\")\n", encoding="utf-8")
+    path = tmp_path / "multi.json"
+    path.write_text(json.dumps(scan_paths([tmp_path / "shop", tmp_path / "inventory"]).to_dict()), encoding="utf-8")
+    multi = GraphStore(path)
+    res = call(multi, "why_column", column="orders.status")
+    assert res["isError"] is True and "inventory/column:orders.status" in res["content"][0]["text"], res
+    picked = ok(multi, "why_column", column="shop/column:orders.status")
+    assert "mark_paid" in picked["text"]
+
+
+def test_truncation_keeps_as_much_as_fits(tmp_path: Path) -> None:
+    from bizmap.graph import Evidence, Graph
+    from bizmap.mcp_server import MAX_TEXT
+
+    g = Graph()
+    g.add_node("table:orders", "table", name="orders")
+    for i in range(300):
+        fid = f"function:pkg.handlers.handler_number_{i:03d}"
+        g.add_node(fid, "function", name=fid.removeprefix("function:"), evidence={"file": f"pkg/h{i:03d}.py", "line": 1})
+        g.add_node(f"column:orders.c{i:03d}", "column", table="orders", name=f"c{i:03d}")
+        g.add_edge("writes", fid, f"column:orders.c{i:03d}", evidence=Evidence(file=f"pkg/h{i:03d}.py", line=2, symbol=fid))
+    path = tmp_path / "big.json"
+    path.write_text(json.dumps(g.to_dict()), encoding="utf-8")
+    res = call(GraphStore(path), "table_usage", table="orders", limit=100)
+    text = res["content"][0]["text"]
+    assert len(text) <= MAX_TEXT and len(text) > MAX_TEXT * 0.8, len(text)  # trimmed close to the cap
+    assert res["structuredContent"]["truncated"] is True

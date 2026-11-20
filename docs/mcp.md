@@ -1,5 +1,8 @@
 # BizMap MCP server
 
+> Requires **bizmap 0.4.0 or newer**. Until 0.4.0 is on PyPI, install from the
+> repository: `pip install "git+https://github.com/lucas-simao/bizmap"`.
+
 `bizmap mcp` lets a coding agent (Claude Code, Cursor, Claude Desktop, or any
 MCP client) ask the lineage graph questions — *what writes `orders.status`?*,
 *which routes reach `markPaid`?*, *what does this diff touch?* — instead of
@@ -10,7 +13,7 @@ grepping.
 - **Deterministic.** The same graph and arguments give the same answer: every
   list has a fixed order (below).
 - **No extra dependency.** The MCP layer (JSON-RPC 2.0 over stdio) is built in;
-  `pip install bizmap` is all you need.
+  `pip install bizmap` (0.4.0+) is all you need.
 - **Fresh.** The graph is reloaded when its file changes, so re-running
   `bizmap scan` updates a running session.
 
@@ -95,7 +98,8 @@ All tools are annotated read-only, idempotent and closed-world.
 `search` (`function:orders.markPaid`, `api/entrypoint:http:POST:/orders`), a
 function name or its last part (`markPaid`), or a route as `METHOD /path`
 (`POST /orders/:id/paid`). Tables are `orders`; columns are `orders.status`.
-A name that matches several nodes is an error listing the candidate ids.
+A name that matches several nodes is an error listing the candidate ids; for
+`METHOD /path` the route wins over its inline handler function.
 
 **Common output contract.**
 
@@ -105,10 +109,18 @@ A name that matches several nodes is an error listing the candidate ids.
 - Every item derived from an edge also has `confidence`:
   `exact` > `inferred` > `heuristic` > `unknown`. For routes reaching a function it is the
   confidence of the strongest path (its weakest edge).
-- Every list has at most `limit` items (default 20, max 100), with `<list>_total` next
-  to it; `truncated: true` when anything was cut. The whole result also stays under
-  20,000 characters (longest lists are halved until it fits, and `truncated` is set).
-- Results are JSON: `structuredContent` and the same JSON as text in `content[0].text`.
+- Every top-level list has at most `limit` items (default 20, max 100), with
+  `<list>_total` next to it; nested lists are capped too (`columns` per table at
+  `limit`; per-function lists in `impact` at 10) with their own `<list>_total`.
+  `truncated: true` whenever anything was cut.
+- The whole result stays under 20,000 characters: if it would not, items are dropped
+  from the end of the least important list first (e.g. in `impact`: unmapped files,
+  then reads, writes, schema changes, markdown, entrypoints, and `functions` last),
+  only as many as needed; a cut text (`why_column`) says how many lines were left out.
+- Results are JSON: `structuredContent`, and the same JSON (compact) as text in
+  `content[0].text`.
+- Arguments are checked against each tool's schema (types, allowed values, ranges,
+  no unknown keys): `"transitive": "false"` is an error, not `true`.
 - Problems (unknown name, ambiguous name, bad argument) come back as a tool result with
   `isError: true` and a message saying what to do; protocol errors use JSON-RPC codes.
 
@@ -169,24 +181,37 @@ those functions. Order: id; columns by name.
 | `markdown` | also return the PR-comment Markdown (default `false`) |
 | `limit` | 1–100, default 20 |
 
-Output: `functions[]` (node item + `changed_lines`, `entrypoints[]`, `writes[]`,
-`reads[]`), and the overall `entrypoints[]`, `writes[]`, `reads[]`,
-`schema_changes[]` (needs `--repo-root`), `unmapped_files[]`, `hint`, `warnings`.
+Output:
+
+- `functions[]`: node items with `changed_lines`, `entrypoints[]` (node items),
+  `writes[]` and `reads[]` (data node **ids**), each capped at 10 with `<list>_total`.
+- `entrypoints[]`: node items reached by any changed function.
+- `writes[]`, `reads[]`, `unmapped_files[]`: ids / paths (strings).
+- `schema_changes[]`: `{op, table, name, detail, column, file, line, entrypoints,
+  functions}` for changed `.sql` lines — only when the server runs with `--repo-root`
+  (paths outside it are never read).
+- `hint`, `warnings`: present only when there is something to say (e.g. `.sql` files
+  changed but the server has no `--repo-root`).
+
 Same logic as `bizmap impact`.
 
 ### `why_column`
 
 | Input | |
 |---|---|
-| `column` (required) | `table.column` (a bare table name also works) |
+| `column` (required) | `table.column`, a table name (its columns' readers/writers), or an id from `search` |
 
-Output: `text`, the `bizmap why` report (writers, readers, what triggers them).
+Output: `text`, the `bizmap why` report (writers, readers, what triggers them). In a
+multi-repo graph a name that exists in several repos is an error listing the ids
+(`shop/column:orders.status`, …): pass one of them.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | `graph not found: …` | run `bizmap scan`, then use the absolute path it wrote |
+| `graph not found: …/${workspaceFolder}/…` | the client doesn't expand `${workspaceFolder}` (only some do, e.g. Cursor): write the absolute path |
+| `No such command 'mcp'` | your bizmap is older than 0.4.0: upgrade (or install from the repository, above) |
 | client shows no tools | check the client's server log for the `serving …` line or an error |
 | `command not found: bizmap` in the client log | use the full path from `which bizmap` |
 | answers look stale | re-run `bizmap scan` (the server reloads the file automatically) |

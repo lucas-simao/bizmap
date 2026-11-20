@@ -445,6 +445,8 @@ def mcp_cmd(graph_path: Path, repo_root: Path | None) -> None:
         raise click.ClickException(
             f"{resolved} is not a BizMap graph (invalid JSON: {exc}). Re-run `bizmap scan`."
         ) from exc
+    except ValueError as exc:
+        raise click.ClickException(f"{exc}. Re-run `bizmap scan`.") from exc
     except OSError as exc:
         raise click.ClickException(f"cannot read graph {resolved}: {exc}") from exc
     click.echo(

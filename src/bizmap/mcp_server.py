@@ -27,6 +27,7 @@ fresh `bizmap scan`.
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 from collections import deque
@@ -80,7 +81,17 @@ class GraphStore:
         if stamp == self._stamp:
             return
         data = json.loads(self.path.read_text(encoding="utf-8"))
-        self.graph = Graph.from_dict(data)
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("nodes"), list)
+            or not isinstance(data.get("edges"), list)
+        ):
+            raise ValueError(f"{self.path} is not a BizMap graph (expected an object with `nodes` and `edges` lists)")
+        try:
+            graph = Graph.from_dict(data)
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"{self.path} is not a BizMap graph ({type(exc).__name__}: {exc})") from exc
+        self.graph = graph
         self.out, self.inc = {}, {}
         for edge in self.graph.edges.values():
             self.out.setdefault(edge.from_id, []).append(edge)
@@ -93,8 +104,8 @@ class GraphStore:
     def refresh(self) -> None:
         try:
             self.load()
-        except (OSError, json.JSONDecodeError):
-            pass  # keep serving the last good graph
+        except (OSError, ValueError):
+            pass  # keep serving the last good graph (JSONDecodeError is a ValueError)
 
 
 _RANK = {"exact": 4, "inferred": 3, "heuristic": 2, "unknown": 1}
@@ -175,6 +186,8 @@ _TYPE_ALIASES = {
     "column": {"column"},
     "any": {"function", "entrypoint", "table", "view", "collection", "column", "queue"},
 }
+# what `call_graph` / `function_data` accept: code, not data
+_CODE = {"function", "entrypoint", "queue"}
 
 
 def _matches(store: GraphStore, ref: str, types: set[str]) -> list[str]:
@@ -213,13 +226,43 @@ def _matches(store: GraphStore, ref: str, types: set[str]) -> list[str]:
         elif node.type == "column":
             if f"{a.get('table')}.{a.get('name')}".lower() == low:
                 found.add(nid)
+    if is_route:
+        # `POST /orders/:id/paid` names the route; its inline handler function
+        # (`<module>.POST /orders/:id/paid`) is reached through it
+        routes = {nid for nid in found if graph.nodes[nid].type == "entrypoint"}
+        if routes:
+            found = routes
     return sorted(found)
+
+
+_KIND_WORDS = {
+    "any": "function or route",
+    "function": "function",
+    "entrypoint": "route",
+    "route": "route",
+    "table": "table",
+    "column": "column",
+}
 
 
 def _resolve(store: GraphStore, ref: str, kind: str) -> str:
     ids = _matches(store, ref, _TYPE_ALIASES[kind])
     if not ids:
-        raise ToolError(f"no {kind} matches {ref!r}. Use the `search` tool to find its id.")
+        what = _KIND_WORDS.get(kind, kind)
+        raise ToolError(f"no {what} matches {ref!r}. Use the `search` tool to find its id.")
+    if len(ids) > 1:
+        shown = ", ".join(ids[:10]) + (f" (+{len(ids) - 10} more)" if len(ids) > 10 else "")
+        raise ToolError(f"{ref!r} matches {len(ids)} nodes: {shown}. Pass one of these ids.")
+    return ids[0]
+
+
+def _resolve_code(store: GraphStore, ref: str) -> str:
+    """A function or route (tables/columns go to `table_usage`)."""
+    ids = _matches(store, ref, _CODE)
+    if not ids:
+        data = _matches(store, ref, {"table", "view", "collection", "column"})
+        hint = " It names a table/column: use `table_usage`." if data else " Use the `search` tool to find its id."
+        raise ToolError(f"no function or route matches {ref!r}.{hint}")
     if len(ids) > 1:
         shown = ", ".join(ids[:10]) + (f" (+{len(ids) - 10} more)" if len(ids) > 10 else "")
         raise ToolError(f"{ref!r} matches {len(ids)} nodes: {shown}. Pass one of these ids.")
@@ -280,7 +323,7 @@ def _table_of(graph: Graph, target: str) -> tuple[str, str | None]:
     return _label(graph, target), None
 
 
-def _data_rows(graph: Graph, edges: list[Any]) -> list[dict[str, Any]]:
+def _data_rows(graph: Graph, edges: list[Any], column_limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
     """Group data edges by table: `{table, confidence, evidence, columns:
     [{column, confidence, evidence}]}`; strongest confidence wins, the
     first evidence (sorted) is shown. Sorted by table, then column."""
@@ -300,7 +343,10 @@ def _data_rows(graph: Graph, edges: list[Any]) -> list[dict[str, Any]]:
     rows = []
     for name in sorted(tables):
         slot = tables[name]
-        row = {"table": slot["table"], "confidence": slot["confidence"], "columns": [slot["columns"][c] for c in sorted(slot["columns"])]}
+        cols = [slot["columns"][c] for c in sorted(slot["columns"])]
+        row = {"table": slot["table"], "confidence": slot["confidence"], "columns": cols[:column_limit]}
+        if len(cols) > column_limit:
+            row["columns_total"] = len(cols)
         if slot["evidence"]:
             row["evidence"] = slot["evidence"]
         rows.append(row)
@@ -308,6 +354,12 @@ def _data_rows(graph: Graph, edges: list[Any]) -> list[dict[str, Any]]:
 
 
 # ── tools ────────────────────────────────────────────────────────────────────
+
+
+def _flag_nested(out: dict[str, Any], keys: tuple[str, ...], nested: str) -> None:
+    for key in keys:
+        if any(f"{nested}_total" in row for row in out.get(key, [])):
+            out["truncated"] = True
 
 
 def tool_search(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
@@ -353,7 +405,7 @@ def tool_call_graph(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
     ref = str(args.get("function") or "").strip()
     if not ref:
         raise ToolError("`function` is required: an id from `search`, a name, or `METHOD /path`")
-    node_id = _resolve(store, ref, "any")
+    node_id = _resolve_code(store, ref)
     direction = str(args.get("direction") or "both")
     if direction not in {"callers", "callees", "both"}:
         raise ToolError("`direction` must be callers, callees or both")
@@ -403,7 +455,7 @@ def tool_function_data(store: GraphStore, args: dict[str, Any]) -> dict[str, Any
     ref = str(args.get("function") or "").strip()
     if not ref:
         raise ToolError("`function` is required: an id from `search`, a name, or `METHOD /path`")
-    node_id = _resolve(store, ref, "any")
+    node_id = _resolve_code(store, ref)
     transitive = bool(args.get("transitive", False))
     limit = _limit(args)
     reads: list[Any] = []
@@ -423,8 +475,9 @@ def tool_function_data(store: GraphStore, args: dict[str, Any]) -> dict[str, Any
             elif transitive and edge.type in _CALL_EDGES:
                 q.append(edge.to_id)
     out: dict[str, Any] = {"node": _brief(store, node_id), "transitive": transitive, "truncated": False}
-    _page(_data_rows(store.graph, writes), limit, out, "writes")
-    _page(_data_rows(store.graph, reads), limit, out, "reads")
+    _page(_data_rows(store.graph, writes, limit), limit, out, "writes")
+    _page(_data_rows(store.graph, reads, limit), limit, out, "reads")
+    _flag_nested(out, ("writes", "reads"), "columns")
     return out
 
 
@@ -498,15 +551,19 @@ def tool_impact(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
     full = result.to_dict()
     out: dict[str, Any] = {"truncated": False}
     functions = []
+    nested = 10
     for f in full["functions"]:
         row = _brief(store, f["function"])
         row["changed_lines"] = f["lines"]
-        row["entrypoints"] = [_brief(store, e) for e in f["entrypoints"]]
-        row["writes"] = f["writes"]
-        row["reads"] = f["reads"]
+        for key, ids in (("entrypoints", f["entrypoints"]), ("writes", f["writes"]), ("reads", f["reads"])):
+            values = [_brief(store, e) for e in ids] if key == "entrypoints" else list(ids)
+            row[key] = values[:nested]
+            if len(values) > nested:
+                row[f"{key}_total"] = len(values)
+                out["truncated"] = True
         functions.append(row)
     _page(functions, limit, out, "functions")
-    _page(full["entrypoints"], limit, out, "entrypoints")
+    _page([_brief(store, e) for e in full["entrypoints"]], limit, out, "entrypoints")
     _page(full["writes"], limit, out, "writes")
     _page(full["reads"], limit, out, "reads")
     _page(full["schema_changes"], limit, out, "schema_changes")
@@ -533,13 +590,20 @@ def tool_why_column(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _as_text(payload: Any) -> str:
-    """The exact text sent in `content[0].text`."""
-    return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
+    """The exact text sent in `content[0].text` (compact JSON)."""
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
-def _fit(payload: dict[str, Any]) -> dict[str, Any]:
-    """Keep the JSON text under ``MAX_TEXT`` characters: halve the longest list
-    (or cut the text fields) until it fits, and say so with ``truncated``."""
+def _cut_text(text: str, keep: int) -> str:
+    lines = text.splitlines()
+    dropped = len(lines) - keep
+    return "\n".join(lines[:keep]) + (f"\n… ({dropped} more lines; ask about one function or use `table_usage`)\n" if dropped > 0 else "")
+
+
+def _fit(payload: dict[str, Any], order: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Keep the result under ``MAX_TEXT`` characters by dropping items from
+    the end of the lowest-priority list first (``order``), as few as needed
+    (binary search), and say so with ``truncated``."""
 
     def size(obj: Any) -> int:
         return len(_as_text(obj))
@@ -548,19 +612,32 @@ def _fit(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
     payload = dict(payload)
     payload["truncated"] = True
-    for _ in range(64):
+    keys = [k for k in order if k in payload] + sorted(
+        k for k, v in payload.items() if isinstance(v, list | str) and k not in order and k not in {"truncated"}
+    )
+    for key in keys:
+        value = payload[key]
+        if isinstance(value, list):
+            lo, hi = 0, len(value)
+            while lo < hi:  # largest prefix that fits
+                mid = (lo + hi + 1) // 2
+                if size({**payload, key: value[:mid]}) <= MAX_TEXT:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            payload[key] = value[:lo]
+        elif isinstance(value, str) and len(value) > 200:
+            n_lines = len(value.splitlines())
+            lo, hi = 0, n_lines
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if size({**payload, key: _cut_text(value, mid)}) <= MAX_TEXT:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            payload[key] = _cut_text(value, lo)
         if size(payload) <= MAX_TEXT:
             return payload
-        lists = [(k, v) for k, v in payload.items() if isinstance(v, list) and v]
-        texts = [(k, v) for k, v in payload.items() if isinstance(v, str) and len(v) > 200]
-        if lists:
-            key, value = max(lists, key=lambda kv: (size(kv[1]), kv[0]))
-            payload[key] = value[: len(value) // 2]
-        elif texts:
-            key, value = max(texts, key=lambda kv: (len(kv[1]), kv[0]))
-            payload[key] = value[: len(value) // 2].rsplit("\n", 1)[0] + "\n… (truncated)"
-        else:
-            break
     return payload
 
 
@@ -668,6 +745,49 @@ TOOLS: list[dict[str, Any]] = [
     },
 ]
 _HANDLERS = {t["name"]: t["handler"] for t in TOOLS}
+_SCHEMAS = {t["name"]: t["inputSchema"] for t in TOOLS}
+# which parts of a result give way first when it is over the size cap
+_TRIM_ORDER: dict[str, tuple[str, ...]] = {
+    "search": ("results",),
+    "call_graph": ("entrypoints", "callees", "callers"),
+    "function_data": ("reads", "writes"),
+    "table_usage": ("entrypoints", "functions"),
+    "impact": ("unmapped_files", "reads", "writes", "schema_changes", "markdown", "entrypoints", "functions"),
+    "why_column": ("text",),
+}
+
+
+_JSON_TYPES = {"string": str, "integer": int, "boolean": bool, "object": dict, "array": list}
+
+
+def _validate(schema: dict[str, Any], args: dict[str, Any]) -> str | None:
+    """Check ``args`` against a tool's inputSchema (types, enums, ranges,
+    required, no unknown keys). Returns an error message, or None."""
+    props = schema.get("properties") or {}
+    for key in schema.get("required") or []:
+        if key not in args or args[key] is None or args[key] == "":
+            return f"`{key}` is required"
+    if schema.get("additionalProperties") is False:
+        unknown = sorted(k for k in args if k not in props)
+        if unknown:
+            return f"unknown argument(s): {', '.join(unknown)}. Allowed: {', '.join(sorted(props))}"
+    for key, value in args.items():
+        spec = props.get(key) or {}
+        want = spec.get("type")
+        py = _JSON_TYPES.get(want)
+        if py is None:
+            continue
+        ok = isinstance(value, py) and not (py is int and isinstance(value, bool))
+        if not ok:
+            article = "an" if want[0] in "aeiou" else "a"
+            return f"`{key}` must be {article} {want}, got {type(value).__name__} {json.dumps(value)[:40]}"
+        if "enum" in spec and value not in spec["enum"]:
+            return f"`{key}` must be one of: {', '.join(map(str, spec['enum']))}"
+        if want == "integer":
+            lo, hi = spec.get("minimum"), spec.get("maximum")
+            if (lo is not None and value < lo) or (hi is not None and value > hi):
+                return f"`{key}` must be an integer from {lo} to {hi}"
+    return None
 
 
 def _tool_list() -> list[dict[str, Any]]:
@@ -730,9 +850,16 @@ def handle(store: GraphStore, message: Any) -> dict[str, Any] | None:
         args = params.get("arguments") or {}
         if not isinstance(args, dict):
             return _error(msg_id, -32602, "arguments must be an object")
+        problem = _validate(_SCHEMAS[name], args)
+        if problem:
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {"content": [{"type": "text", "text": problem}], "isError": True},
+            }
         store.refresh()
         try:
-            payload = _fit(handler(store, args))
+            payload = _fit(handler(store, args), _TRIM_ORDER.get(name, ()))
         except ToolError as exc:
             return {
                 "jsonrpc": "2.0",
@@ -755,10 +882,24 @@ def handle(store: GraphStore, message: Any) -> dict[str, Any] | None:
     return _error(msg_id, -32601, f"method not found: {method}")
 
 
+def _safe_handle(store: GraphStore, message: Any) -> dict[str, Any] | None:
+    try:
+        return handle(store, message)
+    except Exception as exc:  # noqa: BLE001 - one bad message must not stop the server
+        msg_id = message.get("id") if isinstance(message, dict) else None
+        if isinstance(message, dict) and "id" not in message:
+            return None
+        return _error(msg_id, -32603, f"internal error: {type(exc).__name__}: {exc}")
+
+
 def serve(store: GraphStore, stdin: IO[str] | None = None, stdout: IO[str] | None = None) -> None:
     """Read newline-delimited JSON-RPC from stdin until EOF; answer on stdout.
-    Nothing but protocol messages is written to stdout."""
-    stdin = stdin or sys.stdin
+
+    Input is read as UTF-8 bytes (invalid sequences replaced) and output is
+    ASCII-only JSON, so no input and no stdout encoding can crash the loop;
+    a failing message gets a -32603 error and the server keeps going."""
+    if stdin is None:
+        stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
     stdout = stdout or sys.stdout
     for line in stdin:
         line = line.strip()
@@ -770,10 +911,10 @@ def serve(store: GraphStore, stdin: IO[str] | None = None, stdout: IO[str] | Non
             response: Any = _error(None, -32700, "parse error")
         else:
             if isinstance(message, list):  # batch (older protocol versions)
-                replies = [r for m in message for r in [handle(store, m)] if r is not None]
+                replies = [r for m in message for r in [_safe_handle(store, m)] if r is not None]
                 response = replies or None
             else:
-                response = handle(store, message)
+                response = _safe_handle(store, message)
         if response is not None:
-            stdout.write(json.dumps(response, ensure_ascii=False, sort_keys=True) + "\n")
+            stdout.write(json.dumps(response, ensure_ascii=True, sort_keys=True) + "\n")
             stdout.flush()

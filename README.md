@@ -189,6 +189,8 @@ don't produce impact.
 
 ## MCP server (for coding agents)
 
+*Requires bizmap 0.4.0+ (until it is on PyPI: `pip install "git+https://github.com/lucas-simao/bizmap"`).*
+
 `bizmap mcp` lets Claude Code, Cursor, Claude Desktop or any MCP client ask the
 graph *what writes `orders.status`?*, *which routes reach `markPaid`?* or *what does
 this diff touch?* instead of grepping. It is **read-only and offline** (reads the JSON
