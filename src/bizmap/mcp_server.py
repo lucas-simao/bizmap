@@ -532,12 +532,17 @@ def tool_why_column(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
     return {"column": column, "text": text, "truncated": False}
 
 
+def _as_text(payload: Any) -> str:
+    """The exact text sent in `content[0].text`."""
+    return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
+
+
 def _fit(payload: dict[str, Any]) -> dict[str, Any]:
     """Keep the JSON text under ``MAX_TEXT`` characters: halve the longest list
     (or cut the text fields) until it fits, and say so with ``truncated``."""
 
     def size(obj: Any) -> int:
-        return len(json.dumps(obj, sort_keys=True, ensure_ascii=False))
+        return len(_as_text(obj))
 
     if size(payload) <= MAX_TEXT:
         return payload
@@ -734,7 +739,7 @@ def handle(store: GraphStore, message: Any) -> dict[str, Any] | None:
                 "id": msg_id,
                 "result": {"content": [{"type": "text", "text": str(exc)}], "isError": True},
             }
-        text = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
+        text = _as_text(payload)
         return {
             "jsonrpc": "2.0",
             "id": msg_id,

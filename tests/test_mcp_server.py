@@ -264,14 +264,13 @@ def test_size_cap_on_a_large_graph(tmp_path: Path) -> None:
     big = GraphStore(path)
     result = call(big, "table_usage", table="orders", limit=100)
     assert result["isError"] is False
-    assert len(result["content"][0]["text"]) <= MAX_TEXT + 2000  # indent adds whitespace only
+    assert len(result["content"][0]["text"]) <= MAX_TEXT
     payload = result["structuredContent"]
     assert payload["truncated"] is True and payload["functions_total"] == 300
-    assert len(json.dumps(payload, sort_keys=True)) <= MAX_TEXT
 
 
 def test_error_messages_are_actionable(store: GraphStore) -> None:
     missing = call(store, "call_graph", function="doesNotExist")["content"][0]["text"]
     assert "search" in missing
-    unknown = call(store, "why_column", column="orders.nope")
+    unknown = call(store, "why_column", column="nope.nope")
     assert unknown["isError"] is True and "search" in unknown["content"][0]["text"]
