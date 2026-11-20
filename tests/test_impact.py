@@ -402,3 +402,77 @@ def test_marker_survives_tiny_cap() -> None:
                  unmapped_files=[])
     md = render_markdown(graph, imp, max_chars=200)
     assert md.startswith(MARKER) and "### BizMap impact" in md and "truncated" in md
+
+
+TWO_FACTORIES = {
+    "api/server.ts": (
+        "import express from 'express';\nconst app = express();\n"
+        "app.get('/orders/:id', (req, res) => res.json({}));\n"
+        "app.get('/inventory/:id', (req, res) => res.json({}));\n"
+        "app.get('/settings/users/:id', (req, res) => res.json({}));\n"
+    ),
+    "web/c.ts": (
+        "export function createAClient(http) {\n"                       # 1
+        "  function build(id) {\n"                                      # 2
+        "    return http.get(`/orders/${id}`);\n"                       # 3
+        "  }\n"                                                         # 4
+        "  return { one: (id) => build(id) };\n"                        # 5
+        "}\n"                                                           # 6
+        "export function createBClient(http) {\n"                       # 7
+        "  function build(id) {\n"                                      # 8
+        "    return http.get(`/inventory/${id}`);\n"                    # 9
+        "  }\n"                                                         # 10
+        "  const loadUser = (id) => http.get(`/settings/users/${id}`);\n"  # 11
+        "  return {\n"                                                  # 12
+        "    one: (id) => build(id),\n"                                 # 13
+        "    addUser: (id) => loadUser(id),\n"                          # 14
+        "    external: () => http.get('/vendor/ping'),\n"               # 15
+        "  };\n"                                                        # 16
+        "}\n"                                                           # 17
+    ),
+}
+
+
+def _added(path: str, line: int) -> str:
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -{line},0 +{line},1 @@\n+x\n"
+
+
+def _http_targets(graph, fid: str) -> set[str]:
+    return {e.to_id.split(":", 3)[-1] for e in graph.edges.values() if e.type == "calls_http" and e.from_id == fid}
+
+
+def test_nested_helpers_are_scoped_per_factory(tmp_path: Path) -> None:
+    graph = _scan(tmp_path, TWO_FACTORIES)
+    a_build, b_build = "function:web.c.createAClient.build", "function:web.c.createBClient.build"
+    assert a_build in graph.nodes and b_build in graph.nodes, sorted(n for n in graph.nodes if "build" in n)
+    assert _http_targets(graph, a_build) == {"/orders/:id"}
+    assert _http_targets(graph, b_build) == {"/inventory/:id"}
+    imp = compute_impact(graph, _added("web/c.ts", 9))
+    assert [f.function for f in imp.functions] == [b_build]
+
+
+def test_members_call_local_helpers(tmp_path: Path) -> None:
+    graph = _scan(tmp_path, TWO_FACTORIES)
+    calls = {(e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls"}
+    assert ("function:web.c.createBClient.one", "function:web.c.createBClient.build") in calls, calls
+    assert ("function:web.c.createBClient.addUser", "function:web.c.createBClient.loadUser") in calls, calls
+    assert ("function:web.c.createAClient.one", "function:web.c.createAClient.build") in calls, calls
+    # the member reaches its helper's route through `calls`
+    imp = compute_impact(graph, _added("web/c.ts", 14))
+    assert [f.function for f in imp.functions] == ["function:web.c.createBClient.addUser"]
+    graph_eps = imp.functions[0]
+    reach = set()
+    for e in graph.edges.values():
+        if e.type == "calls" and e.from_id == graph_eps.function:
+            reach |= _http_targets(graph, e.to_id)
+    assert reach == {"/settings/users/:id"}, reach
+
+
+def test_unresolved_http_sits_on_the_member(tmp_path: Path) -> None:
+    graph = _scan(tmp_path, TWO_FACTORIES)
+    ext = graph.nodes.get("function:web.c.createBClient.external")
+    assert ext is not None and any("/vendor/ping" in str(u) for u in ext.attrs.get("unresolved_http") or []), (
+        ext and ext.attrs
+    )
+    factory = graph.nodes["function:web.c.createBClient"]
+    assert not any("/vendor/ping" in str(u) for u in factory.attrs.get("unresolved_http") or [])
