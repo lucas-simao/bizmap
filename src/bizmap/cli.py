@@ -361,6 +361,38 @@ def impact_cmd(
         )
 
 
+@main.command("mcp")
+@click.option(
+    "--graph",
+    "graph_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=Path("bizmap.graph.json"),
+    show_default=True,
+    help="Graph JSON produced by `bizmap scan` (reloaded when it changes).",
+)
+@click.option(
+    "--repo-root",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Checkout read by the `impact` tool for changed .sql files (off by default).",
+)
+def mcp_cmd(graph_path: Path, repo_root: Path | None) -> None:
+    """Serve the graph to MCP clients over stdio (read-only, offline).
+
+    Tools: search, call_graph, function_data, table_usage, impact, why_column.
+    """
+    from bizmap.mcp_server import GraphStore, serve
+
+    try:
+        store = GraphStore(graph_path, repo_root=repo_root)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise click.ClickException(f"cannot read graph {graph_path}: {exc}") from exc
+    click.echo(
+        f"bizmap mcp: serving {graph_path} ({len(store.graph.nodes)} nodes) on stdio", err=True
+    )
+    serve(store)
+
+
 @main.group("registry")
 def registry_grp() -> None:
     """Merge and query cross-repo lineage graphs."""

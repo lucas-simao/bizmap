@@ -187,6 +187,38 @@ reported.
 Lines outside any function (imports, migrations, docs) are listed as unmapped and
 don't produce impact.
 
+## MCP server (for coding agents)
+
+`bizmap mcp` serves a graph to MCP clients over stdio, so an agent can ask
+"what writes `orders.status`?" instead of grepping. It is **read-only and
+offline**: it reads the JSON from `bizmap scan` (reloaded when you rescan), never
+touches the network or runs a model, and answers deterministically.
+
+```bash
+bizmap scan . --out bizmap.graph.json
+bizmap mcp --graph bizmap.graph.json        # stdio; logs go to stderr
+```
+
+Client config (Claude Code: `claude mcp add bizmap -- bizmap mcp --graph /abs/path/bizmap.graph.json`;
+other clients take the usual `mcpServers` entry):
+
+```json
+{ "mcpServers": { "bizmap": { "command": "bizmap", "args": ["mcp", "--graph", "/abs/path/bizmap.graph.json"] } } }
+```
+
+| Tool | Answers |
+|---|---|
+| `search` | find functions, routes, tables, columns by name / path / doc comment → ids |
+| `call_graph` | who calls a function (and which routes/jobs reach it), what it calls — across services |
+| `function_data` | tables/columns a function or route reads and writes (`transitive` through callees) |
+| `table_usage` | functions and routes that read/write a table or one column (`orders.status`) |
+| `impact` | a unified diff → changed functions, routes and data (same as `bizmap impact`) |
+| `why_column` | the `bizmap why` text for `table.column` |
+
+Functions and routes can be named by id (from `search`), by name (`markPaid`) or as
+`METHOD /path`; an ambiguous name returns the candidate ids. `--repo-root` lets
+`impact` read changed `.sql` files (off by default).
+
 ## What it understands
 
 | | Routes / triggers | Data access | Outbound HTTP |
@@ -235,7 +267,8 @@ and marks those links `inferred`. Details: [docs/how-it-works.md](docs/how-it-wo
 
 - **Shipped in v0.3.3** — `bizmap impact` + GitHub Action that comments on each PR
   with the routes, functions, tables and columns it impacts (and a Mermaid diagram).
-- **v0.4** — MCP server so coding agents can ask `why orders.status` instead of grepping.
+- **v0.4** — MCP server so coding agents can ask `why orders.status` instead of grepping
+  (`bizmap mcp`, in progress on `main`).
 - Static graph page (GitHub Pages).
 
 Full history: [CHANGELOG.md](CHANGELOG.md). Graph format:
