@@ -6,6 +6,12 @@ functions, tables and columns the change reaches, and a Mermaid diagram.
 
 ![The BizMap comment on bizmap-demo PR #1](assets/demo/pr-comment-small.png){ .shot width="760" }
 
+!!! info "Next release"
+
+    The comment is getting a risk badge, collapsible sections, commit links and
+    new inputs (`risk-threshold`, `mermaid`, `shared-services`). They are merged
+    on `main` but not in a release yet: see [Next release](action.md).
+
 ## Setup
 
 `.github/workflows/bizmap-impact.yml`:

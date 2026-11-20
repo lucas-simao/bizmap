@@ -99,7 +99,9 @@ nav:
       - export (0.5.0, not released yet): export.md
   - Languages and detectors: languages.md
   - MCP server: mcp.md
-  - GitHub Action: github-action.md
+  - GitHub Action:
+      - github-action.md
+      - Next release (not released yet): action.md
   - Reference:
       - Graph format: graph-schema.md
       - How it works: how-it-works.md
