@@ -1,9 +1,26 @@
 # Changelog
 
-## Unreleased
+## 0.3.3 — 2026-11-20
+
+No tag was pushed for 0.3.0–0.3.2; this is the first tagged release of the
+`bizmap impact` command and the PR-comment Action (see 0.3.2 for those).
 
 ### Fixed
 
+- **Shadowed names**: a parameter (plain, destructured, arrow), `let`/`var`/
+  `const` or `catch (x)` binding hides a module-level or imported function of
+  the same name: no false `calls`.
+- **Imported call targets** resolve through `index` barrels (`export { a } from`,
+  `export * from`), `export default <identifier>`, namespace imports
+  (`import * as lib`; `lib.top()`) and CommonJS (`const { a } = require(...)`
+  with `module.exports = { a }` / `exports.a = a`).
+- **Go closure numbering** follows Go's own per-level scheme (`func2`,
+  `func2.1`): a literal nested in another closure no longer shifts the next
+  route's id.
+- **Performance**: the span post-passes and `impact` index edges once; the
+  route rollup memoizes per strongly connected component. Synthetic Go service
+  (2000 chained functions, 600 closure routes): 3.4 s → 0.7 s, growing about
+  linearly (`scripts/bench_scale.py`, run in CI).
 - **JS/TS calls to module-level and imported functions** produce `calls`
   (callee resolved by scope: nested helper → module function → import, only
   when the target is a scanned function).

@@ -168,7 +168,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4   # the base commit is fetched if missing; fetch-depth: 0 also works
-      - uses: lucas-simao/bizmap@v0.3.2
+      - uses: lucas-simao/bizmap@v0.3.3
         with:
           path: .            # or the workspace dir holding bizmap.yaml with `repos:`
 ```
@@ -229,7 +229,7 @@ and marks those links `inferred`. Details: [docs/how-it-works.md](docs/how-it-wo
 
 ## Roadmap
 
-- **v0.3.2** — `bizmap impact` + GitHub Action that comments on each PR with the
+- **v0.3.3** — `bizmap impact` + GitHub Action that comments on each PR with the
   routes, functions, tables and columns it impacts (and a Mermaid diagram).
 - **v0.4** — MCP server so coding agents can ask `why orders.status` instead of grepping.
 - Static graph page (GitHub Pages).
