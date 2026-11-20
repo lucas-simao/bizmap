@@ -33,7 +33,9 @@ def index_deep_tree(root: Node, threshold: int = DEEP_TREE) -> bool:
         if depth > threshold:
             deep = True
             break
-        stack.extend((c, depth + 1) for c in cur.children)
+        named = cur.named_children  # tokens never make a tree deeper by more than one
+        if named:
+            stack.extend((c, depth + 1) for c in named)
     if not deep:
         return False
     _PARENT[_key(root)] = None
@@ -94,17 +96,45 @@ TYPED_WALK_TYPES = frozenset(
         "go_statement",
     }
 )
-_TYPED: dict[tuple[int, int, int], list[Node]] = {}
+# The same for the JS/TS detector (identifiers and strings are left out: too
+# many to keep).
+JS_TYPED_WALK_TYPES = frozenset(
+    {
+        "call_expression",
+        "new_expression",
+        "variable_declarator",
+        "function_declaration",
+        "generator_function_declaration",
+        "method_definition",
+        "method_signature",
+        "pair",
+        "function",
+        "function_expression",
+        "arrow_function",
+        "generator_function",
+        "class",
+        "class_declaration",
+        "import_statement",
+        "lexical_declaration",
+        "export_statement",
+        "expression_statement",
+        "return",
+        "return_statement",
+    }
+)
+_TYPED: dict[tuple[int, int, int, int], list[Node]] = {}
 
 
-def typed_walk(scope: Node, types: frozenset[str] | set[str]) -> list[Node]:
+def typed_walk(
+    scope: Node, types: frozenset[str] | set[str], index: frozenset[str] = TYPED_WALK_TYPES
+) -> list[Node]:
     """The nodes of ``types`` under ``scope`` (itself included), in the same
-    preorder as `walk`. Every type must be in TYPED_WALK_TYPES. Cached per
-    scope until `clear_typed_walks()`."""
-    key = (scope.id, scope.start_byte, scope.end_byte)
+    preorder as `walk`. Every type must be in ``index``. Cached per scope
+    until `clear_typed_walks()`."""
+    key = (scope.id, scope.start_byte, scope.end_byte, id(index))
     nodes = _TYPED.get(key)
     if nodes is None:
-        nodes = [n for n in walk(scope) if n.type in TYPED_WALK_TYPES]
+        nodes = [n for n in walk(scope) if n.type in index]
         _TYPED[key] = nodes
     if len(types) == 1:
         (only,) = tuple(types)

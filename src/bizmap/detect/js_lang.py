@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import re
@@ -11,14 +12,19 @@ from pathlib import Path
 from tree_sitter import Language, Node, Parser
 
 from bizmap.detect.tsutil import (
+    JS_TYPED_WALK_TYPES as JS_TYPES,
+)
+from bizmap.detect.tsutil import (
     call_args,
     call_callee_name,
     clear_parent_index,
+    clear_typed_walks,
     flatten_plus,
     index_deep_tree,
     line_of,
     parent_of,
     text,
+    typed_walk,
     unwrap_callee_expr,
     walk,
 )
@@ -980,11 +986,28 @@ class JsAnalyzer:
         root: Path,
         constants: dict[str, str] | None = None,
     ) -> JsAnalysis:
+        """Analyse the files with the garbage collector's thresholds raised
+        (as in the Go phase: many short-lived objects next to the trees)."""
+        old = gc.get_threshold()
+        gc.set_threshold(max(old[0], 50_000), max(old[1], 50), max(old[2], 100))
+        try:
+            return self._analyze(files, root, constants)
+        finally:
+            clear_typed_walks()
+            gc.set_threshold(*old)
+
+    def _analyze(
+        self,
+        files: list[Path],
+        root: Path,
+        constants: dict[str, str] | None,
+    ) -> JsAnalysis:
         analysis = JsAnalysis()
         _REEXPORTS.clear()
         _LITERAL_TOP.clear()
         _SCOPE_BINDINGS.clear()
         _ENCLOSING_SYMBOL.clear()
+        clear_typed_walks()
         clear_parent_index()
         yaml_constants = constants or {}
         path_aliases = _ts_path_aliases(root)
@@ -1034,7 +1057,8 @@ class JsAnalyzer:
             factories_by_mod[module] = _collect_client_factories(tree, consts)
             class_ctors_by_mod[module] = _collect_class_ctors(tree)
             trees_by_mod[module] = tree
-            for node in walk(tree):
+            file_quals: list[str] = []  # functions this file declares (fn_nodes keeps growing)
+            for node in typed_walk(tree, _DECL_TYPES, JS_TYPES):
                 # declarations only: a named function *expression* is registered
                 # through its binding below (its own name is not in scope here)
                 if node.type in {"function_declaration", "generator_function_declaration", "method_definition"}:
@@ -1045,6 +1069,7 @@ class JsAnalyzer:
                         analysis.functions[qual] = (rel_file, line_of(node))
                         analysis.function_ends[qual] = node.end_point[0] + 1
                         fn_nodes[qual] = node
+                        file_quals.append(qual)
                         why = _js_why(node)
                         if why:
                             analysis.function_why[qual] = why
@@ -1069,6 +1094,7 @@ class JsAnalyzer:
                         analysis.functions[qual] = (rel_file, line_of(node))
                         analysis.function_ends[qual] = node.end_point[0] + 1
                         fn_nodes[qual] = value
+                        file_quals.append(qual)
                         why = _js_why(value)
                         if why:
                             analysis.function_why[qual] = why
@@ -1086,6 +1112,7 @@ class JsAnalyzer:
                             analysis.functions[qual] = (rel_file, line_of(value))
                             analysis.function_ends[qual] = value.end_point[0] + 1
                             fn_nodes[qual] = value
+                            file_quals.append(qual)
                             why = _js_why(value)
                             if why:
                                 analysis.function_why[qual] = why
@@ -1095,13 +1122,11 @@ class JsAnalyzer:
                             )
             # calls to helpers declared in an enclosing function's scope
             fn_by_span = {
-                (n.start_byte, n.end_byte): q
-                for q, n in fn_nodes.items()
+                (fn_nodes[q].start_byte, fn_nodes[q].end_byte): q
+                for q in file_quals
                 if q.startswith(module + ".") and analysis.functions.get(q, ("",))[0] == rel_file
             }
-            for node in walk(tree):
-                if node.type != "call_expression":
-                    continue
+            for node in typed_walk(tree, frozenset({"call_expression"}), JS_TYPES):
                 fn_n = node.child_by_field_name("function")
                 if fn_n is not None and fn_n.type == "member_expression":
                     # `import * as lib from './lib'; lib.top()`
@@ -1231,9 +1256,7 @@ class JsAnalyzer:
         imports: dict[str, str],
         fn_nodes: dict[str, Node],
     ) -> None:
-        for node in walk(tree):
-            if node.type != "call_expression":
-                continue
+        for node in typed_walk(tree, frozenset({"call_expression"}), JS_TYPES):
             method = call_callee_name(node).lower()
             raw_method = call_callee_name(node)
             args = call_args(node)
@@ -1631,9 +1654,7 @@ class JsAnalyzer:
             )
         if body is None:
             return
-        for node in walk(body):
-            if node.type != "call_expression":
-                continue
+        for node in typed_walk(body, frozenset({"call_expression"}), JS_TYPES):
             method = call_callee_name(node).lower()
             args = call_args(node)
             self._maybe_supabase(analysis, node, method, args, rel_file, module, consts, symbol=symbol)
@@ -1920,6 +1941,14 @@ def _fn_qual(fn: Node, module: str) -> str | None:
     return ".".join([module, *reversed(chain)])
 
 
+_DECL_TYPES = frozenset(
+    {"function_declaration", "generator_function_declaration", "method_definition", "variable_declarator", "pair"}
+)
+_FN_OR_DECL = frozenset({"function_declaration", "function", "method_definition", "variable_declarator"})
+_FN_NODES = frozenset(
+    {"function_declaration", "function", "function_expression", "arrow_function", "method_definition"}
+)
+_EXPORT_NODES = frozenset({"export_statement", "expression_statement", "lexical_declaration"})
 _ENCLOSING_SYMBOL: dict[tuple[str, int, int, int], str] = {}
 
 
@@ -2088,9 +2117,7 @@ _ENV_OBJECTS = {"import.meta.env", "process.env", "Bun.env", "Deno.env"}
 
 def _collect_consts(tree: Node) -> dict[str, str]:
     consts: dict[str, str] = {}
-    for node in walk(tree):
-        if node.type != "variable_declarator":
-            continue
+    for node in typed_walk(tree, frozenset({"variable_declarator"}), JS_TYPES):
         value = node.child_by_field_name("value")
         name_node = node.child_by_field_name("name")
         if value is None or name_node is None:
@@ -2138,9 +2165,7 @@ def _collect_receivers(tree: Node, consts: dict[str, str] | None = None) -> tupl
     consts = consts or {}
     routers: dict[str, str] = {}
     clients: dict[str, str] = {}
-    for node in walk(tree):
-        if node.type != "variable_declarator":
-            continue
+    for node in typed_walk(tree, frozenset({"variable_declarator"}), JS_TYPES):
         name = _declarator_name(node)
         value = node.child_by_field_name("value")
         if not name or value is None:
@@ -2164,9 +2189,7 @@ def _collect_receivers(tree: Node, consts: dict[str, str] | None = None) -> tupl
         if value.type == "new_expression" and _ctor_leaf(value) in ROUTER_CTORS:
             routers[name] = ""
     # Nested groups: const admin = app.group("/admin") / app.route("/admin")
-    for node in walk(tree):
-        if node.type != "variable_declarator":
-            continue
+    for node in typed_walk(tree, frozenset({"variable_declarator"}), JS_TYPES):
         name = _declarator_name(node)
         value = node.child_by_field_name("value")
         if not name or value is None or value.type != "call_expression":
@@ -2223,9 +2246,8 @@ def _collect_wrappers(
         candidates: list[Node] = []
         if body is not None and body.type == "call_expression":
             candidates.append(body)
-        for node in walk(fn_node):
-            if node.type == "call_expression":
-                candidates.append(node)
+        for node in typed_walk(fn_node, frozenset({"call_expression"}), JS_TYPES):
+            candidates.append(node)
         seen: set[int] = set()
         for node in candidates:
             if id(node) in seen:
@@ -2288,7 +2310,7 @@ def _collect_wrappers(
             )
             return
 
-    for node in walk(tree):
+    for node in typed_walk(tree, frozenset({"function_declaration", "function", "variable_declarator"}), JS_TYPES):
         if node.type in {"function_declaration", "function"}:
             name_n = node.child_by_field_name("name")
             name = text(name_n) if name_n else ""
@@ -2351,9 +2373,7 @@ def _collect_imports(
     """Return (local→qualname, local→(src_module, orig_name))."""
     out: dict[str, str] = {}
     specs: dict[str, tuple[str, str]] = {}
-    for node in walk(tree):
-        if node.type not in {"import_statement", "lexical_declaration"}:
-            continue
+    for node in typed_walk(tree, frozenset({"import_statement", "lexical_declaration"}), JS_TYPES):
         raw = text(node)
         if "from" not in raw and "require(" not in raw:
             continue
@@ -2430,9 +2450,12 @@ def _collect_imports(
 
 
 def _collect_exports(tree: Node) -> dict[str, str]:
-    """exported name → local identifier (``default`` for default export)."""
+    """exported name → local identifier (``default`` for default export).
+
+    Only statements can export: the file itself and its export / expression /
+    declaration statements are read (reading every node's text was quadratic)."""
     out: dict[str, str] = {}
-    for node in walk(tree):
+    for node in [tree, *typed_walk(tree, _EXPORT_NODES, JS_TYPES)]:
         raw = text(node)
         if node.type not in {"export_statement", "expression_statement", "lexical_declaration"}:
             if not raw.strip().startswith("export ") and "module.exports" not in raw:
@@ -2511,9 +2534,7 @@ def _collect_cross_mounts(
 ) -> list[tuple[str, str, str, str, str]]:
     """(parent_mod, parent_recv, prefix, child_mod, child_router_name)."""
     mounts: list[tuple[str, str, str, str, str]] = []
-    for node in walk(tree):
-        if node.type != "call_expression":
-            continue
+    for node in typed_walk(tree, frozenset({"call_expression"}), JS_TYPES):
         method = call_callee_name(node).lower()
         if method not in {"route", "use", "group"}:
             continue
@@ -2540,9 +2561,7 @@ def _collect_cross_mounts(
             child_mod, child_name = module, sub_name
         mounts.append((module, parent, prefix, child_mod, child_name))
     # ``const admin = app.group('/admin')`` / ``const x = parent.route('/x')``
-    for node in walk(tree):
-        if node.type != "variable_declarator":
-            continue
+    for node in typed_walk(tree, frozenset({"variable_declarator"}), JS_TYPES):
         name = _declarator_name(node)
         value = node.child_by_field_name("value")
         if not name or value is None or value.type != "call_expression":
@@ -2589,16 +2608,12 @@ def _propagate_router_mounts(
 def _collect_class_ctors(tree: Node) -> dict[str, list[str]]:
     """class Foo { constructor(private client: AxiosInstance) {} } → {Foo: [client]}."""
     out: dict[str, list[str]] = {}
-    for node in walk(tree):
-        if node.type not in {"class_declaration", "class"}:
-            continue
+    for node in typed_walk(tree, frozenset({"class_declaration", "class"}), JS_TYPES):
         name_n = node.child_by_field_name("name")
         name = text(name_n) if name_n else ""
         if not name:
             continue
-        for child in walk(node):
-            if child.type not in {"method_definition", "method_signature", "function"}:
-                continue
+        for child in typed_walk(node, frozenset({"method_definition", "method_signature", "function"}), JS_TYPES):
             meth_n = child.child_by_field_name("name")
             meth = text(meth_n) if meth_n else ""
             if meth != "constructor" and not text(child).lstrip().startswith("constructor"):
@@ -2619,9 +2634,7 @@ def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, J
             return
         params = _fn_param_names(fn_node)
         local_bases: dict[str, str] = {}
-        for node in walk(fn_node):
-            if node.type != "variable_declarator":
-                continue
+        for node in typed_walk(fn_node, frozenset({"variable_declarator"}), JS_TYPES):
             dname = _declarator_name(node)
             value = node.child_by_field_name("value")
             if not dname or value is None:
@@ -2638,9 +2651,7 @@ def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, J
             if body.type == "identifier" and text(body) in local_bases:
                 factories[name] = JsClientFactory(base=local_bases[text(body)], params=params)
                 return
-        for node in walk(fn_node):
-            if node.type not in {"return_statement", "return"}:
-                continue
+        for node in typed_walk(fn_node, frozenset({"return_statement", "return"}), JS_TYPES):
             expr = node.named_children[0] if node.named_children else None
             if expr is None:
                 continue
@@ -2653,7 +2664,7 @@ def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, J
                 factories[name] = JsClientFactory(base=local_bases[text(expr)], params=params)
                 return
 
-    for node in walk(tree):
+    for node in typed_walk(tree, _FN_OR_DECL, JS_TYPES):
         if node.type in {"function_declaration", "function", "method_definition"}:
             name_n = node.child_by_field_name("name")
             consider(text(name_n) if name_n else "", node)
@@ -2871,7 +2882,7 @@ def _propagate_client_bases(
     for module, tree in trees_by_mod.items():
         consts = consts_by_mod.get(module) or {}
         params: dict[str, list[str]] = {}
-        for node in walk(tree):
+        for node in typed_walk(tree, _FN_OR_DECL, JS_TYPES):
             if node.type in {"function_declaration", "function", "method_definition"}:
                 name_n = node.child_by_field_name("name")
                 name = text(name_n) if name_n else ""
@@ -2981,14 +2992,8 @@ def _propagate_client_bases(
             clients = clients_by_mod.setdefault(module, {})
             factories = factories_by_mod.get(module) or {}
             consts = consts_by_mod.get(module) or {}
-            for node in walk(tree):
-                if node.type in {
-                    "function_declaration",
-                    "function",
-                    "function_expression",
-                    "arrow_function",
-                    "method_definition",
-                }:
+            for node in typed_walk(tree, _FN_NODES, JS_TYPES):
+                if node.type in _FN_NODES:
                     for pname, typ in _fn_param_entries(node):
                         if not _type_is_http_client(typ, clients):
                             continue
@@ -3002,9 +3007,7 @@ def _propagate_client_bases(
                         elif base and clients.get(pname) != base:
                             clients[pname] = base
                             changed = True
-            for node in walk(tree):
-                if node.type != "variable_declarator":
-                    continue
+            for node in typed_walk(tree, frozenset({"variable_declarator"}), JS_TYPES):
                 name = _declarator_name(node)
                 value = node.child_by_field_name("value")
                 if not name or value is None or value.type != "call_expression":
@@ -3019,7 +3022,7 @@ def _propagate_client_bases(
                     if clients.get(name) != base:
                         clients[name] = base
                         changed = True
-            for node in walk(tree):
+            for node in typed_walk(tree, frozenset({"call_expression", "new_expression"}), JS_TYPES):
                 if node.type == "call_expression":
                     if _bind_client_args(module, clients, node, call_callee_name(node)):
                         changed = True
@@ -3965,7 +3968,7 @@ def _transparent_arg(call: Node) -> Node | None:
 
 def _helper_candidates(tree: Node):
     """Yield (helper name, function node), including object members (`paths.site`)."""
-    for node in walk(tree):
+    for node in typed_walk(tree, frozenset({"variable_declarator", "function_declaration"}), JS_TYPES):
         if node.type == "variable_declarator":
             name = _declarator_name(node)
             value = node.child_by_field_name("value")

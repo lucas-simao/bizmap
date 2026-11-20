@@ -50,6 +50,7 @@ jobs:
           python scripts/bench_go.py 500 1000 2000 4000
           python scripts/bench_go.py 1000 4000 --heavy --all-files
           python scripts/bench_go.py --client 800
+          python scripts/bench_js.py 1000 2000 4000
       - name: Performance checks (pytest -m perf)
         run: pip install pytest && pytest -q -s -m perf
       - name: Scale benchmark (informational)
