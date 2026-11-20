@@ -309,6 +309,9 @@ def test_trigger_that_does_not_fire_is_not_a_risk() -> None:
     g = checkout_graph()
     g.add_node("db_trigger:orders_touch", "db_trigger", name="orders_touch", table="orders", timing="AFTER",
                events=["UPDATE"], function="touch", evidence={"file": "db/schema.sql", "line": 60})
+    g.add_node("function:sql.touch", "function", name="touch")
+    g.add_edge("triggers", "db_trigger:orders_touch", "function:sql.touch")
+    g.add_edge("writes", "function:sql.touch", "table:audit_log")
     imp = compute_impact(g, _diff(("api/repository/orders.go", 15)))  # InsertOrder only
     md = render_markdown(g, imp, shared_services=9)
     assert "fires trigger `orders_audit`" in md and "orders_touch`" not in md.split("<details")[0]
@@ -382,3 +385,49 @@ def test_cli_full_out_from_one_impact(tmp_path: Path) -> None:
     text = full.read_text(encoding="utf-8")
     assert "more function(s) with impact not shown" not in text and "Orders.Cancel" in text
     assert "```mermaid" not in text and f"{BLOB}/api/handlers/orders.go#L25-L48" in text
+
+
+def test_trigger_without_known_effect_is_unknown_not_no() -> None:
+    """Its function is not in the scanned schema: the scan can't record a firing."""
+    g = checkout_graph()
+    g.add_node("db_trigger:orders_stamp", "db_trigger", name="orders_stamp", table="orders", timing="AFTER",
+               events=["UPDATE"], function="stamp", evidence={"file": "db/schema.sql", "line": 70})
+    g.add_edge("triggers", "db_trigger:orders_stamp", "table:orders")  # what the scan does without the function
+    md = render_markdown(g, compute_impact(g, _diff(("api/repository/orders.go", 35))))  # SetStatus: UPDATE
+    row = next(ln for ln in md.splitlines() if ln.startswith("| ⚡ `orders_stamp`"))
+    assert "unknown (its function was not scanned or has no known effect)" in row, row
+    assert "orders_stamp" not in md.split("<details")[0]  # not a risk reason
+
+
+def test_norm_matches_posix_paths() -> None:
+    from pathlib import PurePosixPath
+
+    from bizmap.impact import _norm
+
+    for p in ["", ".", "./a/b.go", "a//b/./c.py", "a/b/", "/abs/x.ts", "a\\b\\c.go", "./", "a/./", "x"]:
+        want = PurePosixPath(p.replace("\\", "/")).as_posix()
+        want = "" if want == "." else want.removeprefix("./")
+        assert _norm(p) == want, (p, _norm(p), want)
+
+
+@pytest.mark.perf
+def test_render_is_linear_in_edges() -> None:
+    """Folding used to scan every edge of the graph for each changed caller."""
+    import time
+
+    g = Graph()
+    g.attrs["repo_roots"] = {"x": "."}
+    diff = []
+    for i in range(2000):
+        a = _fn(g, "", f"pkg.h{i}", f"h{i}.py", 1, 9)
+        b = _fn(g, "", f"pkg.s{i}", f"s{i}.py", 1, 9)
+        g.add_edge("calls", a, b)
+        g.add_edge("writes", b, _col(g, f"t{i % 40}", "c"), evidence=_ev(f"s{i}.py", 3))
+        diff += [(f"h{i}.py", 2), (f"s{i}.py", 2)]
+    for i in range(60000):  # unrelated edges elsewhere in the graph
+        g.add_edge("reads", f"function:other.f{i}", f"column:u{i % 99}.c", evidence=_ev("o.py", 1))
+    imp = compute_impact(g, _diff(*diff))
+    t = time.perf_counter()
+    render_markdown(g, imp, details_url=RUN)
+    render_markdown(g, imp, max_rows=100_000, max_chars=1_000_000, max_bytes=1_000_000)
+    assert time.perf_counter() - t < 2, time.perf_counter() - t  # was ~5.8 s before the index

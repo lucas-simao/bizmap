@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from collections import deque
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -218,9 +219,16 @@ class Impact:
         }
 
 
+@lru_cache(maxsize=65536)
 def _norm(path: str) -> str:
-    p = PurePosixPath(path.replace("\\", "/")).as_posix()
-    return "" if p == "." else p.removeprefix("./")
+    """`./a//b/./c/` → `a/b/c` (string ops: called for every function node)."""
+    p = path.replace("\\", "/")
+    if p in {"", "."}:
+        return ""
+    if "//" in p or "/." in p or p.startswith("./") or p.endswith("/"):
+        parts = [x for x in p.split("/") if x not in {"", "."}]
+        p = ("/" if p.startswith("/") else "") + "/".join(parts)
+    return p
 
 
 def _join(*parts: str) -> str:
@@ -788,6 +796,12 @@ def _code(text: str) -> str:
     return f"`{text}`"
 
 
+def _first_labels(graph: Graph, ids: set[str] | list[str], n: int) -> list[str]:
+    """Short labels of the first ``n`` ids (by id), padded so ``_names`` counts the rest."""
+    ordered = sorted(ids)
+    return sorted(_short_fn(graph, f) for f in ordered[:n]) + ordered[n:]
+
+
 def _names(items: list[str], n: int = 4) -> str:
     shown = ", ".join(_code(i) for i in items[:n])
     return shown + (f" +{len(items) - n}" if len(items) > n else "")
@@ -852,6 +866,7 @@ class _Facts:
     fired: dict[str, set[str]]  # db_trigger id → tables (fired by a write in the reach)
     table_triggers: dict[str, list[str]]  # written table → db_trigger ids on it
     fired_on: dict[str, list[str]]  # written table → triggers these writes actually fire
+    no_effect: set[str]  # triggers whose function has no known effect
     http: list[Any]  # calls_http edges on the way to or from the change
     notes: list[str]
     low_conf: int
@@ -943,6 +958,14 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
             table_triggers.setdefault(written_names[tname], []).append(nid)
     for t in table_triggers:
         table_triggers[t].sort()
+    # a trigger whose function was not scanned (or writes/reads nothing BizMap
+    # sees) never records a firing: "unknown", not "no"
+    no_effect: set[str] = set()
+    for tid in {x for ts in table_triggers.values() for x in ts}:
+        fns = [e.to_id for e in out_idx.get(tid, []) if e.type == "triggers"
+               and (graph.get(e.to_id) or Node("", "")).type == "function"]
+        if not any(e.type in {"reads", "writes"} for f in fns for e in out_idx.get(f, [])):
+            no_effect.add(tid)
 
     services: dict[str, list[str]] = {}
     if _multi_repo(graph) and tables:
@@ -994,6 +1017,7 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
     facts = _Facts(
         tables=tables, services=services, ep_fns=ep_fns, direct=direct, fired=fired,
         table_triggers=table_triggers,
+        no_effect=no_effect,
         fired_on={t: [x for x in ts if x in fired] for t, ts in table_triggers.items() if any(x in fired for x in ts)},
         http=[http[k] for k in sorted(http)], notes=notes,
         low_conf=len(low), columns=columns, risk="none", reasons=[],
@@ -1117,7 +1141,7 @@ def render_mermaid(
 
     dropped = 0
     for fi in impact.functions:
-        eps = sorted(fi.entrypoints, key=lambda e: _label(graph, e))
+        eps = sorted(fi.entrypoints)  # by id; only the drawn ones get labels
         tables_w = _tables_only(fi.writes)
         tables_r = [t for t in _tables_only(fi.reads) if t not in tables_w]
         new = 1 + sum(1 for e in eps[:per_function] if e not in ids) + (1 if len(eps) > per_function else 0)
@@ -1171,9 +1195,14 @@ def _fold_pass_through(graph: Graph, functions: list[FunctionImpact]) -> dict[st
     calls `cancelOrder`): one row instead of two."""
     by_id = {f.function: f for f in functions}
     calls: dict[str, set[str]] = {}
+    data: dict[str, list[Any]] = {}  # reads/writes of the changed functions, by source (one pass)
     for edge in graph.edges.values():
-        if edge.type == "calls" and edge.from_id in by_id and edge.to_id in by_id:
+        if edge.from_id not in by_id:
+            continue
+        if edge.type == "calls" and edge.to_id in by_id:
             calls.setdefault(edge.from_id, set()).add(edge.to_id)
+        elif edge.type in {"reads", "writes"} and edge.evidence is not None:
+            data.setdefault(edge.from_id, []).append(edge)
     folded: dict[str, str] = {}
 
     def key(f: FunctionImpact) -> tuple:
@@ -1190,14 +1219,12 @@ def _fold_pass_through(graph: Graph, functions: list[FunctionImpact]) -> dict[st
         end = node.attrs.get("end_line")
         if not isinstance(start, int) or not isinstance(end, int):
             return False
-        for e in graph.edges.values():
-            if e.from_id != fid or e.type not in {"reads", "writes"} or e.evidence is None:
-                continue
+        for e in data.get(fid, ()):
             if e.evidence.file == nev.get("file") and start <= e.evidence.line <= end:
                 return True
         return False
 
-    own_data = {fid for fid in by_id if runs_sql(fid)}
+    own_data = {fid for fid in calls if runs_sql(fid)}  # only callers can be folded
     for caller in sorted(calls):
         if caller in own_data:
             continue  # it runs SQL itself: worth its own row even with the same reach
@@ -1249,7 +1276,13 @@ def _other_unmapped(impact: Impact) -> str:
 
 
 def _weight(fi: FunctionImpact) -> int:
-    return len(fi.entrypoints) + len(_tables_only(fi.writes)) + len(_tables_only(fi.reads))
+    key = (len(fi.entrypoints), len(fi.writes), len(fi.reads))
+    cached = fi.__dict__.get("_weight")
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    w = len(fi.entrypoints) + len(_tables_only(fi.writes)) + len(_tables_only(fi.reads))
+    fi.__dict__["_weight"] = (key, w)
+    return w
 
 
 def _details(title: str, body: list[str], *, open_: bool = False) -> list[str]:
@@ -1287,7 +1320,13 @@ def render_markdown(
         max_chars = min(max_chars, max_bytes)
     from bizmap import __version__
 
-    facts = _gather(graph, impact, shared_services)
+    # the comment and `--full-out` render the same impact: gather once
+    memo = impact.__dict__.setdefault("_render_memo", {})
+    mkey = (id(graph), shared_services, len(impact.functions), len(impact.schema_changes))
+    if mkey not in memo:
+        memo.clear()
+        memo[mkey] = (_gather(graph, impact, shared_services), _fold_pass_through(graph, impact.functions))
+    facts, folded = memo[mkey]
     links = _Links(blob_url)
     prefix = getattr(impact, "prefix", ".") or "."
     head = [MARKER, RISK_MARKER.format(facts.risk), f"### BizMap impact · {_RISK_TITLE[facts.risk]}", ""]
@@ -1334,7 +1373,6 @@ def render_markdown(
         text = "\n".join(body + footer) + "\n"
         return text if size(text) <= max_chars else _hard_cut(text, head, max_chars, details_url, size)
 
-    folded = _fold_pass_through(graph, impact.functions)
     reaching = sorted(
         (f for f in impact.functions if _weight(f) and f.function not in folded),
         key=lambda f: (-_weight(f), f.function),
@@ -1391,10 +1429,15 @@ def render_markdown(
         ids = _known(ids) if data else ids
         if not ids:
             return "—"
-        names = data_labels(ids) if data else [_label(graph, i) for i in ids]
+        if data:
+            names = data_labels(ids)
+            total = len(names)
+        else:  # only the shown ones are labelled (a hot function has thousands of callers)
+            total = len(ids)
+            names = [_label(graph, i) for i in ids[:8]]
         labels = [_code(n) for n in names[:8]]
-        if len(names) > 8:
-            labels.append(f"+{len(names) - 8}")
+        if total > 8:
+            labels.append(f"+{total - 8}")
         return "<br>".join(labels)
 
     def fn_cell(fi: FunctionImpact) -> str:
@@ -1421,7 +1464,7 @@ def render_markdown(
             word = _KIND_WORD.get(str(node.attrs.get("kind")), "entrypoint")
             mark = " · **handler changed**" if ep in facts.direct else ""
             path, line, _end = _node_where(graph, ep, prefix)
-            fns = sorted(_short_fn(graph, f) for f in facts.ep_fns[ep])
+            fns = _first_labels(graph, facts.ep_fns[ep], 3)
             rows.append(f"| {word} | {_code(_label(graph, ep))}{mark} | {links.where(path, line)} | {_names(fns, 3)} |")
         if len(order) > cap:
             rows.append(f"\n+{len(order) - cap} more {_plural(len(order) - cap, 'entrypoint')}.")
@@ -1453,7 +1496,7 @@ def render_markdown(
                 w += f", +{len(use.written) - 8}"
             if len(r_cols) > 8:
                 r += f", +{len(r_cols) - 8}"
-            fns = sorted(_short_fn(graph, f) for f in use.functions)
+            fns = _first_labels(graph, use.functions, 3)
             rows.append(f"| {name} | {w} | {r} | {_names(fns, 3)} |")
         if len(order) > cap:
             rows.append(f"\n+{len(order) - cap} more {_plural(len(order) - cap, 'table')}.")
@@ -1472,7 +1515,12 @@ def render_markdown(
             when = " ".join(
                 x for x in [str(a.get("timing") or ""), " OR ".join(str(e) for e in events) if isinstance(events, list) else str(events)] if x
             )
-            fires = "**yes**" if tid in facts.fired else "no (the writes don't match its events)"
+            if tid in facts.fired:
+                fires = "**yes**"
+            elif tid in facts.no_effect:
+                fires = "unknown (its function was not scanned or has no known effect)"
+            else:
+                fires = "no (the writes don't match its events)"
             path, line, _e = _node_where(graph, tid, prefix)
             rows.append(
                 f"| ⚡ {_code(_label(graph, tid))} | {_code(str(a.get('table') or '?'))} | {when or '—'} | {fires} | {links.where(path, line)} |"
