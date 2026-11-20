@@ -11,13 +11,13 @@ from pathlib import Path
 from tree_sitter import Language, Node, Parser
 
 from bizmap.detect.tsutil import (
-    clear_parent_index,
-    index_deep_tree,
-    parent_of,
     call_args,
     call_callee_name,
+    clear_parent_index,
     flatten_plus,
+    index_deep_tree,
     line_of,
+    parent_of,
     text,
     unwrap_callee_expr,
     walk,
@@ -984,6 +984,7 @@ class JsAnalyzer:
         _REEXPORTS.clear()
         _LITERAL_TOP.clear()
         _SCOPE_BINDINGS.clear()
+        _ENCLOSING_SYMBOL.clear()
         clear_parent_index()
         yaml_constants = constants or {}
         path_aliases = _ts_path_aliases(root)
@@ -1918,15 +1919,32 @@ def _fn_qual(fn: Node, module: str) -> str | None:
     return ".".join([module, *reversed(chain)])
 
 
+_ENCLOSING_SYMBOL: dict[tuple[str, int, int, int], str] = {}
+
+
 def _enclosing_symbol(node: Node, module: str) -> str:
+    """Qualified name of the nearest named function above ``node``. Memoized
+    for every node on the climb (cleared in `analyze`), so the many calls of
+    one long function do not each climb to it."""
+    path: list[tuple[str, int, int, int]] = []
     cur = parent_of(node)
+    found = f"{module}.module"
     while cur is not None:
+        key = (module, cur.id, cur.start_byte, cur.end_byte)
+        hit = _ENCLOSING_SYMBOL.get(key)
+        if hit is not None:
+            found = hit
+            break
+        path.append(key)
         if cur.type in _NAMED_FN_TYPES or cur.type == "arrow_function":
             qual = _fn_qual(cur, module)
             if qual:
-                return qual
+                found = qual
+                break
         cur = parent_of(cur)
-    return f"{module}.module"
+    for key in path:
+        _ENCLOSING_SYMBOL[key] = found
+    return found
 
 
 _FN_SCOPE_TYPES = {

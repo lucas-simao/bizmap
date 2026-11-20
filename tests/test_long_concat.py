@@ -144,3 +144,23 @@ def test_python_deep_method_chain_and_long_constant_are_linear(tmp_path) -> None
     writers = {graph.nodes[e.from_id].attrs.get("label") or e.from_id for e in graph.edges.values() if e.type == "writes"}
     assert any("chain" in w for w in writers) and any("save" in w for w in writers), writers
     assert elapsed < 60, elapsed  # was minutes on slow machines; seconds now
+
+
+def test_js_long_else_if_chains_are_fast(tmp_path) -> None:
+    """Round 37: 800 `else if` branches with calls took ~30 s (scope bindings
+    recomputed per call, parent climbs in a deep tree)."""
+    import time
+
+    from bizmap.scan import scan_path
+
+    (tmp_path / "schema.sql").write_text("CREATE TABLE orders (id int primary key, status int);\n")
+    body = "export function pick(x: string, db: any) {\n"
+    body += "  if (x === 'k0') { return db.query(`UPDATE orders SET status = 0`); }\n"
+    body += "".join(f"  else if (x === 'k{i}') {{ return fmt(`v${{x}}{i}`); }}\n" for i in range(1, 800))
+    body += "}\n"
+    (tmp_path / "pick.ts").write_text(body)
+    t0 = time.perf_counter()
+    graph = scan_path(tmp_path)
+    elapsed = time.perf_counter() - t0
+    assert any(e.type == "writes" for e in graph.edges.values())
+    assert elapsed < 30, elapsed
