@@ -120,6 +120,7 @@ class FunctionImpact:
 class Impact:
     functions: list[FunctionImpact]
     unmapped_files: list[str]
+    hint: str | None = None
 
     @property
     def entrypoints(self) -> list[str]:
@@ -140,6 +141,7 @@ class Impact:
             "writes": self.writes,
             "reads": self.reads,
             "unmapped_files": self.unmapped_files,
+            "hint": self.hint,
         }
 
 
@@ -164,6 +166,8 @@ def _function_file(node: Node, graph: Graph, prefix: str) -> str | None:
         return None
     roots = graph.attrs.get("repo_roots") or {}
     root = roots.get(_repo_of(node, graph), ".") if roots else "."
+    if graph.attrs.get("repo_roots_base") == "git":
+        return _join(root, str(file))  # already relative to the git root
     return _join(prefix, root, str(file))
 
 
@@ -257,7 +261,17 @@ def compute_impact(graph: Graph, diff_text: str, *, prefix: str = ".") -> Impact
                 reads=sorted(reads),
             )
         )
-    return Impact(functions=out, unmapped_files=unmapped)
+    hint = None
+    if changes and len(unmapped) == len(changes):
+        roots = sorted(set((graph.attrs.get("repo_roots") or {}).values())) or ["."]
+        hint = (
+            "none of the changed paths is under a scanned root "
+            f"({', '.join(roots[:5])}{', …' if len(roots) > 5 else ''}"
+            + (f"; prefix {prefix!r}" if graph.attrs.get("repo_roots_base") != "git" else "")
+            + "). "
+            + ("Pass --prefix <dir given to bizmap scan>." if graph.attrs.get("repo_roots_base") != "git" else "")
+        ).strip()
+    return Impact(functions=out, unmapped_files=unmapped, hint=hint)
 
 
 # ── rendering ────────────────────────────────────────────────────────────────
@@ -364,6 +378,9 @@ def render_markdown(
         if impact.unmapped_files:
             head.append("")
             head.append(f"{len(impact.unmapped_files)} changed file(s) have no mapped function.")
+        if impact.hint:
+            head.append("")
+            head.append(f"Note: {impact.hint}")
         return "\n".join(head) + "\n"
     reaching = sorted(
         (f for f in impact.functions if _weight(f)), key=lambda f: (-_weight(f), f.function)

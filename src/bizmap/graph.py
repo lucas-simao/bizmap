@@ -233,6 +233,8 @@ class Graph:
         roots = self.attrs.get("repo_roots")
         if roots:
             payload["repo_roots"] = dict(sorted(roots.items()))
+            if self.attrs.get("repo_roots_base"):
+                payload["repo_roots_base"] = self.attrs["repo_roots_base"]
         services = self.attrs.get("services")
         if services:
             payload["services"] = sort_list_attrs(services)
@@ -260,6 +262,7 @@ class Graph:
         graph.attrs["repos"] = data.get("repos") or []
         graph.attrs["services"] = data.get("services") or {}
         graph.attrs["repo_roots"] = data.get("repo_roots") or {}
+        graph.attrs["repo_roots_base"] = data.get("repo_roots_base")
         graph.attrs["queues"] = data.get("queues") or {}
         graph.attrs["unresolved_http"] = data.get("unresolved_http") or []
         for raw in data.get("nodes") or []:

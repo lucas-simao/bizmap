@@ -148,6 +148,17 @@ def merge_graphs(graphs: list[Graph], *, version: str | None = None) -> Graph:
     if schema_views:
         merged.schema["views"] = schema_views
     merged.attrs["repos"] = repos
+    roots: dict[str, str] = {}
+    bases: set[str] = set()
+    for graph in graphs:
+        name = repo_name_of(graph)
+        for k, v in (graph.attrs.get("repo_roots") or {}).items():
+            roots.setdefault(str(k or name), str(v))
+        if graph.attrs.get("repo_roots"):
+            bases.add(str(graph.attrs.get("repo_roots_base") or "scan"))
+    if roots:
+        merged.attrs["repo_roots"] = roots
+        merged.attrs["repo_roots_base"] = "git" if bases == {"git"} else "scan"
     services: dict = {}
     queues: dict = {}
     for graph in graphs:
@@ -173,6 +184,8 @@ def graph_from_json(data: dict[str, Any]) -> Graph:
     graph.attrs["database"] = graph.database
     graph.attrs["repos"] = data.get("repos") or []
     graph.attrs["services"] = data.get("services") or {}
+    graph.attrs["repo_roots"] = data.get("repo_roots") or {}
+    graph.attrs["repo_roots_base"] = data.get("repo_roots_base")
     graph.attrs["queues"] = data.get("queues") or {}
     graph.attrs["unresolved_http"] = data.get("unresolved_http") or []
     return graph

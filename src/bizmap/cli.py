@@ -338,6 +338,8 @@ def impact_cmd(
         raise click.ClickException(f"invalid graph JSON: {exc}") from exc
     diff_text = sys.stdin.read() if str(diff_path) == "-" else diff_path.read_text(encoding="utf-8")
     result = compute_impact(graph, diff_text, prefix=prefix)
+    if result.hint:
+        click.echo(f"warning: {result.hint}", err=True)
     if as_json:
         click.echo(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     else:
