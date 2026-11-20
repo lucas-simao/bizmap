@@ -81,7 +81,9 @@ def _code_span(tree: Any, line: int) -> tuple[int, int] | None:
         if inner:
             best = max(inner, key=lambda n: n.end_point[0] - n.start_point[0])
             return node.start_point[0] + 1, best.end_point[0] + 1
-    return None
+    # anchored to a call, not a definition (`supabase.rpc(...)` inside a
+    # handler): the line itself, so the enclosing handler still owns the rest
+    return line, line
 
 
 def _sql_span(lines: list[str], line: int) -> tuple[int, int] | None:
