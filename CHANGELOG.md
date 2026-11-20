@@ -10,6 +10,15 @@
   function body). Climbing from each literal to the top of such a chain is
   memoized too (tree-sitter's `node.parent` walks from the root, which made a
   5,000-term chain take minutes); it now scans in seconds.
+- **Generated code is skipped by default**: `.yarn/`, `out/`, `coverage/`,
+  `.next/`, `.nuxt/`, `.svelte-kit/`, `.turbo/`, `.cache/` and similar build
+  dirs (besides `dist/`, `build/`, `node_modules/`, `vendor/`), `*.min.js`,
+  `*.bundle.js`, `*.chunk.js`, JS files ending in a `sourceMappingURL`, and
+  minified JS (very long lines). `.gitignore` files are honoured (nested ones
+  and those above a scanned subdirectory too, `!` re-includes). The graph
+  records how much was skipped (`skipped`). Bring things back with
+  `scan: {include: [".yarn", "public/app.js"], skip_generated: false, gitignore: false}`
+  in bizmap.yaml.
 - **A detector crash on one file no longer aborts the scan**: the files that
   make it fail are found, skipped and reported in the graph's `warnings`; the
   rest of the repo is analysed as usual.

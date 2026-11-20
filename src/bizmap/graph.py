@@ -230,6 +230,9 @@ class Graph:
         repos = self.attrs.get("repos")
         if repos:
             payload["repos"] = sort_list_attrs(repos)
+        skipped = self.attrs.get("skipped")
+        if skipped:
+            payload["skipped"] = dict(sorted(skipped.items()))
         roots = self.attrs.get("repo_roots")
         if roots:
             payload["repo_roots"] = dict(sorted(roots.items()))
@@ -263,6 +266,7 @@ class Graph:
         graph.attrs["services"] = data.get("services") or {}
         graph.attrs["repo_roots"] = data.get("repo_roots") or {}
         graph.attrs["repo_roots_base"] = data.get("repo_roots_base")
+        graph.attrs["skipped"] = data.get("skipped") or {}
         graph.attrs["queues"] = data.get("queues") or {}
         graph.attrs["unresolved_http"] = data.get("unresolved_http") or []
         for raw in data.get("nodes") or []:

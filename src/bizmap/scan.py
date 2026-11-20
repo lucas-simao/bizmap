@@ -11,7 +11,7 @@ from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
 from bizmap.detect.js_lang import JsAnalysis, JsAnalyzer
 from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer
 from bizmap.detect.rules import load_rules
-from bizmap.files import discover_sql_files, iter_files, rel
+from bizmap.files import WalkOptions, discover_sql_files, iter_files, rel
 from bizmap.graph import (
     GRAPH_VERSION,
     Confidence,
@@ -1854,6 +1854,9 @@ def _config_for_root(
     constants = dict(cfg.constants)
     constants.update(local.constants)
     return ScanConfig(
+        include=list(dict.fromkeys([*cfg.include, *local.include])),
+        gitignore=cfg.gitignore and local.gitignore,
+        skip_generated=cfg.skip_generated and local.skip_generated,
         exclude=exclude,
         expand_star=bool(cfg.expand_star or local.expand_star),
         path=local.path or cfg.path,
@@ -2088,11 +2091,17 @@ def _scan_one(
     graph.version = GRAPH_VERSION
 
     t0 = time.perf_counter()
-    sql_files = discover_sql_files(root, exclude=exclude_pats)
+    walk = WalkOptions(include=cfg.include, gitignore=cfg.gitignore, skip_generated=cfg.skip_generated)
+    sql_files = discover_sql_files(root, exclude=exclude_pats, options=walk)
     schema = replay_files(sql_files, root)
-    go_files = iter_files(root, [".go"], exclude=exclude_pats)
-    py_files = iter_files(root, [".py"], exclude=exclude_pats)
-    js_files = iter_files(root, [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"], exclude=exclude_pats)
+    go_files = iter_files(root, [".go"], exclude=exclude_pats, options=walk)
+    py_files = iter_files(root, [".py"], exclude=exclude_pats, options=walk)
+    js_files = iter_files(
+        root, [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"], exclude=exclude_pats, options=walk
+    )
+    if walk.stats:
+        # how much was left out (generated dirs/files, .gitignore), for `scan` output
+        graph.attrs["skipped"] = dict(sorted(walk.stats.items()))
     timings.parse += time.perf_counter() - t0
 
     failures: list[str] = []
