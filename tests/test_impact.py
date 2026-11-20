@@ -914,3 +914,94 @@ def test_const_function_expression_is_a_node(tmp_path: Path) -> None:
         {"svc/use.ts": "const fe = function (n: number) { return n };\nexport function u() { return fe(1) }\n"},
     )
     assert got == {"function:svc.use.fe"}, got
+
+
+def test_function_expression_named_by_binding(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/use.ts": (
+                "const topNamed = function topN() { return 1 };\n"
+                "export function u() { return topNamed() }\n"
+                "export function v() { return topN() }\n"
+                "export function w() {\n"
+                "  const inner = function innerN() { return 2 };\n"
+                "  return inner();\n"
+                "}\n"
+                "export function x() { return innerN() }\n"
+            ),
+        },
+    )
+    calls = {(e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls"}
+    assert ("function:svc.use.u", "function:svc.use.topNamed") in calls, calls
+    assert ("function:svc.use.w", "function:svc.use.w.inner") in calls, calls
+    assert not [c for c in calls if c[0] in {"function:svc.use.v", "function:svc.use.x"}], calls
+    assert "function:svc.use.topN" not in graph.nodes
+
+
+def test_same_inner_name_function_expressions_are_two_nodes(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/use.ts": (
+                "export function u() {\n"
+                "  const a1 = function dupn() { return 1 };\n"
+                "  const a2 = function dupn() { return 2 };\n"
+                "  return a1() + a2();\n"
+                "}\n"
+            ),
+        },
+    )
+    got = {t for f, t in _calls_from(graph, "function:svc.use.u")}
+    assert got == {"function:svc.use.u.a1", "function:svc.use.u.a2"}, got
+
+
+def test_generators_are_nodes(tmp_path: Path) -> None:
+    got = _use_calls(
+        tmp_path,
+        {
+            "svc/use.ts": (
+                "function* gen() { yield 1 }\n"
+                "const g2 = function* () { yield 2 };\n"
+                "export function u() { gen(); g2() }\n"
+            )
+        },
+    )
+    assert got == {"function:svc.use.gen", "function:svc.use.g2"}, got
+
+
+def test_vite_regex_find_and_root_string(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "a/vite.config.ts": (
+                "import path from 'path';\n"
+                "export default { resolve: { alias: [{ find: /^@\\//, replacement: path.resolve(__dirname, 'src') + '/' }] } };\n"
+            ),
+            "a/src/fmt.ts": "export function fmt() { return 1 }\n",
+            "a/src/page.ts": "import { fmt } from '@/fmt';\nexport function page() { return fmt() }\n",
+            "b/vite.config.ts": "export default { resolve: { alias: { '~': '/src' } } };\n",
+            "b/src/fmt.ts": "export function fmt() { return 2 }\n",
+            "b/src/page.ts": "import { fmt } from '~/fmt';\nexport function page() { return fmt() }\n",
+        },
+    )
+    calls = {(e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls"}
+    assert ("function:a.src.page.page", "function:a.src.fmt.fmt") in calls, calls
+    assert ("function:b.src.page.page", "function:b.src.fmt.fmt") in calls, calls
+
+
+def test_base_tsconfig_only_reaches_extending_apps(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "tsconfig.base.json": '{"compilerOptions": {"baseUrl": ".", "paths": {"@shared/*": ["libs/shared/*"]}}}',
+            "libs/shared/fmt.ts": "export function fmt() { return 1 }\n",
+            "apps/web/tsconfig.json": '{"extends": "../../tsconfig.base.json"}',
+            "apps/web/page.ts": "import { fmt } from '@shared/fmt';\nexport function page() { return fmt() }\n",
+            "apps/solo/tsconfig.json": '{"compilerOptions": {}}',
+            "apps/solo/page.ts": "import { fmt } from '@shared/fmt';\nexport function page() { return fmt() }\n",
+        },
+    )
+    calls = {(e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls"}
+    assert ("function:apps.web.page.page", "function:libs.shared.fmt.fmt") in calls, calls
+    assert not [c for c in calls if c[0] == "function:apps.solo.page.page"], calls

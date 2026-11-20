@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Function expressions are named by their binding**: `const topNamed =
+  function topN() {}` is `<module>.topNamed` and `topNamed()` links to it; the
+  inner name `topN` (only visible inside itself) no longer links from other
+  functions, and two `const a1 = function dupn(){}` / `const a2 = function
+  dupn(){}` are two nodes.
+- **Generators** (`function* gen()`, `const g = function* () {}`) are function
+  nodes.
+- **Vite aliases**: `find` as a simple prefix regex (`/^@\//`) and plain-string
+  values (`'@': '/src'`, root-relative, or `'./src'`) are read.
+- **tsconfig base configs** (`tsconfig.base.json` extended by apps) apply only
+  to the configs that `extend` them, not to every app under their directory.
+
 ## 0.3.4 — 2026-11-20
 
 ### Fixed
@@ -18,15 +34,15 @@
   array form `alias: [{ find: '@', replacement: path.resolve(__dirname, 'src') }]`.
   With several targets (`"~/*": ["src/*", "generated/*"]`) the first one that
   exists is used, like TypeScript.
-- **Named re-exports** (`export { a } from './x'`, `export { a as b } from`,
-  directory barrels, mixed with `export *`) resolve again (regressed in the
-  ambiguous-`export *` change: the barrel's own export map shadowed the
-  re-export).
+- **Named re-exports resolve through barrels**: `export { a } from './x'`,
+  `export { a as b } from`, directory barrels, and barrels mixing named
+  re-exports with `export *`.
 - **`const f = function () {...}`** is a function node like a const arrow.
 
 ### Known limitations
 
-- Webpack `resolve.alias` is not read (tsconfig `paths` and Vite aliases are).
+- Webpack `resolve.alias` is not read (tsconfig `paths` and Vite aliases are);
+  Vite `find` regexes other than a simple prefix (`/^@\//`) are ignored.
 - Two sibling anonymous callbacks that each declare a local `const tick = () =>`
   share the id `<module>.tick`: only one node is kept, so calls to the other
   get no edge (no false edge).
