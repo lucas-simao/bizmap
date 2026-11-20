@@ -1,0 +1,8 @@
+/* Terminal recordings and screenshots: full width, framed like code blocks. */
+.md-typeset img.shot {
+  display: block;
+  margin: 1em auto;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+}
+.md-typeset .grid.cards > ul > li p:first-child strong a { text-decoration: none; }
