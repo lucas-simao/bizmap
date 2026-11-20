@@ -3924,6 +3924,15 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                 if node.type in {"for_statement", "for_in_clause"}:
                     left = node.child_by_field_name("left")
                     right = node.child_by_field_name("right")
+                    if left is None or right is None:
+                        # comprehension clause: the nodes around the `in` keyword
+                        kids = list(node.children)
+                        pos_in = next((i for i, k in enumerate(kids) if k.type == "in"), None)
+                        if pos_in is not None:
+                            before = [k for k in kids[:pos_in] if k.is_named]
+                            after = [k for k in kids[pos_in + 1 :] if k.is_named]
+                            left = left or (before[-1] if before else None)
+                            right = right or (after[0] if after else None)
                     classes = _roster_classes(right)
                     if classes and left is not None:
                         idents = [n for n in walk(left) if n.type == "identifier"]
