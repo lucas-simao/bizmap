@@ -348,12 +348,10 @@ def _schema_changes(
             while start > 0 and ";" not in lines[start - 1]:
                 start -= 1
             stmt = "\n".join(lines[start:ln])
-            m = None
-            for m in _SQL_TABLE_STMT.finditer(stmt):
-                pass
-            if m is None:
+            found = list(_SQL_TABLE_STMT.finditer(stmt))
+            if not found:
                 continue
-            table = m.group(1).replace('"', "").split(".")[-1].lower()
+            table = found[-1].group(1).replace('"', "").split(".")[-1].lower()
             text = lines[ln - 1]
             cm = _SQL_ADD_COLUMN.search(text) or _SQL_COLUMN_DEF.match(text)
             if cm is None or cm.group(1).lower() in _SQL_NOT_COLUMN:
