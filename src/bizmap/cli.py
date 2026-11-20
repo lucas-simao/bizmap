@@ -625,6 +625,76 @@ def mcp_cmd(graph_path: Path, repo_root: Path | None) -> None:
     serve(store)
 
 
+@main.command("export")
+@click.option(
+    "--graph",
+    "graph_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=Path("bizmap.graph.json"),
+    show_default=True,
+    help="Graph JSON produced by `bizmap scan`.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["html", "llm"]),
+    default="html",
+    show_default=True,
+    help="html: one self-contained interactive page (offline). llm: arrives in 0.5.1.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Output file (default: bizmap.html for --format html).",
+)
+@click.option(
+    "--lang",
+    type=click.Choice(["en", "pt-BR"]),
+    default="en",
+    show_default=True,
+    help="Language of the page.",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="bizmap.yaml with `export.services` (split a monorepo into services). "
+    "Default: ./bizmap.yaml when present.",
+)
+def export_cmd(
+    graph_path: Path, fmt: str, out_path: Path | None, lang: str, config_path: Path | None
+) -> None:
+    """Export the graph to share it: `--format html` writes one offline page
+    (services first; click to expand, search, filter by table)."""
+    from bizmap.export import ExportError, export_graph
+
+    if config_path is None and Path("bizmap.yaml").is_file():
+        config_path = Path("bizmap.yaml")
+    try:
+        data = json.loads(graph_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise click.ClickException(
+            f"graph not found: {graph_path}. Create it with `bizmap scan <repo> --out {graph_path}`."
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"{graph_path}: invalid graph JSON: {exc}") from exc
+    try:
+        text = export_graph(data, fmt, lang=lang, config=config_path)
+    except ExportError as exc:
+        raise click.ClickException(str(exc)) from exc
+    out = out_path or Path("bizmap.html")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    size = out.stat().st_size
+    click.echo(
+        f"wrote {out}  ({size / 1_048_576:.1f} MB, {len(data['nodes'])} nodes, "
+        f"{len(data['edges'])} edges) — open it in a browser, no server needed"
+    )
+
+
 @main.group("registry")
 def registry_grp() -> None:
     """Merge and query cross-repo lineage graphs."""
