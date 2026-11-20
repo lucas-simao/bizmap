@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **axios/ky instances through barrels and inline**: imports are resolved to
+  the module that actually defines the name (`index` files,
+  `export { a as b } from`, `export * from`) before client bases propagate, so
+  `import { portalApi } from '../http'` re-exported from `http/index.ts` keeps
+  its `baseURL`; `createOrgClient(axios.create({ baseURL }))` binds the inline
+  instance. The factory may return an object literal or a variable, and may be
+  called inside a hook/function. Go clients whose base arrives as a
+  constructor parameter / struct field and are used through a service field
+  are covered by tests (already resolved).
+
 - **Go Echo groups nested inside a function that receives the group**
   (regression exposed by whole-path matching): `s := g.Group("/org/settings")`
   where `g` is a `*echo.Group` parameter now keeps the caller's prefix
