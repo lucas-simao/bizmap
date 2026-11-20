@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.3.8 — 2026-11-20
+
+### Known limitations
+
+- Firestore collection access from JS/TS is not detected (Python and the
+  Firestore triggers are).
 
 ### Fixed
 
