@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from bizmap.graph import Graph
+from bizmap.graph import Evidence, Graph
 
 _FN_TYPES = {
     # Go
@@ -118,10 +118,29 @@ def _sql_span(lines: list[str], line: int) -> tuple[int, int] | None:
     return line, len(lines)
 
 
-def fill_spans(graph: Graph, root: Path) -> None:
+def _load(cache: dict[str, tuple[list[str], Any]], root: Path, rel: str) -> tuple[list[str], Any]:
+    if rel not in cache:
+        path = root / rel
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            cache[rel] = ([], None)
+            return cache[rel]
+        tree = None
+        parser = _parser_for(path)
+        if parser is not None:
+            try:
+                tree = parser.parse(text.encode("utf-8"))
+            except Exception:  # pragma: no cover - parser failure
+                tree = None
+        cache[rel] = (text.splitlines(), tree)
+    return cache[rel]
+
+
+def fill_spans(graph: Graph, root: Path, cache: dict[str, tuple[list[str], Any]] | None = None) -> None:
     """Set ``end_line`` (and ``start_line`` when it differs from the evidence
     line) on function nodes that lack one. Files are read once each."""
-    cache: dict[str, tuple[list[str], Any]] = {}
+    cache = {} if cache is None else cache
     for node in graph.nodes.values():
         if node.type != "function" or isinstance(node.attrs.get("end_line"), int):
             continue
@@ -130,21 +149,7 @@ def fill_spans(graph: Graph, root: Path) -> None:
         if not rel or not isinstance(line, int):
             continue
         path = root / str(rel)
-        if str(rel) not in cache:
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                cache[str(rel)] = ([], None)
-                continue
-            tree = None
-            parser = _parser_for(path)
-            if parser is not None:
-                try:
-                    tree = parser.parse(text.encode("utf-8"))
-                except Exception:  # pragma: no cover - parser failure
-                    tree = None
-            cache[str(rel)] = (text.splitlines(), tree)
-        lines, tree = cache[str(rel)]
+        lines, tree = _load(cache, root, str(rel))
         if not lines:
             continue
         name = str(node.attrs.get("name") or node.id)
@@ -167,3 +172,130 @@ def fill_spans(graph: Graph, root: Path) -> None:
         node.attrs["end_line"] = end
         if start != line:
             node.attrs["start_line"] = start
+
+
+# ── factory members ──────────────────────────────────────────────────────────
+
+_JS_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
+_JS_FN = {"arrow_function", "function", "function_expression", "generator_function"}
+_MOVABLE = {"calls_http", "calls", "reads", "writes", "enqueues"}
+
+
+def _returned_objects(fn: Any) -> list[Any]:
+    body = fn.child_by_field_name("body")
+    if body is None:
+        return []
+    while body.type == "parenthesized_expression" and body.named_children:
+        body = body.named_children[0]
+    if body.type == "object":
+        return [body]
+    out = []
+    if body.type == "statement_block":
+        for stmt in body.named_children:
+            if stmt.type != "return_statement" or not stmt.named_children:
+                continue
+            expr = stmt.named_children[0]
+            while expr.type == "parenthesized_expression" and expr.named_children:
+                expr = expr.named_children[0]
+            if expr.type == "object":
+                out.append(expr)
+    return out
+
+
+def _members(obj: Any) -> list[tuple[str, Any]]:
+    out = []
+    for child in obj.named_children:
+        if child.type == "pair":
+            key, value = child.child_by_field_name("key"), child.child_by_field_name("value")
+            if key is not None and value is not None and value.type in _JS_FN:
+                out.append((key.text.decode("utf-8", "replace").strip("'\"`"), value))
+        elif child.type == "method_definition":
+            name = child.child_by_field_name("name")
+            if name is not None:
+                out.append((name.text.decode("utf-8", "replace"), child))
+    return out
+
+
+def split_factory_members(
+    graph: Graph, root: Path, cache: dict[str, tuple[list[str], Any]] | None = None
+) -> None:
+    """`createClient(http) { return { a: () => http.get(...), b() {...} } }`:
+    each returned member becomes ``<factory>.<key>`` (a ``calls`` child of the
+    factory) and takes the edges whose evidence is inside it, so a change to
+    ``b`` reaches only ``b``'s routes."""
+    cache = {} if cache is None else cache
+    for node in list(graph.nodes.values()):
+        if node.type != "function" or node.attrs.get("language") != "javascript":
+            continue
+        ev = node.attrs.get("evidence") or {}
+        rel, line, end = ev.get("file"), ev.get("line"), node.attrs.get("end_line")
+        if not rel or not isinstance(line, int) or not isinstance(end, int):
+            continue
+        if Path(str(rel)).suffix.lower() not in _JS_SUFFIXES:
+            continue
+        name = str(node.attrs.get("name") or "")
+        if not name or name.endswith(".module"):
+            continue
+        _lines, tree = _load(cache, root, str(rel))
+        if tree is None:
+            continue
+        start = int(node.attrs.get("start_line") or line)
+        fn = None
+        for cand in _walk(tree.root_node):
+            if (
+                cand.type in _FN_TYPES
+                and cand.end_point[0] + 1 == end
+                and start <= cand.start_point[0] + 1 <= end
+            ):
+                fn = cand
+                break
+        if fn is None:
+            continue
+        members = [m for obj in _returned_objects(fn) for m in _members(obj)]
+        if not members:
+            continue
+        outgoing = [e for e in graph.edges.values() if e.from_id == node.id and e.type in _MOVABLE]
+        # members already measured as functions of their own (method
+        # definitions the detector named) keep their node
+        taken = {
+            ((n.attrs.get("start_line") or (n.attrs.get("evidence") or {}).get("line")), n.attrs.get("end_line"))
+            for n in graph.nodes.values()
+            if n.type == "function" and (n.attrs.get("evidence") or {}).get("file") == rel and n.id != node.id
+        }
+        for key, mnode in members:
+            m_start, m_end = mnode.start_point[0] + 1, mnode.end_point[0] + 1
+            child_name = f"{name}.{key}"
+            child_id = f"function:{child_name}"
+            if child_id in graph.nodes or (m_start, m_end) in taken:
+                continue
+            graph.add_node(
+                child_id,
+                "function",
+                name=child_name,
+                language="javascript",
+                end_line=m_end,
+                parent=node.id,
+                evidence={"file": rel, "line": m_start, "symbol": child_name},
+            )
+            graph.add_edge(
+                "calls",
+                node.id,
+                child_id,
+                evidence=Evidence(file=str(rel), line=m_start, symbol=name),
+                via="returned_member",
+            )
+            for edge in outgoing:
+                e_ev = edge.evidence
+                if e_ev is None or e_ev.file != rel or not (m_start <= e_ev.line <= m_end):
+                    continue
+                if edge.id not in graph.edges:
+                    continue
+                del graph.edges[edge.id]
+                graph.add_edge(
+                    edge.type,
+                    child_id,
+                    edge.to_id,
+                    confidence=edge.confidence,
+                    evidence=e_ev,
+                    **edge.attrs,
+                )

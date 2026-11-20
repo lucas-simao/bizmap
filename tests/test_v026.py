@@ -322,8 +322,11 @@ export function pull() {
     )
     graph = scan_path(tmp_path)
     make = function_id("factory.makeApi")
-    assert _edge(graph, "calls_http", make, "entrypoint:http:GET:/items")
-    assert _edge(graph, "calls_http", make, "entrypoint:http:POST:/orders")
+    # each returned member owns its call; the factory reaches them via `calls`
+    assert _edge(graph, "calls_http", function_id("factory.makeApi.list"), "entrypoint:http:GET:/items")
+    assert _edge(graph, "calls_http", function_id("factory.makeApi.create"), "entrypoint:http:POST:/orders")
+    assert _edge(graph, "calls", make, function_id("factory.makeApi.list"))
+    assert _edge(graph, "calls", make, function_id("factory.makeApi.create"))
     urls = _http_urls(graph)
     assert any("/items" in u for _m, u in urls)
     bare = function_id("factory.makeBare")
