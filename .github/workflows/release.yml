@@ -11,6 +11,12 @@
 # Actions → Release → "Run workflow" and the tag name: this file (from main)
 # checks out and builds that tag.
 #
+# A manual run can be started from any branch, and its jobs use that branch's
+# copy of this file. Only `main` (dispatch) and `v*` tags may publish: the
+# `publish` job checks it, and the `pypi` environment should also be limited to
+# them (Settings → Environments → pypi → Deployment branches and tags: `main`
+# and tag pattern `v*`).
+#
 # Third-party actions are pinned by commit SHA (comment = version).
 name: Release
 
@@ -73,6 +79,7 @@ jobs:
 
   publish:
     needs: build
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment:
       name: pypi
