@@ -12,6 +12,11 @@ at one or more repos and it answers, for every table and column:
 
 No LLM, no tokens, no account, no server. It runs locally, and the same input always produces the same graph.
 
+```bash
+pipx install bizmap        # or: pip install bizmap   (Python 3.11+)
+bizmap --version
+```
+
 Typical questions it answers:
 
 - *Can I drop or rename `orders.status`?* — every reader and writer, in every repo.
@@ -20,12 +25,12 @@ Typical questions it answers:
 
 ## A 30-second demo
 
-[`examples/checkout`](examples/checkout) is three services sharing one Postgres:
+[`examples/checkout`](https://github.com/lucas-simao/bizmap/tree/main/examples/checkout) is three services sharing one Postgres:
 **web** (TypeScript + axios) → **api** (Go + Echo + pgx) → **billing** (Python + FastAPI),
 and billing calls the api back when a payment is confirmed.
 
 ```bash
-pip install -e .
+git clone https://github.com/lucas-simao/bizmap && cd bizmap
 bizmap scan examples/checkout --mermaid
 bizmap why orders.status
 ```
@@ -91,7 +96,7 @@ Three languages, four cross-service hops, every line backed by `file:line`.
 Python 3.11+:
 
 ```bash
-pip install -e .                     # or: uv sync
+pipx install bizmap                  # or: pip install bizmap
 bizmap scan path/to/repo --mermaid   # writes bizmap.graph.json (+ .mmd)
 bizmap why orders.status             # writers, readers, triggers, callers
 bizmap report path/to/repo           # how much of the code BizMap understood
@@ -107,7 +112,7 @@ bizmap registry merge web.json api.json billing.json --out merged.json   # same 
 A whole work folder full of clones and worktrees: `--discover` finds the git
 repos, keeps one copy of each (main checkout, default branch, latest commit) and
 scans them together. `--list` shows the choice and why
-([docs/discover.md](docs/discover.md)):
+([docs/discover.md](https://github.com/lucas-simao/bizmap/blob/main/docs/discover.md)):
 
 ```bash
 bizmap scan --discover ~/work --list
@@ -235,7 +240,7 @@ Claude Desktop (`claude_desktop_config.json`, absolute paths):
 
 Every item carries `evidence` (`file:line`) and, when it comes from an edge, a
 `confidence`; lists are capped (`limit`, default 20) with totals. Setup per client,
-the full input/output contract and troubleshooting: [docs/mcp.md](docs/mcp.md).
+the full input/output contract and troubleshooting: [docs/mcp.md](https://github.com/lucas-simao/bizmap/blob/main/docs/mcp.md).
 
 ## What it understands
 
@@ -249,7 +254,7 @@ the full input/output contract and troubleshooting: [docs/mcp.md](docs/mcp.md).
 When a client or executor cannot be traced through every layer, BizMap falls back to
 evidence it can still see — an API path literal in a front-end function
 (`via: route_literal`), or the SQL constant a handler names (`via: sql_reference`) —
-and marks those links `inferred`. Details: [docs/how-it-works.md](docs/how-it-works.md).
+and marks those links `inferred`. Details: [docs/how-it-works.md](https://github.com/lucas-simao/bizmap/blob/main/docs/how-it-works.md).
 
 ## How it decides
 
@@ -290,9 +295,9 @@ and marks those links `inferred`. Details: [docs/how-it-works.md](docs/how-it-wo
   full of clones and worktrees.
 - Static graph page (GitHub Pages).
 
-Full history: [CHANGELOG.md](CHANGELOG.md). Graph format:
-[docs/graph-schema.md](docs/graph-schema.md). Detector rules:
-[docs/detector-rules.md](docs/detector-rules.md).
+Full history: [CHANGELOG.md](https://github.com/lucas-simao/bizmap/blob/main/CHANGELOG.md). Graph format:
+[docs/graph-schema.md](https://github.com/lucas-simao/bizmap/blob/main/docs/graph-schema.md). Detector rules:
+[docs/detector-rules.md](https://github.com/lucas-simao/bizmap/blob/main/docs/detector-rules.md).
 
 ## Releasing
 
@@ -314,6 +319,8 @@ workflow** (from `main`) and the tag name. Limit the `pypi` environment to
 publish.
 
 ## Development
+
+From a clone of the repository:
 
 ```bash
 pip install -e ".[dev]"

@@ -69,3 +69,50 @@ def test_cli_stdout_is_unchanged_by_progress(tmp_path: Path) -> None:
     assert res.exit_code == 0, res.output
     assert res.output.startswith("wrote ")
     assert json.loads(out.read_text(encoding="utf-8"))["nodes"]
+
+
+def test_summary_names_skipped_paths() -> None:
+    g = Graph()
+    g.attrs["skipped"] = {"generated_dirs": 2, "generated_files": 7}
+    g.attrs["skipped_paths"] = {
+        "generated_dirs": ["coverage", "web/.next"],
+        "generated_files": [f"public/f{i}.min.js" for i in range(7)],
+    }
+    text = "\n".join(scan_summary(g))
+    assert "  generated dirs: coverage, web/.next\n" in text + "\n"
+    assert "public/f4.min.js … +2 more" in text and "public/f5.min.js" not in text
+    verbose = "\n".join(scan_summary(g, verbose=True))
+    assert "public/f6.min.js" in verbose and "more" not in verbose
+
+
+def test_phase_start_lines_and_heartbeat() -> None:
+    import time
+
+    out = io.StringIO()
+    p = progress.start(threshold=0, stream=out, heartbeat=0, live=False)
+    progress.begin("shop: js/ts", 19)
+    p.tick()  # nothing printed since the phase began → heartbeat line
+    t0 = time.perf_counter()
+    progress.done("shop: files (0 go, 1 py, 19 js/ts, 1 sql)", t0)
+    progress.done("api: files (2 go, 0 py, 0 js/ts, 0 sql)", t0)
+    progress.stop()
+    text = out.getvalue()
+    assert "shop: js/ts: 19 files…" in text
+    assert "still in shop: js/ts" in text
+    last = text.strip().splitlines()[-1]
+    assert last.startswith("[bizmap] done in") and "(files " in last and "go," not in last
+
+
+def test_heartbeat_waits_for_the_threshold() -> None:
+    out = io.StringIO()
+    p = progress.start(threshold=60, stream=out, heartbeat=0, live=False)
+    progress.begin("shop: go", 3)
+    p.tick()
+    progress.stop()
+    assert out.getvalue() == ""
+
+
+def test_phase_kind() -> None:
+    assert progress.phase_kind("shop: files (0 go, 1 py)") == "files"
+    assert progress.phase_kind("merge + cross-service links (2 repos)") == "merge + cross-service links"
+    assert progress.phase_kind("shop: js/ts") == "js/ts"

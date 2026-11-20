@@ -24,6 +24,8 @@ values except `generated_at`.
 | `services` | object? | Service name → base URL, used to match HTTP client calls. |
 | `queues` | object? | Queue name → consumer hint, copied from `bizmap.yaml` for rematch. |
 | `unresolved_http` | array? | Unmatched outbound HTTP calls (`url`, `method`, `keys`, `from`, `reason`). `reason` is one of `target_not_scanned` (URL fully composed but no matching route in scanned repos), `base_unknown` (path known, base not resolvable), `path_dynamic` (path not composable), `client_unknown`. Stderr counts this list and prints per-reason totals. |
+| `skipped` | object? | How many paths the scan left out, per reason: `generated_dirs`, `generated_files`, `gitignored`. |
+| `skipped_paths` | object? | The same paths, per reason, sorted (at most 200 per reason; `skipped` has the full count). In a merged graph each path is prefixed with `repo:`. |
 | `warnings` | array? | Non-fatal scan notes (for example Go import-path suffix fallback when `go.mod` is missing). Printed by `bizmap scan`. |
 
 ### `schema.tables.<name>`

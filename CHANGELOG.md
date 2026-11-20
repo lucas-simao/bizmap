@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`out/` and `coverage/` are only skipped as build output next to a project
+  manifest** (package.json, go.mod, pyproject.toml, setup.py, requirements.txt,
+  tsconfig.json…). Inside source code (`internal/coverage/`, `adapters/out/`)
+  they are scanned like any other package; before, they were skipped at any
+  depth in every language, silently. Unambiguous build folders (`.yarn`,
+  `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.cache`, `storybook-static`…) are
+  still skipped by name.
+- **Skipped paths are named**: `bizmap scan` lists up to 5 per reason under the
+  `skipped:` line (all with `--verbose`), and the graph has `skipped_paths`
+  (per reason, sorted, capped at 200; `skipped` keeps the counts).
+- **Progress while a slow phase runs**: once a scan passes 3 seconds, each phase
+  is announced when it starts (`shop: js/ts: 19 files…`), and a `still in …`
+  line follows every 5 seconds of silence. The final `done in …` line groups
+  times by phase name only (`files 0.2s`, not the last repo's file counts).
+- **bizmap.yaml `scan:` and `exclude:` are validated**: `scan: 5`, `exclude: 5`,
+  `skip_generated: "no"`, unknown `scan:` keys and invalid YAML now stop with one
+  line naming the file and the key, instead of a traceback or a silently wrong
+  value. A top-level `exclude:` and `scan.exclude:` are now combined (before, the
+  second was ignored when the first was set).
+- **`--discover`**:
+  - folders with code but no git are listed under `left out:` as
+    `no git; add with --include PATH`; included ones show as `folder · no git`;
+  - new criterion `folder_name` (after `default_branch`, before
+    `latest_commit`): the copy in the folder named like the repository wins
+    over a clone with a newer commit;
+  - without git, the commit time is read from the commit object
+    (`commit-file`) before falling back to the ref file's mtime; a tie that
+    could not be broken without git says so in the reason;
+  - a `--prefer` that matches no folder is a warning (in `--list` and on
+    stderr), `nothing to scan` replaces `0 project(s) to scan:`, and the usage
+    error reads `--list only works with --discover DIR`.
+- README: install with `pipx install bizmap` / `pip install bizmap` (the
+  editable install is under Development), and links point at GitHub so they
+  work on the PyPI page.
+- docs/discover.md: submodules and nested repositories are scanned as part of
+  their parent, never as projects of their own.
+
 ## 0.4.0 — 2026-11-20
 
 ### Fixed

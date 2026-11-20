@@ -8,8 +8,8 @@
    clones with the same normalized ``origin`` URL;
 3. pick one representative per group, deterministically:
    preferred (``prefer``) > main checkout (not a worktree) > on the default
-   branch > most recent commit (``git log``, or the ref file's mtime when git
-   is not installed) > path order;
+   branch > folder named like the repository > most recent commit (``git
+   log``; without git, the commit object or the ref file's mtime) > path order;
 4. leave out groups with no supported source code.
 
 Git metadata is read from the repository files (`.git`, `config`, `HEAD`,
@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,7 +46,7 @@ class RepoInfo:
     branch: str | None = None  # None = detached HEAD
     default_branch: str | None = None
     commit_time: int | None = None
-    time_source: str | None = None  # "git" or "ref-mtime"
+    time_source: str | None = None  # "git", "commit-file" or "ref-mtime"
     has_code: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -67,7 +68,7 @@ class RepoGroup:
     key: str
     members: list[RepoInfo]
     chosen: RepoInfo | None
-    criterion: str  # what decided: only_copy, preferred, main_checkout, default_branch, latest_commit, path_order, no_code
+    criterion: str  # what decided: only_copy, preferred, main_checkout, default_branch, folder_name, latest_commit, path_order, no_code
     reason: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -87,6 +88,7 @@ class Discovery:
     depth: int
     groups: list[RepoGroup] = field(default_factory=list)
     skipped: list[tuple[str, str]] = field(default_factory=list)  # (path, reason)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def chosen(self) -> list[RepoGroup]:
@@ -98,6 +100,7 @@ class Discovery:
             "depth": self.depth,
             "groups": [g.to_dict() for g in self.groups],
             "skipped": [{"path": p, "reason": r} for p, r in self.skipped],
+            "warnings": list(self.warnings),
         }
 
 
@@ -190,6 +193,40 @@ def _default_branch(common: Path) -> str | None:
     return None
 
 
+def _ref_sha(git_dir: Path, common: Path, branch: str | None) -> str | None:
+    """The commit HEAD points at, from the ref files (loose or packed)."""
+    if branch is None:
+        text = (_read(git_dir / "HEAD") or "").strip()
+        return text if re.fullmatch(r"[0-9a-f]{40,64}", text) else None
+    loose = (_read(common / "refs" / "heads" / branch) or "").strip()
+    if re.fullmatch(r"[0-9a-f]{40,64}", loose):
+        return loose
+    for line in (_read(common / "packed-refs") or "").splitlines():
+        sha, _, ref = line.partition(" ")
+        if ref.strip() == f"refs/heads/{branch}" and re.fullmatch(r"[0-9a-f]{40,64}", sha):
+            return sha
+    return None
+
+
+def _commit_file_time(common: Path, sha: str) -> int | None:
+    """Committer time read from a loose commit object (packed objects: None)."""
+    path = common / "objects" / sha[:2] / sha[2:]
+    try:
+        raw = zlib.decompress(path.read_bytes())
+    except (OSError, zlib.error):
+        return None
+    header, _, body = raw.partition(b"\0")
+    if not header.startswith(b"commit "):
+        return None
+    for line in body.split(b"\n"):
+        if not line:
+            break
+        if line.startswith(b"committer "):
+            m = re.search(rb" (\d+) [+-]\d{4}$", line)
+            return int(m.group(1)) if m else None
+    return None
+
+
 def _commit_time(repo: Path, git_dir: Path, common: Path, branch: str | None) -> tuple[int | None, str | None]:
     if shutil.which("git"):
         try:
@@ -205,6 +242,11 @@ def _commit_time(repo: Path, git_dir: Path, common: Path, branch: str | None) ->
                 return int(out.stdout.strip()), "git"
         except (OSError, subprocess.SubprocessError):
             pass
+    sha = _ref_sha(git_dir, common, branch)
+    if sha:
+        when = _commit_file_time(common, sha)
+        if when is not None:
+            return when, "commit-file"
     candidates = []
     if branch:
         candidates.append(common / "refs" / "heads" / branch)
@@ -263,6 +305,7 @@ def find_repos(
     skipped: list[tuple[str, str]] = []
     if (root / ".git").exists():
         return [root], skipped
+    plain: list[Path] = []  # folders looked at that are not repositories
     stack: list[tuple[Path, int]] = [(root, 0)]
     while stack:
         cur, level = stack.pop()
@@ -286,9 +329,32 @@ def find_repos(
             if include and path_excluded(rel, include):
                 found.append(child)
                 continue
+            plain.append(child)
             if level + 1 < depth:
                 stack.append((child, level + 1))
+    # folders with code but no git, so `--list` can say why they are missing:
+    # the outermost ones that hold no repository found below them
+    holders = {parent for f in found for parent in f.parents}
+    for folder in plain:
+        if folder in holders or not (folder.parent == root or folder.parent in holders):
+            continue
+        if _has_code(folder):
+            rel = folder.relative_to(root).as_posix()
+            skipped.append((rel, f"no git; add with --include {rel}"))
     return sorted(found, key=lambda p: p.relative_to(root).as_posix()), skipped
+
+
+def _tie_reason(m: RepoInfo) -> str:
+    if m.time_source == "ref-mtime":
+        return "first by path (tie: without git, commit times could not be told apart)"
+    return "first by path (tie)"
+
+
+def _named_like_repo(m: RepoInfo) -> bool:
+    if not m.origin:
+        return False
+    name = m.origin.removeprefix("file:").rstrip("/").rsplit("/", 1)[-1]
+    return m.path.name.lower() == name.lower()
 
 
 def _choose(members: list[RepoInfo], prefer: list[str]) -> tuple[RepoInfo, str, str]:
@@ -310,18 +376,23 @@ def _choose(members: list[RepoInfo], prefer: list[str]) -> tuple[RepoInfo, str, 
             lambda m: f"on the default branch ({m.branch})",
         ),
         (
+            "folder_name",
+            lambda m: 0 if _named_like_repo(m) else 1,
+            lambda m: f"folder named like the repository ({m.path.name})",
+        ),
+        (
             "latest_commit",
             lambda m: -(m.commit_time or 0),
             lambda m: f"most recent commit ({m.time_source or 'unknown'})",
         ),
-        ("path_order", lambda m: m.rel, lambda m: "first by path (tie)"),
+        ("path_order", lambda m: m.rel, _tie_reason),
     ]
     ranked = sorted(members, key=lambda m: tuple(c[1](m) for c in criteria))
     best, second = ranked[0], ranked[1]
     for name, key, explain in criteria:
         if key(best) != key(second):
             return best, name, explain(best)
-    return best, "path_order", "first by path (tie)"
+    return best, "path_order", _tie_reason(best)
 
 
 def _repo_name(group: list[RepoInfo]) -> str:
@@ -348,6 +419,11 @@ def discover(
     prefer = [p.strip("/") for p in (prefer or [])]
     paths, skipped = find_repos(root, depth, include, exclude)
     infos = [inspect_repo(p, root) for p in paths]
+    warnings = [
+        f"--prefer {pat!r} matches none of the folders found"
+        for pat in prefer
+        if not any(i.rel == pat or path_excluded(i.rel, [pat]) for i in infos)
+    ]
 
     # union-find over shared git dirs and origins
     parent = list(range(len(infos)))
@@ -391,7 +467,7 @@ def discover(
         seen[g.name] = n
         if n > 1:
             g.name = f"{g.name}-{n}"
-    return Discovery(root=root, depth=depth, groups=groups, skipped=sorted(skipped))
+    return Discovery(root=root, depth=depth, groups=groups, skipped=sorted(skipped), warnings=warnings)
 
 
 def format_discovery(d: Discovery) -> str:
@@ -403,7 +479,7 @@ def format_discovery(d: Discovery) -> str:
         lines.append(head)
         for m in g.members:
             mark = "*" if g.chosen is m else " "
-            branch = m.branch or "(detached)"
+            branch = "no git" if m.kind == "folder" else (m.branch or "(detached)")
             bits = [m.kind, branch]
             if m.commit_time is not None:
                 bits.append(f"t={m.commit_time} ({m.time_source})")
@@ -413,8 +489,13 @@ def format_discovery(d: Discovery) -> str:
     if d.skipped:
         lines += ["", "left out:"]
         lines += [f"  {p}  ({r})" for p, r in d.skipped]
+    if d.warnings:
+        lines += [""] + [f"warning: {w}" for w in d.warnings]
     chosen = d.chosen
-    lines += ["", f"{len(chosen)} project(s) to scan: " + ", ".join(g.chosen.rel for g in chosen if g.chosen)]
+    if chosen:
+        lines += ["", f"{len(chosen)} project(s) to scan: " + ", ".join(g.chosen.rel for g in chosen if g.chosen)]
+    else:
+        lines += ["", "nothing to scan"]
     return "\n".join(lines) + "\n"
 
 

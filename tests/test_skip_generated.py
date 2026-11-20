@@ -24,6 +24,7 @@ def _rels(root: Path, files: list[Path]) -> list[str]:
 
 
 def _project(root: Path) -> None:
+    _write(root, "package.json", "{}\n")
     _write(root, "src/orders.ts", SOURCE)
     _write(root, ".yarn/releases/yarn-4.1.0.cjs", "module.exports = function(){};\n")
     _write(root, ".yarn/cache/pkg/index.js", "module.exports = 1;\n")
@@ -125,3 +126,41 @@ def test_yaml_include_and_gitignore_off(tmp_path: Path) -> None:
     _write(tmp_path, "bizmap.yaml", "scan:\n  include: ['.yarn']\n  skip_generated: true\n")
     graph = scan_path(tmp_path)
     assert graph.attrs["skipped"]["generated_dirs"] == 4  # .yarn is back
+
+
+GO_UPDATE = """package {pkg}
+
+func Save(db DB) {{
+	db.Exec("UPDATE policies SET status = 1")
+}}
+"""
+
+
+def test_out_and_coverage_inside_source_are_scanned(tmp_path: Path) -> None:
+    # round 37: `coverage` and `out` are domain/package names too
+    _write(tmp_path, "go.mod", "module example.com/shop\n\ngo 1.22\n")
+    _write(tmp_path, "schema.sql", "CREATE TABLE policies (id INT PRIMARY KEY, status INT);\n")
+    _write(tmp_path, "internal/coverage/c.go", GO_UPDATE.format(pkg="coverage"))
+    _write(tmp_path, "internal/out/o.go", GO_UPDATE.format(pkg="out"))
+    _write(tmp_path, "coverage/lcov-report/x.go", GO_UPDATE.format(pkg="x"))  # next to go.mod: report
+    graph = scan_path(tmp_path)
+    writers = {
+        (graph.nodes[e.from_id].attrs.get("evidence") or {}).get("file")
+        for e in graph.edges
+        if e.type == "writes"
+    }
+    assert writers == {"internal/coverage/c.go", "internal/out/o.go"}, writers
+    assert graph.attrs["skipped"] == {"generated_dirs": 1}
+    assert graph.attrs["skipped_paths"] == {"generated_dirs": ["coverage"]}
+    assert graph.to_dict()["skipped_paths"] == {"generated_dirs": ["coverage"]}
+
+
+def test_skipped_paths_are_listed(tmp_path: Path) -> None:
+    _project(tmp_path)
+    opts = WalkOptions()
+    iter_files(tmp_path, JS, options=opts)
+    iter_files(tmp_path, [".py"], options=opts)  # a second walk adds no duplicates
+    assert opts.skipped_paths() == {
+        "generated_dirs": [".next", ".turbo", ".yarn", "coverage", "out"],
+        "generated_files": ["public/app.bundle.js", "public/compiled.js", "public/packed.js", "public/vendor.min.js"],
+    }

@@ -154,6 +154,15 @@ def merge_graphs(graphs: list[Graph], *, version: str | None = None) -> Graph:
             skipped[key] = skipped.get(key, 0) + int(value)
     if skipped:
         merged.attrs["skipped"] = dict(sorted(skipped.items()))
+    skipped_paths: dict[str, list[str]] = {}
+    for graph in graphs:
+        prefix = f"{repo_name_of(graph)}:" if len(graphs) > 1 else ""
+        for key, paths in (graph.attrs.get("skipped_paths") or {}).items():
+            skipped_paths.setdefault(key, []).extend(
+                p if (prefix and str(p).startswith(prefix)) else prefix + str(p) for p in paths
+            )
+    if skipped_paths:
+        merged.attrs["skipped_paths"] = {k: sorted(v) for k, v in sorted(skipped_paths.items())}
     roots: dict[str, str] = {}
     bases: set[str] = set()
     for graph in graphs:
@@ -193,6 +202,7 @@ def graph_from_json(data: dict[str, Any]) -> Graph:
     graph.attrs["repo_roots"] = data.get("repo_roots") or {}
     graph.attrs["repo_roots_base"] = data.get("repo_roots_base")
     graph.attrs["skipped"] = data.get("skipped") or {}
+    graph.attrs["skipped_paths"] = data.get("skipped_paths") or {}
     graph.attrs["queues"] = data.get("queues") or {}
     graph.attrs["unresolved_http"] = data.get("unresolved_http") or []
     return graph

@@ -19,19 +19,22 @@ are on disk.
 ## What counts as a project
 
 - A folder with a `.git` **directory** is a main checkout; a folder with a
-  `.git` **file** (`gitdir: …`) is a worktree (a submodule is treated as its own
-  repository).
+  `.git` **file** (`gitdir: …`) is a worktree.
 - BizMap looks `--depth` levels below the folder (default **2**:
   `~/work/shop` and `~/work/clients/shop`). Use `--depth 3` for deeper layouts.
-- It never looks inside a repository it found (nested repos, submodules and
-  vendored copies belong to their parent), nor inside dependency and build
+- It never looks inside a repository it found, so nested repos, submodules and
+  vendored copies are scanned as part of their parent repository and are never
+  projects of their own. (A submodule checked out *next to* other repos, as its
+  own folder, is a repository like any other.) Nor does it look inside dependency and build
   folders (`node_modules`, `vendor`, `.venv`, `dist`, `build`, `.next`, …) or
   hidden folders.
 - If the folder itself is a repository, that repository is the only project.
 - A repository with no Go, Python, JS/TS or SQL files (docs, infra, design
   assets) is listed as `skipped (no supported source code)`.
 - Folders that are not repositories are ignored unless you name them with
-  `--include` (relative to the folder; globs work).
+  `--include` (relative to the folder; globs work). Those that hold code are
+  listed under `left out:` as `no git; add with --include PATH`, so a missing
+  project is never a mystery; once included they show as `folder · no git`.
 
 ## Which copies are the same repository
 
@@ -57,14 +60,20 @@ decides, and `--list` shows which one it was:
 | `preferred`      | named with `--prefer PATH` (or `discover.prefer` in bizmap.yaml)                    |
 | `main_checkout`  | a main checkout rather than a worktree                                              |
 | `default_branch` | on the default branch: `origin/HEAD` when the clone knows it, else `main`/`master`  |
+| `folder_name`    | in the folder named like the repository (`shop-api/` for `…/shop-api.git`)          |
 | `latest_commit`  | the one with the most recent commit                                                 |
 | `path_order`     | first by path (everything else was equal)                                           |
 
 The commit time comes from `git log -1 --format=%ct` when git is installed
-(`latest_commit (git)`), and from the modification time of the branch's ref
-file when it is not (`latest_commit (ref-mtime)`, a good approximation that
-needs no git). Detached checkouts compete like any other; they are never on the
-default branch.
+(`latest_commit (git)`). Without git, BizMap reads the committer time from the
+commit object itself when it is stored loose (`commit-file`), and otherwise
+falls back to the modification time of the branch's ref file (`ref-mtime`, an
+approximation). When refs are packed and the times cannot be told apart, the
+tie goes to `path_order` and the reason says so. Detached checkouts compete
+like any other; they are never on the default branch.
+
+A `--prefer` that matches none of the folders found prints a warning (in
+`--list` and on stderr during the scan) instead of being ignored silently.
 
 The result is deterministic: the same folder gives the same choice and the same
 `--list` output every time.
@@ -76,7 +85,7 @@ The result is deterministic: the same folder gives the same choice and the same
 
 notes: skipped (no supported source code)
     notes                                    main · main · t=1763600000 (git) · no code
-orders: orders  [latest_commit: most recent commit (git)]
+orders: orders  [folder_name: folder named like the repository (orders)]
   * orders                                   main · main · t=1763640000 (git)
     old/orders-2023                          main · main · t=1700000000 (git)
 shop: shop  [main_checkout: main checkout (others are worktrees)]
@@ -85,6 +94,7 @@ shop: shop  [main_checkout: main checkout (others are worktrees)]
 
 left out:
   archive  (excluded)
+  design-studio  (no git; add with --include design-studio)
 
 2 project(s) to scan: orders, shop
 ```

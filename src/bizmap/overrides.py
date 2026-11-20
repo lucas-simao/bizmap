@@ -130,19 +130,60 @@ def load_scan_config(root: Path, config: Path | None = None) -> ScanConfig:
     return cfg
 
 
+class ConfigError(ValueError):
+    """bizmap.yaml has a value of the wrong type (shown without a traceback)."""
+
+
+_SCAN_KEYS = ("include", "exclude", "gitignore", "skip_generated", "expand_star")
+
+
+def _globs(path: Path, key: str, value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return list(value)
+    raise ConfigError(f"{path}: {key} must be a path/glob or a list of them, got {value!r}")
+
+
+def _flag(path: Path, key: str, value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise ConfigError(f"{path}: {key} must be true or false, got {value!r}")
+
+
 def _load_scan_config(root: Path, config: Path | None = None) -> ScanConfig:
     path = find_overrides(root, config=config)
     if path is None:
         return ScanConfig()
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{path}: invalid YAML ({' '.join(str(exc).split())})") from exc
     if not isinstance(data, dict):
         return ScanConfig(path=path)
-    exclude = data.get("exclude") or (data.get("scan") or {}).get("exclude") or []
-    if isinstance(exclude, str):
-        exclude = [exclude]
+    scan_opts = data.get("scan")
+    if scan_opts is None:
+        scan_opts = {}
+    if not isinstance(scan_opts, dict):
+        raise ConfigError(
+            f"{path}: `scan:` must be a mapping ({', '.join(_SCAN_KEYS)}), got {scan_opts!r}"
+        )
+    unknown = sorted(str(k) for k in scan_opts if k not in _SCAN_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"{path}: unknown scan key(s): {', '.join(unknown)} (known: {', '.join(_SCAN_KEYS)})"
+        )
+    exclude = _globs(path, "exclude", data.get("exclude")) + _globs(
+        path, "scan.exclude", scan_opts.get("exclude")
+    )
     expand = data.get("expand_star")
-    if expand is None:
-        expand = (data.get("scan") or {}).get("expand_star")
+    expand = _flag(path, "expand_star", expand, False) if expand is not None else _flag(
+        path, "scan.expand_star", scan_opts.get("expand_star"), False
+    )
     services = data.get("services") or {}
     if not isinstance(services, dict):
         services = {}
@@ -154,16 +195,13 @@ def _load_scan_config(root: Path, config: Path | None = None) -> ScanConfig:
     if isinstance(database, dict):
         database = database.get("name") or database.get("id")
     constants = parse_yaml_constants(data.get("constants"))
-    scan_opts = data.get("scan") if isinstance(data.get("scan"), dict) else {}
-    include = scan_opts.get("include") or []
-    if isinstance(include, str):
-        include = [include]
+    include = _globs(path, "scan.include", scan_opts.get("include"))
     return ScanConfig(
-        include=[str(x) for x in include],
-        gitignore=bool(scan_opts.get("gitignore", True)),
-        skip_generated=bool(scan_opts.get("skip_generated", True)),
-        exclude=[str(x) for x in exclude],
-        expand_star=bool(expand),
+        include=include,
+        gitignore=_flag(path, "scan.gitignore", scan_opts.get("gitignore"), True),
+        skip_generated=_flag(path, "scan.skip_generated", scan_opts.get("skip_generated"), True),
+        exclude=list(dict.fromkeys(exclude)),
+        expand_star=expand,
         path=path,
         raw=data,
         name=str(name) if name else None,
