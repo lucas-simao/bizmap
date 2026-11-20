@@ -754,7 +754,9 @@ def _route_chain(call: Node, consts: dict[str, str]) -> tuple[str, str | None] |
         prop = fn.child_by_field_name("property")
         if prop is not None and text(prop) == "route":
             args = call_args(obj)
-            if not args:
+            if len(args) != 1:
+                # Hono `.route('/inv', subApp)` mounts a sub-app (2 args); only
+                # Express `.route('/x')` (1 arg) opens a method chain
                 return None
             path, _u = _resolve_js_string(args[0], consts)
             found = True

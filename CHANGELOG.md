@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Hono `.route('/prefix', subApp)` inside a chain** no longer counts as an
+  Express `.route('/x')` chain (regressed in 0.3.9): a handler after the mount
+  (`new Hono().route('/inv', sub).post('/pay', h)`) keeps its own path
+  (`POST /pay`, not `POST /inv`). Only a one-argument `.route(path)` opens an
+  Express method chain.
+
+### Known limitations
+
+- Routes of a Hono sub-app mounted inside a chain (`new Hono().route('/inv',
+  sub)…`) don't get the mount prefix; a mount as its own statement does.
+
 ## 0.3.9 — 2026-11-20
 
 ### Fixed
