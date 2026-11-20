@@ -986,7 +986,9 @@ class JsAnalyzer:
             class_ctors_by_mod[module] = _collect_class_ctors(tree)
             trees_by_mod[module] = tree
             for node in walk(tree):
-                if node.type in {"function_declaration", "method_definition", "function"}:
+                # declarations only: a named function *expression* is registered
+                # through its binding below (its own name is not in scope here)
+                if node.type in {"function_declaration", "generator_function_declaration", "method_definition"}:
                     name_n = node.child_by_field_name("name")
                     name = text(name_n) if name_n else ""
                     if name:
@@ -1009,6 +1011,7 @@ class JsAnalyzer:
                         "arrow_function",
                         "function",
                         "function_expression",
+                        "generator_function",
                     }:
                         qual = _fn_qual(value, module) or f"{module}.{name}"
                         analysis.functions[qual] = (rel_file, line_of(node))
@@ -1016,7 +1019,12 @@ class JsAnalyzer:
                         fn_nodes[qual] = value
                 if node.type == "pair":
                     value = node.child_by_field_name("value")
-                    if value is not None and value.type in {"arrow_function", "function", "function_expression"}:
+                    if value is not None and value.type in {
+                        "arrow_function",
+                        "function",
+                        "function_expression",
+                        "generator_function",
+                    }:
                         qual = _fn_qual(value, module)
                         parent_qual = qual.rsplit(".", 1)[0] if qual else None
                         if qual and parent_qual and parent_qual != module and _returned_member_key(value):
@@ -1668,11 +1676,23 @@ _NAMED_FN_TYPES = {
     "method_definition",
     "function",
     "function_expression",
+    "generator_function",
 }
 
 
 def _fn_own_name(cur: Node) -> str | None:
-    """Name a function-like node is known by, or None when anonymous."""
+    """Name a function-like node is known by, or None when anonymous.
+
+    A function *expression* is known by its binding (`const topNamed =
+    function topN() {}` is `topNamed`): its own name `topN` is only visible
+    inside itself."""
+    if cur.type in {"function", "function_expression", "generator_function"}:
+        parent = cur.parent
+        if parent is not None and parent.type == "variable_declarator":
+            return _declarator_name(parent) or None
+        key = _returned_member_key(cur)
+        if key:
+            return key
     if cur.type in _NAMED_FN_TYPES:
         name_n = cur.child_by_field_name("name")
         if name_n is not None and text(name_n):
@@ -1840,7 +1860,12 @@ def _bound_function(scope: Node, name: str) -> Node | None:
             nm = cur.child_by_field_name("name")
             value = cur.child_by_field_name("value")
             if nm is not None and nm.type == "identifier" and text(nm) == name:
-                if value is not None and value.type in {"arrow_function", "function", "function_expression"}:
+                if value is not None and value.type in {
+                    "arrow_function",
+                    "function",
+                    "function_expression",
+                    "generator_function",
+                }:
                     return value
                 return None
         stack.extend(cur.named_children)
@@ -2948,7 +2973,25 @@ def _ts_path_aliases(root: Path) -> list[tuple[str, list[str], str]]:
 
     aliases: list[tuple[str, list[str], str]] = []
     seen: set[tuple[str, tuple[str, ...], str]] = set()
+    # a config another one `extends` (tsconfig.base.json) is not a project by
+    # itself: its paths reach only the configs that extend it
+    extended: set[Path] = set()
+    for cfg_path in configs:
+        try:
+            data = _parse_jsonc(cfg_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        ext = data.get("extends") if isinstance(data, dict) else None
+        for item in ext if isinstance(ext, list) else [ext]:
+            if not item or str(item).startswith("@"):
+                continue
+            target = (cfg_path.parent / str(item)).resolve()
+            if not target.exists() and not str(item).endswith(".json"):
+                target = (cfg_path.parent / (str(item) + ".json")).resolve()
+            extended.add(target)
     for cfg_path in sorted(configs):
+        if cfg_path.resolve() in extended:
+            continue
         data = _load_tsconfig(cfg_path)
         opts = data.get("compilerOptions") if isinstance(data, dict) else None
         if not isinstance(opts, dict):
@@ -2987,8 +3030,22 @@ def _ts_path_aliases(root: Path) -> list[tuple[str, list[str], str]]:
             r"""find\s*:\s*['"]([^'"]+)['"]\s*,\s*replacement\s*:\s*(?:(?:path\.)?(?:resolve|join|fileURLToPath)\s*\((?:[^'"()]*?,\s*)?(?:new\s+URL\(\s*)?)?['"]([^'"]+)['"]""",
             raw,
         )
-        for m in [*object_form, *array_form]:
-            name, target = m.group(1), m.group(2)
+        # '@': '/src' or './src' (a leading '/' is the project root in Vite)
+        plain_form = re.finditer(r"""['"]([@~#][\w\-/]*)['"]\s*:\s*['"]([./][^'"]*)['"]""", raw)
+        # { find: /^@\//, replacement: ... }: a simple prefix regex
+        regex_form = re.finditer(
+            r"""find\s*:\s*/\^?((?:\\.|[^/\\])+?)/[a-z]*\s*,\s*replacement\s*:\s*(?:(?:path\.)?(?:resolve|join|fileURLToPath)\s*\((?:[^'"()]*?,\s*)?(?:new\s+URL\(\s*)?)?['"]([^'"]+)['"]""",
+            raw,
+        )
+        found: list[tuple[str, str]] = [(m.group(1), m.group(2)) for m in [*object_form, *array_form]]
+        found += [(m.group(1), m.group(2)) for m in plain_form]
+        for m in regex_form:
+            prefix = re.sub(r"\\(.)", r"\1", m.group(1))
+            if re.fullmatch(r"[@~#][\w\-]*/?", prefix):
+                found.append((prefix.rstrip("/"), m.group(2)))
+        for name, target in found:
+            if target.startswith("/"):
+                target = "." + target
             target_rel = rel_to_root(cfg_path.parent, target)
             if not target_rel:
                 continue
