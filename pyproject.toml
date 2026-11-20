@@ -61,6 +61,8 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "-m 'not perf'"
+markers = ["perf: scale/performance checks (slow; run with `pytest -m perf`)"]
 
 [tool.ruff]
 line-length = 100
