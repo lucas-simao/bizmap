@@ -1,43 +1,49 @@
-# Temporary (branch scratch/demo-check, never merged): runs BizMap on the new bizmap-demo.
+# Temporary (branch scratch/demo-check, never merged): runs BizMap on the new
+# bizmap-demo, records the terminal GIFs and pushes them back to this branch.
 name: demo-check
 on: push
+permissions:
+  contents: write
 jobs:
-  run:
+  record:
+    if: "!contains(github.event.head_commit.message, '[assets]')"
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        bizmap: ["bizmap==0.4.1", "git+https://github.com/lucas-simao/bizmap@main"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install "${{ matrix.bizmap }}" && bizmap --version
-      - name: demo
+      - run: pip install bizmap==0.4.1 playwright && bizmap --version && python -m playwright install --with-deps chromium
+      - name: demo checkout
         run: |
-          set -x
           git clone -q https://github.com/lucas-simao/bizmap-demo demo
+          cd demo && git fetch -q ../demo.bundle 'refs/heads/*:refs/heads/*' && git checkout -q demo/v0.4
+      - name: outputs
+        run: |
           cd demo
-          git fetch -q ../demo.bundle 'refs/heads/*:refs/heads/*'
-          git checkout -q demo/v0.4
-          echo "::group::scan"; COLUMNS=100 bizmap scan . --mermaid; echo "::endgroup::"
-          echo "::group::mmd"; cat bizmap.graph.mmd; echo "::endgroup::"
-          echo "::group::report"; bizmap report; echo "::endgroup::"
-          echo "::group::report-paths"; bizmap report .; echo "::endgroup::"
+          bizmap scan . --mermaid
           echo "::group::why-status"; bizmap why orders.status; echo "::endgroup::"
-          echo "::group::why-payments"; bizmap why payments.status; echo "::endgroup::"
-          echo "::group::why-history"; bizmap why order_status_history.new_status; echo "::endgroup::"
-          echo "::group::why-email"; bizmap why customers.email; echo "::endgroup::"
           for b in order-discount schema-only migration-multi extra-handler; do
             git checkout -q pr/$b
             bizmap scan . --out /tmp/$b.json -q > /dev/null
             echo "::group::impact-$b"
-            git diff --unified=0 demo/v0.4...pr/$b | bizmap impact --graph /tmp/$b.json --prefix .
+            git -c core.quotepath=false diff --no-color --unified=0 demo/v0.4 HEAD | bizmap impact --graph /tmp/$b.json --prefix . --repo-root . | tee /tmp/impact-$b.md
             echo "::endgroup::"
           done
-          git checkout -q demo/v0.4
-          cd ..
-          mkdir work && git clone -q demo work/bizmap-demo
-          echo "::group::discover"; bizmap scan --discover work --list; echo "::endgroup::"
-          echo "::group::shop-only"; cd demo && bizmap scan shop --out /tmp/shop.json; echo "::endgroup::"
-          echo "::group::json-head"; python -c "import json;d=json.load(open('bizmap.graph.json'));print(d['version'],d.get('repos'),d.get('services'),len(d['nodes']),len(d['edges']))"; echo "::endgroup::"
+          git checkout -q demo/v0.4 && bizmap scan . -q --mermaid > /dev/null
+      - uses: charmbracelet/vhs-action@v2
+        with:
+          install-only: true
+      - name: record
+        run: |
+          sudo apt-get install -y -qq fonts-dejavu-core > /dev/null
+          mkdir -p out
+          for t in hero scan report why; do vhs tapes/$t.tape; done
+          python render_comment.py /tmp/impact-extra-handler.md out/pr-comment.png 'Order lifecycle handlers (paid, ship, deliver) <span>#4</span>'
+          python render_comment.py /tmp/impact-migration-multi.md out/pr-comment-schema.png 'Shipping migration (qualified and quoted names, several tables) <span>#3</span>'
+          cp /tmp/impact-*.md out/ && cp demo/bizmap.graph.mmd out/
+          ls -la out
+      - name: push assets
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add out && git commit -qm "[assets] recorded from bizmap-demo" && git push -q
