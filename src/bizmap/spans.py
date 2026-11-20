@@ -299,3 +299,92 @@ def split_factory_members(
                     evidence=e_ev,
                     **edge.attrs,
                 )
+
+
+# ── Go route closures ────────────────────────────────────────────────────────
+
+_GO_DECLS = {"function_declaration", "method_declaration"}
+
+
+def _go_route_literal(tree: Any, line: int) -> Any | None:
+    """The `func(c echo.Context) error {...}` argument of the registration
+    call that starts on ``line``."""
+    row = line - 1
+    for node in _walk(tree.root_node):
+        if node.type != "call_expression" or node.start_point[0] != row:
+            continue
+        args = node.child_by_field_name("arguments")
+        if args is None:
+            continue
+        lits = [a for a in args.named_children if a.type == "func_literal"]
+        if lits:
+            return lits[-1]
+    return None
+
+
+def split_go_route_closures(
+    graph: Graph, root: Path, cache: dict[str, tuple[list[str], Any]] | None = None
+) -> None:
+    """`e.GET("/x", func(c echo.Context) error {...})`: the closure becomes
+    ``<enclosing>.funcN`` (Go's own naming), the route ``triggers`` it, and the
+    edges whose evidence is inside it move off the enclosing function."""
+    cache = {} if cache is None else cache
+    triggered = {e.from_id for e in graph.edges.values() if e.type == "triggers"}
+    for ep in list(graph.nodes.values()):
+        if ep.type != "entrypoint" or ep.attrs.get("kind") != "http" or ep.id in triggered:
+            continue
+        ev = ep.attrs.get("evidence") or {}
+        rel, line = ev.get("file"), ev.get("line")
+        if not rel or not isinstance(line, int) or not str(rel).endswith(".go"):
+            continue
+        _lines, tree = _load(cache, root, str(rel))
+        if tree is None:
+            continue
+        lit = _go_route_literal(tree, line)
+        if lit is None:
+            continue
+        decl = lit.parent
+        while decl is not None and decl.type not in _GO_DECLS:
+            decl = decl.parent
+        if decl is None:
+            continue
+        l_start, l_end = lit.start_point[0] + 1, lit.end_point[0] + 1
+        d_start = decl.start_point[0] + 1
+        owner = None
+        for node in graph.nodes.values():
+            if node.type != "function" or node.attrs.get("language") != "go":
+                continue
+            nev = node.attrs.get("evidence") or {}
+            if nev.get("file") == rel and nev.get("line") == d_start:
+                owner = node
+                break
+        if owner is None:
+            continue
+        lits = [n for n in _walk(decl) if n.type == "func_literal"]
+        lits.sort(key=lambda n: n.start_byte)
+        index = next((i for i, n in enumerate(lits) if n.start_byte == lit.start_byte), 0) + 1
+        owner_name = str(owner.attrs.get("name") or owner.id.split("function:", 1)[-1])
+        name = f"{owner_name}.func{index}"
+        fid = f"function:{name}"
+        graph.add_node(
+            fid,
+            "function",
+            name=name,
+            language="go",
+            end_line=l_end,
+            parent=owner.id,
+            evidence={"file": rel, "line": l_start, "symbol": name},
+        )
+        graph.add_edge(
+            "triggers",
+            ep.id,
+            fid,
+            evidence=Evidence(file=str(rel), line=line, symbol=name),
+        )
+        ep.attrs["symbol"] = name
+        for edge in [e for e in graph.edges.values() if e.from_id == owner.id and e.type in _MOVABLE]:
+            e_ev = edge.evidence
+            if e_ev is None or e_ev.file != rel or not (l_start <= e_ev.line <= l_end):
+                continue
+            del graph.edges[edge.id]
+            graph.add_edge(edge.type, fid, edge.to_id, confidence=edge.confidence, evidence=e_ev, **edge.attrs)

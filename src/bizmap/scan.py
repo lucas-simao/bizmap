@@ -44,7 +44,7 @@ from bizmap.http_match import (
 from bizmap.overrides import ScanConfig, apply_overrides, load_scan_config
 from bizmap.registry import merge_graphs
 from bizmap.schema_replay import Schema, replay_files
-from bizmap.spans import fill_spans, split_factory_members
+from bizmap.spans import fill_spans, split_factory_members, split_go_route_closures
 from bizmap.sql_analyze import (
     SqlAccess,
     analyze_sql,
@@ -2183,6 +2183,7 @@ def _scan_one(
     span_cache: dict = {}
     fill_spans(graph, root, span_cache)
     split_factory_members(graph, root, span_cache)
+    split_go_route_closures(graph, root, span_cache)
     timings.propagate += go_prop + py_prop + (time.perf_counter() - t_prop)
 
     if profile:

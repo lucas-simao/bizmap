@@ -476,3 +476,44 @@ def test_unresolved_http_sits_on_the_member(tmp_path: Path) -> None:
     )
     factory = graph.nodes["function:web.c.createBClient"]
     assert not any("/vendor/ping" in str(u) for u in factory.attrs.get("unresolved_http") or [])
+
+
+def test_go_inline_closure_handler(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/go.mod": "module svc\n\ngo 1.22\n",
+            "svc/schema.sql": "CREATE TABLE orders (id int primary key, status text);\n",
+            "svc/main.go": (
+                "package main\n"                                                   # 1
+                "\n"                                                               # 2
+                "import (\n"                                                       # 3
+                '\t"database/sql"\n'                                               # 4
+                '\t"github.com/labstack/echo/v4"\n'                                # 5
+                ")\n"                                                              # 6
+                "\n"                                                               # 7
+                "func main() {\n"                                                  # 8
+                "\tvar db *sql.DB\n"                                               # 9
+                "\te := echo.New()\n"                                              # 10
+                '\te.GET("/shipments", func(c echo.Context) error {\n'             # 11
+                '\t\trows, _ := db.Query("SELECT id, status FROM orders")\n'       # 12
+                "\t\tdefer rows.Close()\n"                                         # 13
+                '\t\treturn c.String(200, "ok")\n'                                 # 14
+                "\t})\n"                                                           # 15
+                '\te.Start(":8080")\n'                                             # 16
+                "}\n"                                                              # 17
+            ),
+        },
+    )
+    ep = "entrypoint:http:GET:/shipments"
+    trig = [e.to_id for e in graph.edges.values() if e.type == "triggers" and e.from_id == ep]
+    assert len(trig) == 1 and trig[0].endswith("main.func1"), trig
+    closure = trig[0]
+    reads = {e.to_id for e in graph.edges.values() if e.type == "reads" and e.from_id == closure}
+    assert any("orders" in r for r in reads), reads
+    main_reads = {e.to_id for e in graph.edges.values() if e.type == "reads" and e.from_id == "function:main.main"}
+    assert not any("orders" in r for r in main_reads), main_reads
+    imp = compute_impact(graph, _added("svc/main.go", 13))
+    assert [f.function for f in imp.functions] == [closure]
+    assert imp.functions[0].entrypoints == [ep]
+    assert any("orders" in r for r in imp.functions[0].reads)
