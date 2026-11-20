@@ -146,7 +146,7 @@ def test_out_and_coverage_inside_source_are_scanned(tmp_path: Path) -> None:
     graph = scan_path(tmp_path)
     writers = {
         (graph.nodes[e.from_id].attrs.get("evidence") or {}).get("file")
-        for e in graph.edges
+        for e in graph.edges.values()
         if e.type == "writes"
     }
     assert writers == {"internal/coverage/c.go", "internal/out/o.go"}, writers

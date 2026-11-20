@@ -121,3 +121,26 @@ def test_two_packages_one_pathological(tmp_path: Path) -> None:
     )
     graph = scan_path(tmp_path)
     assert any(e.to_id == "column:inventory.stock" for e in graph.edges.values())
+
+
+def test_python_deep_method_chain_and_long_constant_are_linear(tmp_path) -> None:
+    """Round 37: a 3,000-call method chain and a 10,000-term constant used to
+    take 12+ s (parent climbs in a deep tree); parents are now indexed."""
+    import time
+
+    from bizmap.scan import scan_path
+
+    (tmp_path / "schema.sql").write_text("CREATE TABLE orders (id int primary key, status int);\n")
+    (tmp_path / "chain.py").write_text(
+        "def chain(db):\n    db.execute('UPDATE orders SET status = 2')\n    return db" + ".q()" * 3000 + "\n"
+    )
+    (tmp_path / "const.py").write_text(
+        "Q = " + " + ".join(["'UPDATE orders SET status = 1'"] + ["' '"] * 9999) + "\n\n"
+        "def save(db):\n    db.execute(Q)\n"
+    )
+    t0 = time.perf_counter()
+    graph = scan_path(tmp_path)
+    elapsed = time.perf_counter() - t0
+    writers = {graph.nodes[e.from_id].attrs.get("label") or e.from_id for e in graph.edges.values() if e.type == "writes"}
+    assert any("chain" in w for w in writers) and any("save" in w for w in writers), writers
+    assert elapsed < 60, elapsed  # was minutes on slow machines; seconds now

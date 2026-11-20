@@ -11,6 +11,57 @@ def text(node: Node | None) -> str:
     return node.text.decode("utf-8", errors="replace")
 
 
+# Parents of the nodes of unusually deep trees (a 5,000-term `+` chain, a
+# 3,000-call method chain). tree-sitter's `node.parent` walks down from the
+# root, so climbing in such a tree is quadratic; for those files the parents
+# are indexed once (see `index_deep_tree`). Normal files are not indexed.
+_PARENT: dict[tuple[int, int, int], Node | None] = {}
+DEEP_TREE = 200
+
+
+def _key(node: Node) -> tuple[int, int, int]:
+    return (node.id, node.start_byte, node.end_byte)
+
+
+def index_deep_tree(root: Node, threshold: int = DEEP_TREE) -> bool:
+    """Index every parent in ``root``'s tree when it is deeper than
+    ``threshold`` levels. Returns True when it indexed."""
+    stack = [(root, 0)]
+    deep = False
+    while stack:
+        cur, depth = stack.pop()
+        if depth > threshold:
+            deep = True
+            break
+        stack.extend((c, depth + 1) for c in cur.children)
+    if not deep:
+        return False
+    _PARENT[_key(root)] = None
+    todo = [root]
+    while todo:
+        cur = todo.pop()
+        for child in cur.children:
+            _PARENT[_key(child)] = cur
+            todo.append(child)
+    return True
+
+
+def clear_parent_index() -> None:
+    _PARENT.clear()
+
+
+def parent_of(node: Node) -> Node | None:
+    """``node.parent``, from the index when the tree is a deep one."""
+    if _PARENT:
+        hit = _PARENT.get(_key(node), _MISSING_PARENT)
+        if hit is not _MISSING_PARENT:
+            return hit  # type: ignore[return-value]
+    return node.parent
+
+
+_MISSING_PARENT = object()
+
+
 def named_children(node: Node) -> list[Node]:
     return list(node.named_children)
 

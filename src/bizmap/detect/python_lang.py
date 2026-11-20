@@ -33,7 +33,16 @@ from bizmap.detect.py_schema import (
     is_schema_rel,
 )
 from bizmap.detect.rules import Rule, import_matches, method_matches
-from bizmap.detect.tsutil import call_args, call_callee_name, line_of, text, walk
+from bizmap.detect.tsutil import (
+    call_args,
+    call_callee_name,
+    clear_parent_index,
+    index_deep_tree,
+    line_of,
+    parent_of,
+    text,
+    walk,
+)
 from bizmap.files import rel
 from bizmap.graph import Confidence, Evidence
 from bizmap.schema_replay import Schema
@@ -239,7 +248,7 @@ def _enclosing_fn_node(node: Node) -> Node | None:
     is the answer for anything whose climb passes through it (a definition
     maps to itself)."""
     path: list[tuple[int, int, int]] = []
-    cur = node.parent
+    cur = parent_of(node)
     found: Node | None = None
     while cur is not None:
         key = (cur.id, cur.start_byte, cur.end_byte)
@@ -251,7 +260,7 @@ def _enclosing_fn_node(node: Node) -> Node | None:
         if cur.type == "function_definition":
             found = cur
             break
-        cur = cur.parent
+        cur = parent_of(cur)
     for key in path:
         _ENCLOSING_FN[key] = found
     return found
@@ -441,12 +450,12 @@ def _function_app_factory(
 
 
 def _inside_firestore_write(node: Node) -> bool:
-    cur = node.parent
+    cur = parent_of(node)
     depth = 0
     while cur is not None and depth < 24:
         if cur.type == "call" and call_callee_name(cur) in FIRESTORE_WRITE:
             return True
-        cur = cur.parent
+        cur = parent_of(cur)
         depth += 1
     return False
 
@@ -497,7 +506,7 @@ def _call_is_decorator(node: Node | None) -> bool:
             return True
         if cur.type in {"function_definition", "class_definition", "module"}:
             return False
-        cur = cur.parent
+        cur = parent_of(cur)
     return False
 
 
@@ -916,6 +925,7 @@ class PythonAnalyzer:
         analysis = PyAnalysis()
         _ENCLOSING_FN.clear()
         _PY_REEXPORTS.clear()
+        clear_parent_index()
         parsed: list[tuple[Path, str, bytes, Node, str, ImportMap, list[PyFunction]]] = []
         forest: list[object] = []
         consts_by_module: dict[str, dict[str, ResolvedString]] = {}
@@ -928,6 +938,7 @@ class PythonAnalyzer:
             ts_tree = self._parser.parse(source)
             forest.append(ts_tree)
             tree = ts_tree.root_node
+            index_deep_tree(tree)
             rel_file = rel(path, root)
             module = module_names.get(path) or _module_name(rel_file)
             imap = parse_imports(tree, module, is_package=rel_file.endswith("__init__.py"))
@@ -3540,7 +3551,7 @@ def _link_sql_references(
                     if mod:
                         sql = _sql_text((consts_by_module.get(mod) or {}).get(text(attr)))
             elif node.type == "identifier":
-                parent = node.parent
+                parent = parent_of(node)
                 if parent is not None and parent.type in {"attribute", "keyword_argument"}:
                     if parent.type == "attribute" or parent.child_by_field_name("name") == node:
                         continue
@@ -3560,10 +3571,10 @@ def _link_sql_references(
                 sql = const_sql(text(node))
             elif (
                 node.type == "string"
-                and node.parent is not None
-                and node.parent.type == "argument_list"
-                and node.parent.parent is not None
-                and call_callee_name(node.parent.parent) not in _SQL_KEY_SKIP_CALLS
+                and (up := parent_of(node)) is not None
+                and up.type == "argument_list"
+                and (call_node := parent_of(up)) is not None
+                and call_callee_name(call_node) not in _SQL_KEY_SKIP_CALLS
             ):
                 key = unquote(text(node))
                 if key in key_index:
