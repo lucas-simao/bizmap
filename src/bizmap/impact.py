@@ -227,7 +227,9 @@ def _norm(path: str) -> str:
         return ""
     if "//" in p or "/." in p or p.startswith("./") or p.endswith("/"):
         parts = [x for x in p.split("/") if x not in {"", "."}]
-        p = ("/" if p.startswith("/") else "") + "/".join(parts)
+        # POSIX keeps exactly two leading slashes (`//a`); one for `/a` or `///a`
+        lead = "//" if p.startswith("//") and not p.startswith("///") else ("/" if p.startswith("/") else "")
+        p = lead + "/".join(parts)
     return p
 
 
@@ -797,9 +799,12 @@ def _code(text: str) -> str:
 
 
 def _first_labels(graph: Graph, ids: set[str] | list[str], n: int) -> list[str]:
-    """Short labels of the first ``n`` ids (by id), padded so ``_names`` counts the rest."""
-    ordered = sorted(ids)
-    return sorted(_short_fn(graph, f) for f in ordered[:n]) + ordered[n:]
+    """The ``n`` alphabetically first short labels, padded so ``_names`` counts the rest."""
+    import heapq
+
+    ids = list(ids)
+    first = heapq.nsmallest(n, (_short_fn(graph, f) for f in ids))  # alphabetical, O(len) labels
+    return first + ids[len(first):]
 
 
 def _names(items: list[str], n: int = 4) -> str:
@@ -867,6 +872,7 @@ class _Facts:
     table_triggers: dict[str, list[str]]  # written table → db_trigger ids on it
     fired_on: dict[str, list[str]]  # written table → triggers these writes actually fire
     no_effect: set[str]  # triggers whose function has no known effect
+    cannot_fire: dict[str, str]  # trigger → why no write of the change matches its events
     http: list[Any]  # calls_http edges on the way to or from the change
     notes: list[str]
     low_conf: int
@@ -909,6 +915,7 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
     fired: dict[str, set[str]] = {}
     low: set[str] = set()
     dyn: dict[str, set[str]] = {}
+    write_ops: dict[str, set[str]] = {}
     reached_fns: list[str] = []
     while q:
         cur = q.popleft()
@@ -923,6 +930,11 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
                 via = str(e.attrs.get("via") or "")
                 if e.type == "writes" and via.startswith("db_trigger:"):
                     fired.setdefault(via, set()).add(_table_of(e.to_id))  # trigger → tables it writes
+                elif e.type == "writes" and not e.attrs.get("derived"):
+                    # the SQL operations of each direct write, per table name
+                    tname = e.to_id.rpartition("/")[2].split(":", 1)[-1].split(".", 1)[0].lower()
+                    ops = {str(o).upper() for o in e.attrs.get("ops") or []}
+                    write_ops.setdefault(tname, set()).update(ops or {"?"})  # "?": op not recorded
                 if str(e.confidence) in _LOW_CONF and not e.attrs.get("derived"):
                     low.add(e.id)
                 if e.to_id.rpartition("/")[2] in {"table:unknown"}:
@@ -966,6 +978,15 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
                and (graph.get(e.to_id) or Node("", "")).type == "function"]
         if not any(e.type in {"reads", "writes"} for f in fns for e in out_idx.get(f, [])):
             no_effect.add(tid)
+    # triggers no write of the change can fire: its events (INSERT / UPDATE /
+    # DELETE) are not among the operations of the direct writes to its table
+    cannot_fire: dict[str, str] = {}
+    for tid in {x for ts in table_triggers.values() for x in ts}:
+        node = graph.get(tid) or Node("", "")
+        events = {str(ev).upper().split()[0] for ev in node.attrs.get("events") or [] if str(ev).strip()}
+        ops = write_ops.get(str(node.attrs.get("table") or "").lower().split(".")[-1], set())
+        if events and ops and "?" not in ops and not ops & events:
+            cannot_fire[tid] = f"no {' / '.join(sorted(events))} in these writes ({' / '.join(sorted(ops))} only)"
 
     services: dict[str, list[str]] = {}
     if _multi_repo(graph) and tables:
@@ -1018,6 +1039,7 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
         tables=tables, services=services, ep_fns=ep_fns, direct=direct, fired=fired,
         table_triggers=table_triggers,
         no_effect=no_effect,
+        cannot_fire=cannot_fire,
         fired_on={t: [x for x in ts if x in fired] for t, ts in table_triggers.items() if any(x in fired for x in ts)},
         http=[http[k] for k in sorted(http)], notes=notes,
         low_conf=len(low), columns=columns, risk="none", reasons=[],
@@ -1320,7 +1342,9 @@ def render_markdown(
         max_chars = min(max_chars, max_bytes)
     from bizmap import __version__
 
-    # the comment and `--full-out` render the same impact: gather once
+    # the comment and `--full-out` render the same impact: gather once. The
+    # key is coarse (graph identity + sizes): an Impact mutated in place
+    # between two renders must drop `_render_memo` from its __dict__.
     memo = impact.__dict__.setdefault("_render_memo", {})
     mkey = (id(graph), shared_services, len(impact.functions), len(impact.schema_changes))
     if mkey not in memo:
@@ -1517,10 +1541,12 @@ def render_markdown(
             )
             if tid in facts.fired:
                 fires = "**yes**"
+            elif tid in facts.cannot_fire:
+                fires = f"no ({facts.cannot_fire[tid]})"
             elif tid in facts.no_effect:
                 fires = "unknown (its function was not scanned or has no known effect)"
             else:
-                fires = "no (the writes don't match its events)"
+                fires = "no (the scan saw no write matching its events or `UPDATE OF` columns)"
             path, line, _e = _node_where(graph, tid, prefix)
             rows.append(
                 f"| ⚡ {_code(_label(graph, tid))} | {_code(str(a.get('table') or '?'))} | {when or '—'} | {fires} | {links.where(path, line)} |"

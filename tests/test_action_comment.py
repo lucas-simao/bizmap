@@ -309,14 +309,12 @@ def test_trigger_that_does_not_fire_is_not_a_risk() -> None:
     g = checkout_graph()
     g.add_node("db_trigger:orders_touch", "db_trigger", name="orders_touch", table="orders", timing="AFTER",
                events=["UPDATE"], function="touch", evidence={"file": "db/schema.sql", "line": 60})
-    g.add_node("function:sql.touch", "function", name="touch")
-    g.add_edge("triggers", "db_trigger:orders_touch", "function:sql.touch")
-    g.add_edge("writes", "function:sql.touch", "table:audit_log")
+    # its function `touch()` is not in the scanned schema: still "no", an INSERT never fires it
     imp = compute_impact(g, _diff(("api/repository/orders.go", 15)))  # InsertOrder only
     md = render_markdown(g, imp, shared_services=9)
     assert "fires trigger `orders_audit`" in md and "orders_touch`" not in md.split("<details")[0]
     row = next(ln for ln in md.splitlines() if ln.startswith("| ⚡ `orders_touch`"))
-    assert "no (the writes don't match its events)" in row
+    assert "no (no UPDATE in these writes (INSERT only))" in row, row
     assert "orders_touch" not in render_mermaid(g, imp, triggers={"table:orders": ["db_trigger:orders_audit"]})
     diagram = md.split("```mermaid", 1)[1].split("```", 1)[0]
     assert "orders_audit" in diagram and "orders_touch" not in diagram
@@ -404,7 +402,7 @@ def test_norm_matches_posix_paths() -> None:
 
     from bizmap.impact import _norm
 
-    for p in ["", ".", "./a/b.go", "a//b/./c.py", "a/b/", "/abs/x.ts", "a\\b\\c.go", "./", "a/./", "x"]:
+    for p in ["//a/b", "///a", "", ".", "./a/b.go", "a//b/./c.py", "a/b/", "/abs/x.ts", "a\\b\\c.go", "./", "a/./", "x"]:
         want = PurePosixPath(p.replace("\\", "/")).as_posix()
         want = "" if want == "." else want.removeprefix("./")
         assert _norm(p) == want, (p, _norm(p), want)
@@ -431,3 +429,25 @@ def test_render_is_linear_in_edges() -> None:
     render_markdown(g, imp, details_url=RUN)
     render_markdown(g, imp, max_rows=100_000, max_chars=1_000_000, max_bytes=1_000_000)
     assert time.perf_counter() - t < 2, time.perf_counter() - t  # was ~5.8 s before the index
+
+
+def test_trigger_with_effect_and_matching_event_but_not_fired_is_no() -> None:
+    """Known effect, an UPDATE in the change, yet no firing: the `UPDATE OF` columns did not match."""
+    g = checkout_graph()
+    g.add_node("db_trigger:orders_paid", "db_trigger", name="orders_paid", table="orders", timing="AFTER",
+               events=["UPDATE"], function="paid", evidence={"file": "db/schema.sql", "line": 80})
+    g.add_node("function:sql.paid", "function", name="paid")
+    g.add_edge("triggers", "db_trigger:orders_paid", "function:sql.paid")
+    g.add_edge("writes", "function:sql.paid", "table:audit_log")
+    md = render_markdown(g, compute_impact(g, _diff(("api/repository/orders.go", 35))))  # SetStatus: UPDATE
+    row = next(ln for ln in md.splitlines() if ln.startswith("| ⚡ `orders_paid`"))
+    assert "no (the scan saw no write matching its events or `UPDATE OF` columns)" in row, row
+
+
+def test_sample_names_are_alphabetical() -> None:
+    from bizmap.impact import _first_labels
+
+    g = Graph()
+    ids = [_fn(g, "", f"pkg.{n}", "a.py", 1, 2) for n in ("zeta", "alpha", "mid", "beta")]
+    assert _first_labels(g, set(ids), 2)[:2] == ["pkg.alpha", "pkg.beta"]
+    assert len(_first_labels(g, set(ids), 2)) == 4
