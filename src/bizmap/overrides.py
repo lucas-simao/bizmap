@@ -28,6 +28,10 @@ class ScanConfig:
     repos: list[str] = field(default_factory=list)
     constants: dict[str, str] = field(default_factory=dict)
     workspace: Path | None = None
+    # generated / ignored paths: `scan: {include: [...], gitignore: false, skip_generated: false}`
+    include: list[str] = field(default_factory=list)
+    gitignore: bool = True
+    skip_generated: bool = True
 
 
 def git_toplevel(start: Path) -> Path | None:
@@ -150,7 +154,14 @@ def _load_scan_config(root: Path, config: Path | None = None) -> ScanConfig:
     if isinstance(database, dict):
         database = database.get("name") or database.get("id")
     constants = parse_yaml_constants(data.get("constants"))
+    scan_opts = data.get("scan") if isinstance(data.get("scan"), dict) else {}
+    include = scan_opts.get("include") or []
+    if isinstance(include, str):
+        include = [include]
     return ScanConfig(
+        include=[str(x) for x in include],
+        gitignore=bool(scan_opts.get("gitignore", True)),
+        skip_generated=bool(scan_opts.get("skip_generated", True)),
         exclude=[str(x) for x in exclude],
         expand_star=bool(expand),
         path=path,

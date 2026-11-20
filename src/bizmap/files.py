@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 SKIP_DIR_NAMES = {
@@ -24,6 +26,185 @@ SKIP_DIR_NAMES = {
     ".idea",
     ".vscode",
 }
+
+# Build output, package-manager caches and coverage reports: never source.
+# Skipped by default; `scan: include: [".yarn"]` in bizmap.yaml brings one back.
+GENERATED_DIR_NAMES = {
+    ".yarn",
+    "out",
+    "coverage",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    ".cache",
+    ".parcel-cache",
+    ".output",
+    ".vercel",
+    ".docusaurus",
+    ".expo",
+    ".serverless",
+    "storybook-static",
+}
+GENERATED_FILE_GLOBS = ("*.min.js", "*.min.mjs", "*.min.cjs", "*.bundle.js", "*.chunk.js")
+_MINIFY_SUFFIXES = {".js", ".mjs", ".cjs", ".jsx"}
+_MINIFY_SAMPLE = 256 * 1024
+
+
+def looks_generated(path: Path) -> bool:
+    """A bundled / minified JS file: a `sourceMappingURL` comment at the end,
+    or very long lines (a 2,000+ character line, or 300+ on average)."""
+    if path.suffix.lower() not in _MINIFY_SUFFIXES:
+        return False
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(_MINIFY_SAMPLE)
+            size = fh.seek(0, os.SEEK_END)
+            if size > _MINIFY_SAMPLE:
+                fh.seek(max(0, size - 1024))
+                tail = fh.read()
+            else:
+                tail = head[-1024:]
+    except OSError:
+        return False
+    if b"sourceMappingURL=" in tail:
+        return True
+    lines = head.split(b"\n")
+    if not lines or len(head) < 2000:
+        return False
+    longest = max(len(line) for line in lines)
+    average = len(head) / len(lines)
+    # minifiers drop whitespace; a long hand-written/generated source line
+    # (`'a' + 'b' + …`) keeps its spaces
+    blanks = sum(head.count(c) for c in (b" ", b"\t", b"\n", b"\r"))
+    sparse = blanks / len(head) < 0.06
+    return sparse and (longest >= 2000 or average >= 300)
+
+
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """A gitignore-style glob (`*`, `?`, `[...]`, `**`) as a regex on a
+    `/`-separated relative path."""
+    out = []
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("/**", i) and i + 3 == len(pattern):
+            out.append("/.*")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif c == "*":
+            out.append("[^/]*")
+            i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        elif c == "[":
+            j = pattern.find("]", i + 1)
+            if j == -1:
+                out.append(re.escape(c))
+                i += 1
+            else:
+                body = pattern[i + 1 : j].replace("\\", "\\\\")
+                if body.startswith("!"):
+                    body = "^" + body[1:]
+                out.append(f"[{body}]")
+                i = j + 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+@dataclass
+class _IgnoreRule:
+    base: str  # directory of the .gitignore, relative to the walk root ("" = root)
+    regex: re.Pattern[str]
+    negate: bool
+    dir_only: bool
+    anchored: bool
+
+
+@dataclass
+class GitIgnore:
+    """`.gitignore` rules (root and nested files), applied while walking.
+    Last matching rule wins; `!pattern` re-includes."""
+
+    rules: list[_IgnoreRule] = field(default_factory=list)
+
+    def load(self, directory: Path, base: str) -> None:
+        path = directory / ".gitignore"
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return
+        for raw in lines:
+            line = raw.rstrip()
+            if not line or line.startswith("#"):
+                continue
+            negate = line.startswith("!")
+            if negate:
+                line = line[1:]
+            if line.startswith("\\"):
+                line = line[1:]
+            dir_only = line.endswith("/")
+            line = line.rstrip("/")
+            if not line:
+                continue
+            anchored = "/" in line
+            line = line.lstrip("/")
+            self.rules.append(_IgnoreRule(base, _glob_regex(line), negate, dir_only, anchored))
+
+    def ignored(self, rel_posix: str, is_dir: bool) -> bool:
+        verdict = False
+        for rule in self.rules:
+            if rule.base and not (rel_posix == rule.base or rel_posix.startswith(rule.base + "/")):
+                continue
+            local = rel_posix[len(rule.base) + 1 :] if rule.base else rel_posix
+            if rule.dir_only and not is_dir:
+                continue
+            target = local if rule.anchored else local.rsplit("/", 1)[-1]
+            if rule.regex.match(target):
+                verdict = not rule.negate
+        return verdict
+
+
+@dataclass
+class WalkOptions:
+    """What `iter_files` leaves out besides `exclude` (see bizmap.yaml `scan:`)."""
+
+    include: Sequence[str] = ()  # dir names / globs brought back even if generated or ignored
+    gitignore: bool = True
+    skip_generated: bool = True
+    stats: dict[str, int] = field(default_factory=dict)
+    _seen: set[tuple[str, str]] = field(default_factory=set, repr=False)
+
+    def bump(self, key: str, rel_posix: str) -> None:
+        """Count a skipped path once, however many walks (one per language) see it."""
+        if (key, rel_posix) in self._seen:
+            return
+        self._seen.add((key, rel_posix))
+        self.stats[key] = self.stats.get(key, 0) + 1
+
+    def included(self, name: str, rel_posix: str) -> bool:
+        return any(name == pat or path_excluded(rel_posix, [pat]) for pat in self.include)
+
+
+def _gitignore_chain(root: Path) -> list[Path]:
+    """`.gitignore` directories from the git work tree root down to ``root``
+    (rules above the scanned directory still apply to it)."""
+    chain: list[Path] = []
+    cur = root
+    for parent in [cur, *cur.parents]:
+        chain.append(parent)
+        if (parent / ".git").exists():
+            return list(reversed(chain))
+    return [root]
+
 
 SQL_NAME_PRIORITY = (
     "schema.sql",
@@ -92,19 +273,64 @@ def iter_files(
     suffixes: Iterable[str],
     *,
     exclude: Sequence[str] | None = None,
+    options: WalkOptions | None = None,
 ) -> list[Path]:
+    """Source files under ``root`` with one of ``suffixes``, sorted. Skips VCS
+    and dependency dirs, and by default generated code (build output,
+    `.yarn`, coverage, minified/bundled JS) and `.gitignore`d paths."""
+    opts = options if options is not None else WalkOptions()
     wanted = {s.lower() if s.startswith(".") else f".{s.lower()}" for s in suffixes}
     out: list[Path] = []
     root = root.resolve()
+    ignore = GitIgnore()
+    prefix = ""
+    if opts.gitignore:
+        chain = _gitignore_chain(root)
+        top = chain[0]
+        for directory in chain[:-1]:
+            ignore.load(directory, rel(directory, top) if directory != top else "")
+        # every rule base and every tested path is relative to the work-tree root
+        prefix = rel(root, top) if root != top else ""
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
         base = Path(dirpath)
+        rel_dir = rel(base, root) if base != root else ""
+        if opts.gitignore:
+            ignore.load(base, (prefix + "/" + rel_dir).strip("/") if prefix else rel_dir)
+        kept: list[str] = []
+        for d in sorted(dirnames):
+            if d in {".git", ".hg", ".svn"}:
+                continue
+            d_rel = f"{rel_dir}/{d}" if rel_dir else d
+            if opts.include and opts.included(d, d_rel):
+                kept.append(d)
+                continue
+            if d in SKIP_DIR_NAMES:
+                continue
+            if opts.skip_generated and d in GENERATED_DIR_NAMES:
+                opts.bump("generated_dirs", d_rel)
+                continue
+            if opts.gitignore and ignore.ignored((prefix + "/" + d_rel).strip("/") if prefix else d_rel, True):
+                opts.bump("gitignored", d_rel)
+                continue
+            kept.append(d)
+        dirnames[:] = kept
         for name in filenames:
             path = base / name
             if path.suffix.lower() not in wanted:
                 continue
-            rel_posix = rel(path, root)
+            rel_posix = f"{rel_dir}/{name}" if rel_dir else name
             if path_excluded(rel_posix, exclude):
+                continue
+            if opts.include and opts.included(name, rel_posix):
+                out.append(path)
+                continue
+            if opts.gitignore and ignore.ignored((prefix + "/" + rel_posix).strip("/") if prefix else rel_posix, False):
+                opts.bump("gitignored", rel_posix)
+                continue
+            if opts.skip_generated and (
+                any(fnmatch.fnmatch(name, g) for g in GENERATED_FILE_GLOBS) or looks_generated(path)
+            ):
+                opts.bump("generated_files", rel_posix)
                 continue
             out.append(path)
     return sorted(out)
@@ -117,9 +343,11 @@ def rel(path: Path, root: Path) -> str:
         return path.as_posix()
 
 
-def discover_sql_files(root: Path, *, exclude: Sequence[str] | None = None) -> list[Path]:
+def discover_sql_files(
+    root: Path, *, exclude: Sequence[str] | None = None, options: WalkOptions | None = None
+) -> list[Path]:
     """Return SQL files in apply order: schema-like first, then migrations, then the rest."""
-    files = iter_files(root, [".sql"], exclude=exclude)
+    files = iter_files(root, [".sql"], exclude=exclude, options=options)
     schema_like: list[Path] = []
     migrations: list[Path] = []
     other: list[Path] = []
