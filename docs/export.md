@@ -2,6 +2,11 @@
 
 *Requires bizmap 0.5.0+.*
 
+!!! note "Not released yet"
+
+    `bizmap export` is merged on `main` and ships with **0.5.0**. The current
+    release on PyPI does not have it yet.
+
 ```bash
 bizmap scan . --out bizmap.graph.json            # or a --discover / registry-merged graph
 bizmap export --graph bizmap.graph.json --format html --out bizmap.html

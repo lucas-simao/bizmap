@@ -72,7 +72,7 @@ It is versioned (`version` in the JSON) and documented in
 minor versions; breaking changes are called out in the
 [changelog](https://github.com/lucas-simao/bizmap/blob/main/CHANGELOG.md).
 
-## Is an HTML view coming?
+## Is there an HTML view?
 
-Yes: `bizmap export --format html` is planned for 0.5.0 —
-see [export (coming soon)](commands/export.md).
+`bizmap export --format html` is coming in 0.5.0 —
+see [export](export.md) (merged on `main`, ships in 0.5.0).

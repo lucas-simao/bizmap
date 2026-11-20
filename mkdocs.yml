@@ -96,7 +96,7 @@ nav:
       - impact: commands/impact.md
       - registry: commands/registry.md
       - mcp: commands/mcp.md
-      - export (coming soon): commands/export.md
+      - export (0.5.0, not released yet): export.md
   - Languages and detectors: languages.md
   - MCP server: mcp.md
   - GitHub Action: github-action.md
