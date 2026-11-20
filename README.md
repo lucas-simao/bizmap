@@ -252,10 +252,12 @@ push a tag on that commit:
 git tag -a v0.3.5 <commit> -m "v0.3.5" && git push origin v0.3.5
 ```
 
-`.github/workflows/release.yml` checks that the tag matches the version and the
-CHANGELOG, runs the tests, builds, publishes to PyPI with Trusted Publishing (no
-token) and creates the GitHub release with that CHANGELOG section. One-time setup
-is described at the top of the workflow.
+`.github/workflows/release.yml` checks that the tag is on `main` and matches the
+version and the CHANGELOG, runs the tests, builds, publishes to PyPI with Trusted
+Publishing (no token) and creates the GitHub release with that CHANGELOG section.
+One-time setup is described at the top of the workflow. Tags on commits older
+than the workflow (v0.3.3–v0.3.5) are published with **Actions → Release → Run
+workflow** and the tag name.
 
 ## Development
 
