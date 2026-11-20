@@ -11,6 +11,7 @@ cross-repo HTTP links matched, exactly like `bizmap scan ./a ./b ./c`).
 bizmap scan --discover ~/work --list         # what would be scanned, and why
 bizmap scan --discover ~/work --list --json  # the same, as JSON
 bizmap scan --discover ~/work --out work.json
+bizmap scan --discover --list                # no folder: the current directory (0.4.3+)
 ```
 
 Nothing is fetched, checked out or changed: BizMap only reads the files that
