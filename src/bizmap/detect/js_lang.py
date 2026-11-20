@@ -950,6 +950,8 @@ class JsAnalyzer:
             rel_file = rel(path, root)
             module = rel_file.replace("/", ".").rsplit(".", 1)[0]
             parsed.append((path, rel_file, module, tree, source))
+        _KNOWN_MODULES.clear()
+        _KNOWN_MODULES.update(_path_to_module(p[1]) for p in parsed)
 
         consts_by_mod: dict[str, dict[str, str]] = {}
         routers_by_mod: dict[str, dict[str, str]] = {}
@@ -1006,6 +1008,7 @@ class JsAnalyzer:
                     if name and value is not None and value.type in {
                         "arrow_function",
                         "function",
+                        "function_expression",
                     }:
                         qual = _fn_qual(value, module) or f"{module}.{name}"
                         analysis.functions[qual] = (rel_file, line_of(node))
@@ -2482,12 +2485,14 @@ def _export_sources(
         if cand not in known:
             continue
         exports = exports_by_mod.get(cand) or {}
-        if name in exports:
-            return {(cand, exports[name])}
         named, stars = _REEXPORTS.get(cand, ({}, []))
+        # `export { a as b } from './x'` also lands in the barrel's own export
+        # map (b -> a); the re-export says where it really lives
         if name in named:
             nmod, orig = named[name]
             return _export_sources(nmod, orig, exports_by_mod, known, depth + 1) or {(nmod, orig)}
+        if name in exports:
+            return {(cand, exports[name])}
         found: set[tuple[str, str]] = set()
         for star in stars:
             if name == "default":
@@ -2787,13 +2792,22 @@ def _map_ts_alias(spec: str, aliases: list, current: str | None = None) -> str |
         for a in aliases
         if not scope_of(a) or (current is not None and (current == scope_of(a) or current.startswith(scope_of(a) + ".")))
     ]
+    first: str | None = None
     for item in sorted(usable, key=lambda a: (-len(scope_of(a)), -len(a[0]))):
         pattern, targets = item[0], item[1]
         for target in targets:
             mapped = _apply_ts_pattern(spec, pattern, target)
-            if mapped:
-                return _path_to_module(mapped)
-    return None
+            if not mapped:
+                continue
+            module = _path_to_module(mapped)
+            # `"~/*": ["src/*", "generated/*"]`: the first target that exists,
+            # like TypeScript (falls back to the first mapping)
+            if not _KNOWN_MODULES or module in _KNOWN_MODULES or f"{module}.index" in _KNOWN_MODULES:
+                return module
+            first = first or module
+        if first:
+            break
+    return first
 
 
 def _parse_jsonc(raw: str) -> object:
@@ -2964,10 +2978,16 @@ def _ts_path_aliases(root: Path) -> list[tuple[str, list[str], str]]:
             continue
         scope = scope_for(cfg_path.parent)
         # '@': path.resolve(__dirname, './src')  /  '@': fileURLToPath(new URL('./src', import.meta.url))
-        for m in re.finditer(
+        object_form = re.finditer(
             r"""['"]?([@~#][\w\-/]*)['"]?\s*:\s*(?:path\.)?(?:resolve|join|fileURLToPath)\s*\((?:[^'"()]*?,\s*)?(?:new\s+URL\(\s*)?['"]([^'"]+)['"]""",
             raw,
-        ):
+        )
+        # alias: [{ find: '@', replacement: path.resolve(__dirname, 'src') }]
+        array_form = re.finditer(
+            r"""find\s*:\s*['"]([^'"]+)['"]\s*,\s*replacement\s*:\s*(?:(?:path\.)?(?:resolve|join|fileURLToPath)\s*\((?:[^'"()]*?,\s*)?(?:new\s+URL\(\s*)?)?['"]([^'"]+)['"]""",
+            raw,
+        )
+        for m in [*object_form, *array_form]:
             name, target = m.group(1), m.group(2)
             target_rel = rel_to_root(cfg_path.parent, target)
             if not target_rel:
@@ -3640,6 +3660,8 @@ def _collect_path_helpers(tree: Node, consts: dict[str, str]) -> dict[str, str]:
 
 
 _REEXPORTS: dict[str, tuple[dict[str, tuple[str, str]], list[str]]] = {}
+# modules of every parsed JS/TS file, for path aliases with several targets
+_KNOWN_MODULES: set[str] = set()
 
 
 def _collect_reexports(

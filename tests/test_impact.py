@@ -827,3 +827,90 @@ def test_tsconfig_paths_relative_to_config_and_scoped(tmp_path: Path) -> None:
     assert ("function:apps.web.src.page.page", "function:apps.web.src.lib.fmt.fmt") in calls, calls
     assert ("function:apps.admin.app.page.page", "function:apps.admin.app.lib.fmt.fmt") in calls, calls
     assert ("function:apps.shop.src.page.page", "function:apps.shop.src.util.fmt.fmt") in calls, calls
+
+
+def _use_calls(tmp_path: Path, files: dict[str, str], fn: str = "function:svc.use.u") -> set[str]:
+    graph = _scan(tmp_path, files)
+    return {t for f, t in _calls_from(graph, fn)}
+
+
+def test_named_reexport_barrel_file(tmp_path: Path) -> None:
+    got = _use_calls(
+        tmp_path,
+        {
+            "svc/a.ts": "export function alpha() { return 1 }\n",
+            "svc/index.ts": "export { alpha } from './a';\n",
+            "svc/use.ts": "import { alpha } from './index';\nexport function u() { return alpha() }\n",
+        },
+    )
+    assert got == {"function:svc.a.alpha"}, got
+
+
+def test_named_reexport_directory_barrel(tmp_path: Path) -> None:
+    got = _use_calls(
+        tmp_path,
+        {
+            "svc/lib/top.ts": "export function top() { return 1 }\n",
+            "svc/lib/index.ts": "export { top } from './top';\n",
+            "svc/use.ts": "import { top } from './lib';\nexport function u() { return top() }\n",
+        },
+    )
+    assert got == {"function:svc.lib.top.top"}, got
+
+
+def test_renamed_reexport(tmp_path: Path) -> None:
+    got = _use_calls(
+        tmp_path,
+        {
+            "svc/a.ts": "export function alpha() { return 1 }\n",
+            "svc/index.ts": "export { alpha as renamed } from './a';\n",
+            "svc/use.ts": "import { renamed } from './index';\nexport function u() { return renamed() }\n",
+        },
+    )
+    assert got == {"function:svc.a.alpha"}, got
+
+
+def test_mixed_barrel_named_and_star(tmp_path: Path) -> None:
+    got = _use_calls(
+        tmp_path,
+        {
+            "svc/a.ts": "export function alpha() { return 1 }\n",
+            "svc/b.ts": "export function gamma() { return 2 }\n",
+            "svc/index.ts": "export { alpha } from './a';\nexport * from './b';\n",
+            "svc/use.ts": "import { alpha, gamma } from './index';\nexport function u() { alpha(); gamma() }\n",
+        },
+    )
+    assert got == {"function:svc.a.alpha", "function:svc.b.gamma"}, got
+
+
+def test_vite_array_alias_and_multi_target_paths(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "web/vite.config.ts": (
+                "import path from 'path';\n"
+                "export default { resolve: { alias: [{ find: '@', replacement: path.resolve(__dirname, 'src') }] } };\n"
+            ),
+            "web/src/util/fmt.ts": "export function fmt() { return 1 }\n",
+            "web/src/page.ts": "import { fmt } from '@/util/fmt';\nexport function page() { return fmt() }\n",
+            "api/tsconfig.json": '{"compilerOptions": {"baseUrl": ".", "paths": {"~/*": ["src/*", "generated/*"]}}}',
+            "api/src/own.ts": "export function own() { return 1 }\n",
+            "api/generated/client.ts": "export function gen() { return 2 }\n",
+            "api/src/use.ts": (
+                "import { own } from '~/own';\nimport { gen } from '~/client';\n"
+                "export function u() { own(); gen() }\n"
+            ),
+        },
+    )
+    calls = {(e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls"}
+    assert ("function:web.src.page.page", "function:web.src.util.fmt.fmt") in calls, calls
+    assert ("function:api.src.use.u", "function:api.src.own.own") in calls, calls
+    assert ("function:api.src.use.u", "function:api.generated.client.gen") in calls, calls
+
+
+def test_const_function_expression_is_a_node(tmp_path: Path) -> None:
+    got = _use_calls(
+        tmp_path,
+        {"svc/use.ts": "const fe = function (n: number) { return n };\nexport function u() { return fe(1) }\n"},
+    )
+    assert got == {"function:svc.use.fe"}, got
