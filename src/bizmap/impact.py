@@ -145,7 +145,7 @@ def _changed_functions(graph: Graph, changes: dict[str, set[int]], prefix: str) 
     for nid, node in graph.nodes.items():
         if node.type != "function":
             continue
-        start = (node.attrs.get("evidence") or {}).get("line")
+        start = node.attrs.get("start_line") or (node.attrs.get("evidence") or {}).get("line")
         end = node.attrs.get("end_line")
         if not isinstance(start, int) or not isinstance(end, int) or end < start:
             continue

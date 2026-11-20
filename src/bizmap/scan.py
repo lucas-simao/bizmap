@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from bizmap.spans import fill_spans
 from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
 from bizmap.detect.js_lang import JsAnalysis, JsAnalyzer
 from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer
@@ -2163,6 +2164,7 @@ def _scan_one(
     _link_firestore_triggers(graph)
     if cfg.path:
         apply_overrides(graph, cfg.path)
+    fill_spans(graph, root)
     timings.propagate += go_prop + py_prop + (time.perf_counter() - t_prop)
 
     if profile:
