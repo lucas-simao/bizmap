@@ -18,9 +18,11 @@ from bizmap.detect.rules import Rule, import_matches, method_matches
 from bizmap.detect.tsutil import (
     call_args,
     call_callee_name,
+    clear_typed_walks,
     flatten_plus,
     line_of,
     text,
+    typed_walk,
     walk,
 )
 from bizmap.files import rel
@@ -1112,6 +1114,17 @@ def _join_path(*parts: str) -> str:
     return out or "/"
 
 
+_CALL = frozenset({"call_expression"})
+_ASSIGN = frozenset({"short_var_declaration", "assignment_statement"})
+_ASSIGN_VAR = frozenset({"short_var_declaration", "assignment_statement", "var_declaration"})
+_RETURN = frozenset({"return_statement"})
+_TYPE_SPEC = frozenset({"type_spec"})
+_COMPOSITE = frozenset({"composite_literal"})
+_LITERALS = frozenset({"unary_expression", "composite_literal"})
+_GO_STMT = frozenset({"go_statement"})
+_ENV_NODES = frozenset({"range_clause", "short_var_declaration", "assignment_statement"})
+
+
 def _same_project(a: str, b: str) -> bool:
     """Two import paths of one project: same host and owner
     (`example.com/acme/...`), never the standard library."""
@@ -1238,6 +1251,7 @@ class GoAnalyzer:
         try:
             return self._analyze(files, root, profile, constants)
         finally:
+            clear_typed_walks()
             gc.unfreeze()
             gc.set_threshold(*old)
 
@@ -1250,6 +1264,7 @@ class GoAnalyzer:
     ) -> GoAnalysis:
         self._local_types_cache.clear()
         self._file_types_cache.clear()
+        clear_typed_walks()
         self._file_http_bases: dict[str, dict[tuple[str, str, str], ResolvedString]] = {}
         self._yaml_constants = constants or {}
         infos: list[_FileInfo] = []
@@ -1358,9 +1373,7 @@ class GoAnalyzer:
                 self._scan_function_env(fn, env, package_consts, info, idx)
                 prefix_map = prefix_by_fn.get(fn.qualname) or {}
                 req_vars: dict[str, tuple[str, str, bool]] = {}
-                for node in walk(fn.node):
-                    if node.type != "call_expression":
-                        continue
+                for node in typed_walk(fn.node, _CALL):
                     method = call_callee_name(node)
                     args = call_args(node)
                     evidence = Evidence(file=info.rel, line=line_of(node), symbol=fn.qualname)
@@ -1709,7 +1722,7 @@ class GoAnalyzer:
         info: _FileInfo,
         idx: _Indexes,
     ) -> None:
-        for node in walk(fn.node):
+        for node in typed_walk(fn.node, _ENV_NODES):
             if node.type == "range_clause":
                 left = node.child_by_field_name("left")
                 right = node.child_by_field_name("right")
@@ -1954,9 +1967,7 @@ class GoAnalyzer:
 
     def _group_assignments(self, fn: GoFunction) -> list[tuple[str, Node]]:
         assignments: list[tuple[str, Node]] = []
-        for node in walk(fn.node):
-            if node.type not in {"short_var_declaration", "assignment_statement"}:
-                continue
+        for node in typed_walk(fn.node, _ASSIGN):
             lists = [c for c in node.named_children if c.type == "expression_list"]
             if len(lists) < 2:
                 continue
@@ -2012,9 +2023,7 @@ class GoAnalyzer:
         if not (fn.return_type and fn.return_type.name == "Group"):
             return None
         found: list[str] = []
-        for node in walk(fn.node):
-            if node.type != "return_statement":
-                continue
+        for node in typed_walk(fn.node, _RETURN):
             expr_list = next((c for c in node.named_children if c.type == "expression_list"), None)
             expr = None
             if expr_list is not None and expr_list.named_children:
@@ -2096,9 +2105,7 @@ class GoAnalyzer:
                         if prefixes.get(ident) != rp:
                             prefixes[ident] = rp
                             changed = True
-                    for node in walk(fn.node):
-                        if node.type != "call_expression":
-                            continue
+                    for node in typed_walk(fn.node, _CALL):
                         hits = self._resolve_callees(node, fn, info, idx)
                         if not hits:
                             continue
@@ -2301,9 +2308,7 @@ class GoAnalyzer:
             return cached
         types = dict(self._file_types(info, idx))
         types.update(fn.params)
-        for node in walk(fn.node):
-            if node.type not in {"short_var_declaration", "assignment_statement", "var_declaration"}:
-                continue
+        for node in typed_walk(fn.node, _ASSIGN_VAR):
             targets = []
             if node.type == "var_declaration":
                 for spec in node.named_children:
@@ -2789,18 +2794,14 @@ class GoAnalyzer:
                     None,
                 )
                 path_names = {path_param}
-                for node in walk(fn.node):
-                    if node.type not in {"short_var_declaration", "assignment_statement"}:
-                        continue
+                for node in typed_walk(fn.node, _ASSIGN):
                     pairs = self._assignment_pairs(node)
                     for lhs, rhs in pairs:
                         raw = text(rhs)
                         if path_param in raw or any(n in raw for n in path_names):
                             path_names.add(lhs)
                 base_field = ""
-                for node in walk(fn.node):
-                    if node.type != "call_expression":
-                        continue
+                for node in typed_walk(fn.node, _CALL):
                     method = call_callee_name(node)
                     args = call_args(node)
                     url_node = None
@@ -2817,9 +2818,7 @@ class GoAnalyzer:
                         continue
                     field = self._base_field_in_expr(url_node, fn.receiver_var)
                     if not field:
-                        for n2 in walk(fn.node):
-                            if n2.type not in {"short_var_declaration", "assignment_statement"}:
-                                continue
+                        for n2 in typed_walk(fn.node, _ASSIGN):
                             for lhs, rhs in self._assignment_pairs(n2):
                                 if lhs == raw or lhs in path_names:
                                     field = self._base_field_in_expr(rhs, fn.receiver_var)
@@ -2866,9 +2865,7 @@ class GoAnalyzer:
         out: dict[tuple[str, str, str], str] = {}
         tag_re = re.compile(r'(?:env|envconfig)\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)')
         for info in infos:
-            for spec in walk(info.tree):
-                if spec.type != "type_spec":
-                    continue
+            for spec in typed_walk(info.tree, _TYPE_SPEC):
                 sname = text(spec.child_by_field_name("name"))
                 typ = spec.child_by_field_name("type")
                 if not sname or typ is None or typ.type != "struct_type":
@@ -2883,9 +2880,7 @@ class GoAnalyzer:
                     for ident in fd.named_children:
                         if ident.type in {"field_identifier", "identifier"}:
                             out[(info.import_path, sname, text(ident))] = m.group(1)
-            for node in walk(info.tree):
-                if node.type != "composite_literal":
-                    continue
+            for node in typed_walk(info.tree, _COMPOSITE):
                 gtype = _parse_type(
                     node.child_by_field_name("type"), info.package, info.import_path, info.import_aliases
                 )
@@ -2941,9 +2936,7 @@ class GoAnalyzer:
 
         for info in infos:
             dummy = self._synthetic_func(info, info.tree, "_http_base")
-            for node in walk(info.tree):
-                if node.type != "composite_literal":
-                    continue
+            for node in typed_walk(info.tree, _COMPOSITE):
                 gtype = _parse_type(
                     node.child_by_field_name("type"),
                     info.package,
@@ -2983,9 +2976,7 @@ class GoAnalyzer:
             values: dict[tuple[str, str, str], ResolvedString] = {}
             for info in infos:
                 for fn in info.functions:
-                    for node in walk(fn.node):
-                        if node.type != "call_expression":
-                            continue
+                    for node in typed_walk(fn.node, _CALL):
                         callee = self._resolve_callee(node, fn, info, idx)
                         if callee is None:
                             continue
@@ -3138,7 +3129,7 @@ class GoAnalyzer:
     def _collect_func_field_bindings(self, infos: list[_FileInfo], idx: _Indexes) -> None:
         for info in infos:
             for fn in info.functions:
-                for node in walk(fn.node):
+                for node in typed_walk(fn.node, _LITERALS):
                     lit = node
                     if node.type == "unary_expression":
                         inner = node.child_by_field_name("operand") or (
@@ -3150,9 +3141,8 @@ class GoAnalyzer:
                         self._bind_composite(lit, fn, info, idx)
         for info in infos:
             for fn in info.functions:
-                for node in walk(fn.node):
-                    if node.type == "call_expression":
-                        self._bind_constructor_call(node, fn, info, idx)
+                for node in typed_walk(fn.node, _CALL):
+                    self._bind_constructor_call(node, fn, info, idx)
 
     def _bind_composite(
         self, lit: Node, fn: GoFunction, info: _FileInfo, idx: _Indexes
@@ -3282,9 +3272,7 @@ class GoAnalyzer:
         jobs: list[JobHit] = []
         seen_handlers: set[str] = set()
         for info in infos:
-            for node in walk(info.tree):
-                if node.type != "go_statement":
-                    continue
+            for node in typed_walk(info.tree, _GO_STMT):
                 call = next((c for c in node.named_children if c.type == "call_expression"), None)
                 if call is None:
                     continue
@@ -3335,9 +3323,7 @@ class GoAnalyzer:
                 continue
             seen.add(cur.qualname)
             cur_info = info_by_ip.get(cur.import_path, info)
-            for node in walk(cur.node):
-                if node.type != "call_expression":
-                    continue
+            for node in typed_walk(cur.node, _CALL):
                 if _is_scheduler_call(node, cur_info):
                     return True
             for qn in callees_of.get(cur.qualname, ()):
@@ -3346,9 +3332,7 @@ class GoAnalyzer:
                     stack.append(nxt)
             # Closures / composite-literal bodies: resolve callees inside this node too.
             dummy_info = cur_info
-            for node in walk(cur.node):
-                if node.type != "call_expression":
-                    continue
+            for node in typed_walk(cur.node, _CALL):
                 parent = node.parent
                 if parent is not None and parent.type == "go_statement":
                     continue

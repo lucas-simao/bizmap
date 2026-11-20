@@ -195,7 +195,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4   # the base commit is fetched if missing; fetch-depth: 0 also works
-      - uses: lucas-simao/bizmap@v0.4.1
+      - uses: lucas-simao/bizmap@v0.4.2
         with:
           path: .            # or the workspace dir holding bizmap.yaml with `repos:`
 ```

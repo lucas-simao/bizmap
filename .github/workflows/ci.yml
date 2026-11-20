@@ -45,9 +45,6 @@ jobs:
           cat /tmp/checkout*.mmd
           bizmap why orders.status --graph /tmp/checkout.json
           bizmap report examples/checkout
-      - name: TEMP profile heavy
-        continue-on-error: true
-        run: python scripts/bench_go.py 1000 --heavy --all-files --profile 2>&1 | head -80
       - name: Go phase scaling (informational)
         run: |
           python scripts/bench_go.py 500 1000 2000 4000
