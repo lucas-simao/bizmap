@@ -893,6 +893,7 @@ class PythonAnalyzer:
         constants: dict[str, str] | None = None,
     ) -> PyAnalysis:
         analysis = PyAnalysis()
+        _PY_REEXPORTS.clear()
         parsed: list[tuple[Path, str, bytes, Node, str, ImportMap, list[PyFunction]]] = []
         forest: list[object] = []
         consts_by_module: dict[str, dict[str, ResolvedString]] = {}
@@ -907,7 +908,7 @@ class PythonAnalyzer:
             tree = ts_tree.root_node
             rel_file = rel(path, root)
             module = module_names.get(path) or _module_name(rel_file)
-            imap = parse_imports(tree, module)
+            imap = parse_imports(tree, module, is_package=rel_file.endswith("__init__.py"))
             imaps[module] = imap
             fns = self._collect_functions(tree, source, rel_file, module)
             for fn in fns:
@@ -915,6 +916,7 @@ class PythonAnalyzer:
             parsed.append((path, rel_file, source, tree, module, imap, fns))
 
         _remap_imports_by_suffix(imaps, set(imaps))
+        _follow_python_reexports(imaps, analysis.functions)
 
         yaml_consts = {
             str(k): ResolvedString(str(v), True, False) for k, v in (constants or {}).items()
@@ -3611,6 +3613,9 @@ def _fn_ref(
             mod = imap.modules.get(oname)
             if mod and f"{mod}.{aname}" in functions:
                 return f"{mod}.{aname}"
+            if mod and _PY_REEXPORTS.get(f"{mod}.{aname}") in functions:
+                # `import image_utils; image_utils.crop(...)` re-exported by __init__
+                return _PY_REEXPORTS[f"{mod}.{aname}"]
             # `from pkg import module` + `module.fn`
             if oname in imap.from_names:
                 src_mod, orig = imap.from_names[oname]
@@ -4571,3 +4576,59 @@ def _remap_imports_by_suffix(imaps: dict[str, ImportMap], scanned: set[str]) -> 
             hit = _suffix_module(mod, scanned, cache)
             if hit:
                 imap.from_names[local] = (hit, orig)
+
+
+
+# ---------------------------------------------------------------------------
+# Re-exports: `pkg/image_utils/__init__.py` does `from .crop import crop_to_data_uri`
+# (or `from .crop import *`); `from image_utils import crop_to_data_uri` must
+# reach `image_utils.crop.crop_to_data_uri`.
+# ---------------------------------------------------------------------------
+
+_PY_REEXPORTS: dict[str, str] = {}
+
+
+def _reexport_target(
+    imaps: dict[str, ImportMap], functions: dict, mod: str, name: str
+) -> tuple[str, str] | None:
+    cur = (mod, name)
+    seen: set[tuple[str, str]] = set()
+    for _ in range(6):
+        if f"{cur[0]}.{cur[1]}" in functions:
+            return cur
+        if cur in seen:
+            return None
+        seen.add(cur)
+        src = imaps.get(cur[0])
+        if src is None:
+            return None
+        if cur[1] in src.from_names:
+            cur = src.from_names[cur[1]]
+            continue
+        star = next((m for m in src.star_modules if f"{m}.{cur[1]}" in functions), None)
+        if star is not None:
+            return star, cur[1]
+        star = next((m for m in src.star_modules if m in imaps and cur[1] in imaps[m].from_names), None)
+        if star is None:
+            return None
+        cur = (star, cur[1])
+    return None
+
+
+def _follow_python_reexports(imaps: dict[str, ImportMap], functions: dict) -> None:
+    for module, imap in imaps.items():
+        for local, (mod, orig) in list(imap.from_names.items()):
+            if f"{mod}.{orig}" in functions or f"{mod}.{orig}" in imaps:
+                continue
+            hit = _reexport_target(imaps, functions, mod, orig)
+            if hit is not None and hit != (mod, orig):
+                imap.from_names[local] = hit
+        # names this module re-exports (for `import pkg; pkg.fn()`)
+        for local, (mod, orig) in imap.from_names.items():
+            if f"{mod}.{orig}" in functions:
+                _PY_REEXPORTS.setdefault(f"{module}.{local}", f"{mod}.{orig}")
+        for star in imap.star_modules:
+            prefix = f"{star}."
+            for qual in functions:
+                if qual.startswith(prefix) and "." not in qual[len(prefix):]:
+                    _PY_REEXPORTS.setdefault(f"{module}.{qual[len(prefix):]}", qual)

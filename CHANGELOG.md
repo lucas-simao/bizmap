@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **Python package re-exports**: names re-exported by a package's
+  `__init__.py` (`from .crop import f`, `from .resize import *`, chained
+  barrels) resolve to the defining module, for `from pkg import f` and
+  `import pkg; pkg.f()`. Found on the way: in an `__init__.py`, a relative
+  import (`from .crop import …`) was resolved from the package's *parent*
+  (`crop` instead of `image_utils.crop`); `.` now means the package itself.
+
 - **Per-call `baseURL` overrides the instance base**: `http.post(url, body,
   { baseURL: V2 })`, `http.get(url, { baseURL })` and
   `http.request({ baseURL, url })` use the call's own base (axios/ky config
