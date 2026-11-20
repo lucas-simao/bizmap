@@ -16,9 +16,10 @@ jobs:
       - name: demo
         run: |
           set -x
-          git clone -q -b demo/v0.4 demo.bundle demo
+          git clone -q https://github.com/lucas-simao/bizmap-demo demo
           cd demo
-          for b in order-discount schema-only migration-multi extra-handler; do git branch -q pr/$b origin/pr/$b; done
+          git fetch -q ../demo.bundle 'refs/heads/*:refs/heads/*'
+          git checkout -q demo/v0.4
           echo "::group::scan"; COLUMNS=100 bizmap scan . --mermaid; echo "::endgroup::"
           echo "::group::mmd"; cat bizmap.graph.mmd; echo "::endgroup::"
           echo "::group::report"; bizmap report; echo "::endgroup::"
