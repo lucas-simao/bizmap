@@ -523,3 +523,52 @@ def test_no_hint_for_docs_only_diffs() -> None:
     graph = scan_path(CHECKOUT)
     imp = compute_impact(graph, _diff("README.md", 3) + _diff(".github/workflows/x.yml", 1))
     assert imp.functions == [] and imp.hint is None
+
+
+def test_module_and_imported_function_calls(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/server.ts": (
+                "import express from 'express';\n"
+                "import { helperTop } from './lib';\n"
+                "import fetchStock from './stock';\n"
+                "const app = express();\n"
+                "function local() { return 1; }\n"
+                "function helperOuter() { local(); return helperTop(); }\n"
+                "export function makeB(http) {\n"
+                "  return { run: () => build(), inv: () => fetchStock() };\n"
+                "}\n"
+                "function build() { return 2; }\n"
+                "app.get('/x', (req, res) => res.json(helperOuter()));\n"
+            ),
+            "svc/lib.ts": "import axios from 'axios';\nexport function helperTop() { return axios.get('http://svc/other'); }\n",
+            "svc/stock.ts": "export default function fetchStock() { return 3; }\n",
+        },
+    )
+    calls = {(e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls"}
+    assert ("function:svc.server.helperOuter", "function:svc.lib.helperTop") in calls, calls
+    assert ("function:svc.server.helperOuter", "function:svc.server.local") in calls, calls
+    assert ("function:svc.server.makeB.run", "function:svc.server.build") in calls, calls
+    assert ("function:svc.server.makeB.inv", "function:svc.stock.fetchStock") in calls, calls
+    # no edges to things that are not scanned functions
+    assert not [c for c in calls if c[1].startswith("function:express")], calls
+
+
+def test_method_members_are_called_by_the_factory(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "web/c.ts": (
+                "export function createShopClient(http) {\n"
+                "  return {\n"
+                "    stock(sku) { return http.get(`/inventory/${sku}`); },\n"
+                "    order: (id) => http.get(`/orders/${id}`),\n"
+                "  };\n"
+                "}\n"
+            ),
+        },
+    )
+    calls = {(e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls"}
+    f = "function:web.c.createShopClient"
+    assert (f, f + ".stock") in calls and (f, f + ".order") in calls, calls

@@ -964,6 +964,7 @@ class JsAnalyzer:
         class_ctors_by_mod: dict[str, dict[str, list[str]]] = {}
         trees_by_mod: dict[str, Node] = {}
         mounts: list[tuple[str, str, str, str, str]] = []
+        pending_import_calls: list[JsCall] = []
 
         for _path, rel_file, module, tree, _src in parsed:
             consts = _collect_consts(tree)
@@ -991,6 +992,13 @@ class JsAnalyzer:
                         analysis.functions[qual] = (rel_file, line_of(node))
                         analysis.function_ends[qual] = node.end_point[0] + 1
                         fn_nodes[qual] = node
+                        # `return { stock(sku) {...} }`: a method member
+                        if node.type == "method_definition" and _is_returned_object(node.parent):
+                            parent_qual = qual.rsplit(".", 1)[0]
+                            if parent_qual != module:
+                                analysis.calls.append(
+                                    JsCall(caller=parent_qual, callee=qual, file=rel_file, line=line_of(node))
+                                )
                 if node.type == "variable_declarator":
                     # const save = () => { ... } / const save = function () {}
                     value = node.child_by_field_name("value")
@@ -1024,12 +1032,33 @@ class JsAnalyzer:
                 if fn_n is None or fn_n.type != "identifier":
                     continue
                 caller = _enclosing_symbol(node, module)
-                callee = _scoped_callee(caller, text(fn_n), module, fn_nodes)
+                if caller.endswith(".module"):
+                    continue
+                name = text(fn_n)
+                callee = _scoped_callee(caller, name, module, fn_nodes)
+                if callee is None and f"{module}.{name}" in fn_nodes and f"{module}.{name}" != caller:
+                    callee = f"{module}.{name}"  # module-level function
                 if callee:
                     analysis.calls.append(
                         JsCall(caller=caller, callee=callee, file=rel_file, line=line_of(node))
                     )
+                elif name in imports:
+                    # resolved once every file is indexed (target may come later)
+                    pending_import_calls.append(
+                        JsCall(caller=caller, callee=imports[name], file=rel_file, line=line_of(node))
+                    )
             wrappers_by_mod[module] = _collect_wrappers(tree, consts, clients)
+
+        # imported functions: keep calls whose target is a scanned function
+        # (`import { helperTop } from './a'`, default exports via `exports`)
+        for call in pending_import_calls:
+            target = call.callee
+            if target not in fn_nodes:
+                src_mod, _dot, exported = target.rpartition(".")
+                local = (exports_by_mod.get(src_mod) or {}).get(exported)
+                target = f"{src_mod}.{local}" if local else ""
+            if target and target in fn_nodes and target != call.caller:
+                analysis.calls.append(JsCall(caller=call.caller, callee=target, file=call.file, line=call.line))
 
         _import_path_helpers(consts_by_mod, import_specs_by_mod)
         # Helpers built from imported helpers (`site = (id) => `${base()}/sites/${id}``)
@@ -1637,19 +1666,25 @@ def _returned_member_key(fn: Node) -> str | None:
     pair = fn.parent
     if pair is None or pair.type != "pair" or pair.child_by_field_name("value") != fn:
         return None
-    obj = pair.parent
-    if obj is None or obj.type != "object":
+    if not _is_returned_object(pair.parent):
         return None
+    key = pair.child_by_field_name("key")
+    name = _unquote(text(key)) if key is not None else ""
+    return name if name.isidentifier() else None
+
+
+def _is_returned_object(obj: Node | None) -> bool:
+    """`return { ... }` or an arrow body `=> ({ ... })`."""
+    if obj is None or obj.type != "object":
+        return False
     up = obj.parent
     while up is not None and up.type == "parenthesized_expression":
         up = up.parent
     if up is None:
-        return None
-    if up.type == "return_statement" or (up.type == "arrow_function" and up.child_by_field_name("body") is not None):
-        key = pair.child_by_field_name("key")
-        name = _unquote(text(key)) if key is not None else ""
-        return name if name.isidentifier() else None
-    return None
+        return False
+    return up.type == "return_statement" or (
+        up.type == "arrow_function" and up.child_by_field_name("body") is not None
+    )
 
 
 def _fn_qual(fn: Node, module: str) -> str | None:
