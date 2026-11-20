@@ -2636,7 +2636,7 @@ def _export_sources(
 
 
 def _resolve_route_handlers(
-    analysis: "JsAnalysis",
+    analysis: JsAnalysis,
     import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
     exports_by_mod: dict[str, dict[str, str]],
     known: set[str],
