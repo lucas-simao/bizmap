@@ -3,8 +3,8 @@
 // tableReach() is the multi-hop traversal of the MCP `table_usage` tool:
 // functions reading/writing the table (or its columns) and every entrypoint
 // reaching them through calls / calls_http / triggers / enqueues, across
-// services. When 0.4.3 ships reach through calls_http, swap this function
-// (and reach.py) for it; the page only relies on the returned shape.
+// services. When report / why / impact share one reach module, swap this
+// function (and reach.py) for it; the page only relies on the returned shape.
 /* exported BizReach */
 var BizReach = (function () {
   "use strict";
