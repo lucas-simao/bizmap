@@ -13,8 +13,11 @@ from tree_sitter import Language, Node, Parser
 from bizmap.detect.tsutil import (
     call_args,
     call_callee_name,
+    clear_parent_index,
     flatten_plus,
+    index_deep_tree,
     line_of,
+    parent_of,
     text,
     unwrap_callee_expr,
     walk,
@@ -717,7 +720,7 @@ def _assigned_name(node: Node | None) -> str:
     while cur is not None and depth < 512:
         if cur.type == "variable_declarator":
             return _declarator_name(cur)
-        cur = cur.parent
+        cur = parent_of(cur)
         depth += 1
     return ""
 
@@ -725,7 +728,7 @@ def _assigned_name(node: Node | None) -> str:
 def _enclosing_js_params(node: Node | None) -> list[str]:
     """Parameter names of every enclosing function/arrow (for nested factories)."""
     names: list[str] = []
-    cur = node.parent if node is not None else None
+    cur = parent_of(node) if node is not None else None
     depth = 0
     while cur is not None and depth < 48:
         if cur.type in {
@@ -736,7 +739,7 @@ def _enclosing_js_params(node: Node | None) -> list[str]:
             "method_definition",
         }:
             names.extend(_fn_param_names(cur))
-        cur = cur.parent
+        cur = parent_of(cur)
         depth += 1
     return names
 
@@ -980,6 +983,9 @@ class JsAnalyzer:
         analysis = JsAnalysis()
         _REEXPORTS.clear()
         _LITERAL_TOP.clear()
+        _SCOPE_BINDINGS.clear()
+        _ENCLOSING_SYMBOL.clear()
+        clear_parent_index()
         yaml_constants = constants or {}
         path_aliases = _ts_path_aliases(root)
         parsed: list[tuple[Path, str, str, Node, bytes]] = []
@@ -989,6 +995,7 @@ class JsAnalyzer:
                 continue
             source = path.read_bytes()
             tree = parser.parse(source).root_node
+            index_deep_tree(tree)
             rel_file = rel(path, root)
             module = rel_file.replace("/", ".").rsplit(".", 1)[0]
             parsed.append((path, rel_file, module, tree, source))
@@ -1042,7 +1049,7 @@ class JsAnalyzer:
                         if why:
                             analysis.function_why[qual] = why
                         # `return { stock(sku) {...} }`: a method member
-                        if node.type == "method_definition" and _is_returned_object(node.parent):
+                        if node.type == "method_definition" and _is_returned_object(parent_of(node)):
                             parent_qual = qual.rsplit(".", 1)[0]
                             if parent_qual != module:
                                 analysis.calls.append(
@@ -1761,12 +1768,12 @@ def _js_why_anchor(fn: Node) -> Node:
     """The statement a doc comment sits above: `export function f`,
     `export const f = () =>`, a class method or an object member."""
     cur = fn
-    if cur.parent is not None and cur.parent.type in {"variable_declarator", "pair"}:
-        cur = cur.parent
-    if cur.type == "variable_declarator" and cur.parent is not None:
-        cur = cur.parent  # lexical_declaration / variable_declaration
-    if cur.parent is not None and cur.parent.type == "export_statement":
-        cur = cur.parent
+    if parent_of(cur) is not None and parent_of(cur).type in {"variable_declarator", "pair"}:
+        cur = parent_of(cur)
+    if cur.type == "variable_declarator" and parent_of(cur) is not None:
+        cur = parent_of(cur)  # lexical_declaration / variable_declaration
+    if parent_of(cur) is not None and parent_of(cur).type == "export_statement":
+        cur = parent_of(cur)
     return cur
 
 
@@ -1847,7 +1854,7 @@ def _fn_own_name(cur: Node) -> str | None:
     function topN() {}` is `topNamed`): its own name `topN` is only visible
     inside itself."""
     if cur.type in {"function", "function_expression", "generator_function"}:
-        parent = cur.parent
+        parent = parent_of(cur)
         if parent is not None and parent.type == "variable_declarator":
             return _declarator_name(parent) or None
         key = _returned_member_key(cur)
@@ -1858,7 +1865,7 @@ def _fn_own_name(cur: Node) -> str | None:
         if name_n is not None and text(name_n):
             return text(name_n)
     if cur.type in {"arrow_function", "function", "function_expression"}:
-        parent = cur.parent
+        parent = parent_of(cur)
         if parent is not None and parent.type == "variable_declarator":
             return _declarator_name(parent) or None
         key = _returned_member_key(cur)
@@ -1870,10 +1877,10 @@ def _fn_own_name(cur: Node) -> str | None:
 def _returned_member_key(fn: Node) -> str | None:
     """`one` for the function in `return { one: (id) => ... }` (or an arrow
     body `=> ({ one: ... })`) of a named function: a factory member."""
-    pair = fn.parent
+    pair = parent_of(fn)
     if pair is None or pair.type != "pair" or pair.child_by_field_name("value") != fn:
         return None
-    if not _is_returned_object(pair.parent):
+    if not _is_returned_object(parent_of(pair)):
         return None
     key = pair.child_by_field_name("key")
     name = _unquote(text(key)) if key is not None else ""
@@ -1884,9 +1891,9 @@ def _is_returned_object(obj: Node | None) -> bool:
     """`return { ... }` or an arrow body `=> ({ ... })`."""
     if obj is None or obj.type != "object":
         return False
-    up = obj.parent
+    up = parent_of(obj)
     while up is not None and up.type == "parenthesized_expression":
-        up = up.parent
+        up = parent_of(up)
     if up is None:
         return False
     return up.type == "return_statement" or (
@@ -1902,25 +1909,42 @@ def _fn_qual(fn: Node, module: str) -> str | None:
     if not own:
         return None
     chain = [own]
-    cur = fn.parent
+    cur = parent_of(fn)
     while cur is not None:
         if cur.type in _NAMED_FN_TYPES or cur.type == "arrow_function":
             name = _fn_own_name(cur)
             if name and cur.type != "method_definition":
                 chain.append(name)
-        cur = cur.parent
+        cur = parent_of(cur)
     return ".".join([module, *reversed(chain)])
 
 
+_ENCLOSING_SYMBOL: dict[tuple[str, int, int, int], str] = {}
+
+
 def _enclosing_symbol(node: Node, module: str) -> str:
-    cur = node.parent
+    """Qualified name of the nearest named function above ``node``. Memoized
+    for every node on the climb (cleared in `analyze`), so the many calls of
+    one long function do not each climb to it."""
+    path: list[tuple[str, int, int, int]] = []
+    cur = parent_of(node)
+    found = f"{module}.module"
     while cur is not None:
+        key = (module, cur.id, cur.start_byte, cur.end_byte)
+        hit = _ENCLOSING_SYMBOL.get(key)
+        if hit is not None:
+            found = hit
+            break
+        path.append(key)
         if cur.type in _NAMED_FN_TYPES or cur.type == "arrow_function":
             qual = _fn_qual(cur, module)
             if qual:
-                return qual
-        cur = cur.parent
-    return f"{module}.module"
+                found = qual
+                break
+        cur = parent_of(cur)
+    for key in path:
+        _ENCLOSING_SYMBOL[key] = found
+    return found
 
 
 _FN_SCOPE_TYPES = {
@@ -1958,9 +1982,22 @@ def _pattern_names(node: Node | None, out: set[str]) -> None:
             _pattern_names(child, out)
 
 
-def _scope_bindings(scope: Node) -> set[str]:
+_SCOPE_BINDINGS: dict[tuple[int, int, int], frozenset[str]] = {}
+
+
+def _scope_bindings(scope: Node) -> frozenset[str]:
     """Names a function (or catch clause) binds itself: parameters and the
-    `let`/`var`/`const` declarations in its body, nested functions excluded."""
+    `let`/`var`/`const` declarations in its body, nested functions excluded.
+    Memoized per scope (cleared in `analyze`): a function with many calls
+    asks for the same scope once per call."""
+    key = (scope.id, scope.start_byte, scope.end_byte)
+    hit = _SCOPE_BINDINGS.get(key)
+    if hit is None:
+        hit = _SCOPE_BINDINGS[key] = frozenset(_compute_scope_bindings(scope))
+    return hit
+
+
+def _compute_scope_bindings(scope: Node) -> set[str]:
     names: set[str] = set()
     if scope.type == "catch_clause":
         _pattern_names(scope.child_by_field_name("parameter"), names)
@@ -1990,12 +2027,12 @@ def _scope_bindings(scope: Node) -> set[str]:
 def _binding_scope(call: Node, name: str) -> Node | None:
     """Innermost function / catch clause between the call and module scope
     that binds ``name`` (parameter, `let`/`var`/`const`, `catch (name)`)."""
-    cur = call.parent
+    cur = parent_of(call)
     while cur is not None and cur.type != "program":
         if cur.type in _FN_SCOPE_TYPES or cur.type == "catch_clause":
             if name in _scope_bindings(cur):
                 return cur
-        cur = cur.parent
+        cur = parent_of(cur)
     return None
 
 
@@ -3307,7 +3344,7 @@ def _enclosing_typed_http_param(
 ) -> bool:
     if not recv:
         return False
-    cur = node.parent if node is not None else None
+    cur = parent_of(node) if node is not None else None
     depth = 0
     while cur is not None and depth < 48:
         if cur.type in {
@@ -3320,7 +3357,7 @@ def _enclosing_typed_http_param(
             for name, typ in _fn_param_entries(cur):
                 if name == recv and _type_is_http_client(typ, clients):
                     return True
-        cur = cur.parent
+        cur = parent_of(cur)
         depth += 1
     return False
 
@@ -3432,7 +3469,7 @@ def _is_plus(node: Node) -> bool:
 
 
 # node key -> top of its `+` chain; filled while climbing so sibling literals
-# of a long chain reuse it (in tree-sitter `node.parent` costs a walk from the
+# of a long chain reuse it (in tree-sitter `parent_of(node)` costs a walk from the
 # root, so climbing from every literal of an n-term chain was ~O(n^3)).
 _LITERAL_TOP: dict[tuple[int, int, int], Node] = {}
 
@@ -3449,7 +3486,7 @@ def _literal_top(node: Node) -> Node:
         if hit is not None:
             top = hit
             break
-        parent = cur.parent
+        parent = parent_of(cur)
         if parent is not None and (
             (parent.type == "binary_expression" and _is_plus(parent))
             or parent.type == "parenthesized_expression"
@@ -3475,7 +3512,7 @@ def _is_route_registration(call: Node, routers: dict[str, str]) -> bool:
 
 
 def _literal_is_excluded(top: Node, routers: dict[str, str]) -> bool:
-    parent = top.parent
+    parent = parent_of(top)
     if parent is None:
         return True
     ptype = parent.type
@@ -3491,7 +3528,7 @@ def _literal_is_excluded(top: Node, routers: dict[str, str]) -> bool:
         "literal_type",
     }:
         return True
-    if ptype == "jsx_expression" and parent.parent is not None and parent.parent.type == "jsx_attribute":
+    if ptype == "jsx_expression" and parent_of(parent) is not None and parent_of(parent).type == "jsx_attribute":
         return True
     if ptype == "pair":
         key = parent.child_by_field_name("key")
@@ -3504,11 +3541,11 @@ def _literal_is_excluded(top: Node, routers: dict[str, str]) -> bool:
         ltxt = text(left).lower() if left is not None else ""
         if ltxt.endswith("href") or ltxt.endswith("location") or ltxt.endswith("pathname"):
             return True
-    if ptype == "arguments" and parent.parent is not None and parent.parent.type in {
+    if ptype == "arguments" and parent_of(parent) is not None and parent_of(parent).type in {
         "call_expression",
         "new_expression",
     }:
-        call = parent.parent
+        call = parent_of(parent)
         name = call_callee_name(call).lower()
         if name in _LITERAL_SKIP_CALLS:
             return True
@@ -3520,11 +3557,11 @@ def _literal_is_excluded(top: Node, routers: dict[str, str]) -> bool:
 
 
 def _literal_method_hint(top: Node, consts: dict[str, str]) -> str | None:
-    parent = top.parent
+    parent = parent_of(top)
     if parent is None:
         return None
-    if parent.type == "arguments" and parent.parent is not None and parent.parent.type == "call_expression":
-        call = parent.parent
+    if parent.type == "arguments" and parent_of(parent) is not None and parent_of(parent).type == "call_expression":
+        call = parent_of(parent)
         name = call_callee_name(call).lower()
         if name in CLIENT_HTTP_METHODS:
             return name.upper()
@@ -3550,7 +3587,7 @@ def _literal_method_hint(top: Node, consts: dict[str, str]) -> str | None:
     if parent.type == "pair":
         key = parent.child_by_field_name("key")
         if key is not None and _unquote(text(key)).lower() in {"url", "endpoint", "uri"}:
-            obj = parent.parent
+            obj = parent_of(parent)
             if obj is not None:
                 m = _METHOD_IN_OPTIONS.search(text(obj))
                 if m and m.group(1).upper() in _HTTP_VERBS:
@@ -3605,7 +3642,7 @@ def _object_member_owner(top: Node) -> str | None:
     """`paths.summary` when ``top`` is returned by an arrow/method stored as a
     property of a top-level `const paths = { ... }` (nested objects allowed)."""
     keys: list[str] = []
-    cur = top.parent
+    cur = parent_of(top)
     while cur is not None:
         if cur.type == "pair":
             key = cur.child_by_field_name("key")
@@ -3620,7 +3657,7 @@ def _object_member_owner(top: Node) -> str | None:
             return ".".join([name, *reversed(keys)]) if name and keys else None
         elif cur.type in {"function_declaration", "class_declaration", "program"}:
             return None
-        cur = cur.parent
+        cur = parent_of(cur)
     return None
 
 
@@ -3646,15 +3683,15 @@ def _module_level_literal_consts(tree: Node) -> set[str]:
 
 def _module_const_of(top: Node) -> str | None:
     """`X` when ``top`` is the value of a top-level `const X = ...`."""
-    parent = top.parent
+    parent = parent_of(top)
     if parent is None or parent.type != "variable_declarator":
         return None
-    decl = parent.parent
+    decl = parent_of(parent)
     if decl is None or decl.type not in {"lexical_declaration", "variable_declaration"}:
         return None
-    holder = decl.parent
+    holder = parent_of(decl)
     if holder is not None and holder.type == "export_statement":
-        holder = holder.parent
+        holder = parent_of(holder)
     if holder is None or holder.type != "program":
         return None
     return _declarator_name(parent) or None
@@ -3663,9 +3700,9 @@ def _module_const_of(top: Node) -> str | None:
 def _is_helper_return(top: Node) -> bool:
     """True when ``top`` is the whole returned value of a function whose only
     job is to return it (`(id) => `/sites/${id}``, `function p() { return '/x' }`)."""
-    cur = top.parent
+    cur = parent_of(top)
     while cur is not None and cur.type in {"parenthesized_expression", "return_statement", "statement_block"}:
-        cur = cur.parent
+        cur = parent_of(cur)
     if cur is None or cur.type not in {
         "arrow_function",
         "function",
@@ -3729,10 +3766,10 @@ def _collect_route_literals(
                         line=line_of(node),
                         method=_literal_method_hint(top, consts),
                         args=[_resolve_js_string(a, consts)[0] for a in call_args(node)],
-                        direct=top is not None and top.parent is not None and top.parent.type == "arguments",
+                        direct=top is not None and parent_of(top) is not None and parent_of(top).type == "arguments",
                     )
                 )
-        elif node.type == "identifier" and node.parent is not None and node.parent.type != "variable_declarator":
+        elif node.type == "identifier" and parent_of(node) is not None and parent_of(node).type != "variable_declarator":
             name = text(node)
             target = f"{module}.{name}" if name in module_consts else imports.get(name)
             if not target:
@@ -3748,7 +3785,7 @@ def _collect_route_literals(
                     file=rel_file,
                     line=line_of(node),
                     method=_literal_method_hint(top, consts),
-                    direct=top is node and node.parent.type == "arguments",
+                    direct=top is node and parent_of(node).type == "arguments",
                     kind="ref",
                 )
             )
@@ -3757,8 +3794,8 @@ def _collect_route_literals(
             pass
         elif (
             node.type == "identifier"
-            and node.parent is not None
-            and node.parent.type not in {"variable_declarator", "import_specifier", "export_specifier"}
+            and parent_of(node) is not None
+            and parent_of(node).type not in {"variable_declarator", "import_specifier", "export_specifier"}
             and _looks_like_http_path(consts.get(text(node)))
             and not _enclosing_symbol(node, module).endswith(".module")
         ):
@@ -3770,7 +3807,7 @@ def _collect_route_literals(
             # site — only when it is the whole argument. Inside a larger URL
             # (`${base(id)}/photos`) the composed URL is the literal instead.
             top = _literal_top(node)
-            if top is not node or node.parent is None or node.parent.type != "arguments":
+            if top is not node or parent_of(node) is None or parent_of(node).type != "arguments":
                 continue
         else:
             continue
@@ -3795,19 +3832,19 @@ def _collect_route_literals(
         same_repo = bool(
             value
             and value.startswith("/")
-            and top.parent is not None
-            and top.parent.type == "arguments"
-            and top.parent.parent is not None
-            and call_callee_name(top.parent.parent).lower() == "fetch"
+            and parent_of(top) is not None
+            and parent_of(top).type == "arguments"
+            and parent_of(parent_of(top)) is not None
+            and call_callee_name(parent_of(parent_of(top))).lower() == "fetch"
         )
         symbol = _enclosing_symbol(top, module)
         # `request({ method, url: `/x/${id}`, baseURL: ALT })`: a base in the
         # same config object is this request's base, whatever wrapper sends it
         config_base: str | None = None
-        if top.parent is not None and top.parent.type == "pair":
-            pkey = top.parent.child_by_field_name("key")
+        if parent_of(top) is not None and parent_of(top).type == "pair":
+            pkey = parent_of(top).child_by_field_name("key")
             if pkey is not None and _unquote(text(pkey)) in {"url", "path", "endpoint"}:
-                bnode = _object_prop_node(top.parent.parent, _PER_CALL_BASE_KEYS)
+                bnode = _object_prop_node(parent_of(parent_of(top)), _PER_CALL_BASE_KEYS)
                 if bnode is not None:
                     bval, _bu = _resolve_js_string(bnode, consts)
                     config_base = bval or "{baseURL}"

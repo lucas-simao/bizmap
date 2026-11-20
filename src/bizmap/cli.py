@@ -17,13 +17,24 @@ from bizmap.discover import (
 from bizmap.graph import Graph
 from bizmap.impact import compute_impact, render_markdown
 from bizmap.mermaid import DEFAULT_LIMIT, render_mermaid
+from bizmap.overrides import ConfigError
 from bizmap.registry import graph_from_json, merge_graphs
 from bizmap.report import build_report, format_report
 from bizmap.scan import relink_merged_graph, scan_path, scan_paths
 from bizmap.why import format_why
 
 
-@click.group()
+class _Group(click.Group):
+    """Report bizmap.yaml mistakes as one clear line, not a traceback."""
+
+    def invoke(self, ctx: click.Context):  # type: ignore[override]
+        try:
+            return super().invoke(ctx)
+        except ConfigError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+
+@click.group(cls=_Group)
 @click.version_option(__version__, prog_name="bizmap")
 def main() -> None:
     """BizMap — deterministic business-rule and data-lineage mapper.
@@ -50,6 +61,17 @@ def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
         labels = {"generated_dirs": "generated dirs", "generated_files": "generated/minified files", "gitignored": ".gitignored paths"}
         bits = [f"{n} {labels.get(k, k)}" for k, n in sorted(skipped.items())]
         lines.append("skipped: " + ", ".join(bits) + "  (scan: include / gitignore / skip_generated in bizmap.yaml)")
+        paths = graph.attrs.get("skipped_paths") or {}
+        for key in sorted(paths):
+            names = [str(p) for p in paths[key]]
+            if not names:
+                continue
+            shown_names = names if verbose else names[:5]
+            more = (skipped.get(key) or len(names)) - len(shown_names)
+            tail = f" … +{more} more (--verbose / `skipped_paths` in the JSON)" if more > 0 and not verbose else ""
+            if verbose and more > 0:
+                tail = f" … +{more} more (list capped in the JSON)"
+            lines.append(f"  {labels.get(key, key)}: " + ", ".join(shown_names) + tail)
     warnings = [str(w) for w in graph.attrs.get("warnings") or []]
     shown = warnings if verbose else warnings[:TOP_N]
     for warning in shown:
@@ -215,7 +237,8 @@ def scan_cmd(
         if used
     ]
     if discover_dir is None and discover_only:
-        raise click.UsageError(f"{', '.join(discover_only)} only work with --discover DIR")
+        verb = "works" if len(discover_only) == 1 else "work"
+        raise click.UsageError(f"{', '.join(discover_only)} only {verb} with --discover DIR")
     if discover_dir is not None:
         if path:
             raise click.UsageError("give either PATH... or --discover DIR, not both")
@@ -230,6 +253,8 @@ def scan_cmd(
             else:
                 click.echo(format_discovery(found), nl=False)
             return
+        for warning in found.warnings:
+            click.echo(f"warning: {warning}", err=True)
         chosen = found.chosen
         if not chosen:
             raise click.ClickException(

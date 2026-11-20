@@ -43,7 +43,7 @@ def test_list_shows_choice_and_criterion(work: Path) -> None:
     res = run("scan", "--discover", str(work), "--list")
     assert res.exit_code == 0, res.output
     out = res.output
-    assert "orders: orders  [default_branch:" in out or "orders: orders  [latest_commit:" in out
+    assert "orders: orders  [folder_name: folder named like the repository (orders)]" in out
     assert "shop: shop  [main_checkout: main checkout (others are worktrees)]" in out
     assert "shop-feature" in out and "worktree" in out
     assert "notes: skipped (no supported source code)" in out
@@ -86,7 +86,7 @@ def test_yaml_discover_section_and_flags_win(work: Path) -> None:
 
 def test_misuse_errors(work: Path) -> None:
     res = CliRunner().invoke(main, ["scan", "--list"])
-    assert res.exit_code == 2 and "only work with --discover" in res.output
+    assert res.exit_code == 2 and "--list only works with --discover" in res.output
     res = CliRunner().invoke(main, ["scan", str(work), "--discover", str(work)])
     assert res.exit_code == 2 and "not both" in res.output
     res = CliRunner().invoke(main, ["scan", "--discover", str(work), "--json"])
@@ -99,3 +99,11 @@ def test_misuse_errors(work: Path) -> None:
 def test_nothing_to_scan(tmp_path: Path) -> None:
     res = CliRunner().invoke(main, ["scan", "--discover", str(tmp_path)])
     assert res.exit_code == 1 and "no projects with supported code" in res.output
+
+
+def test_prefer_warning_goes_to_stderr(work: Path, tmp_path: Path) -> None:
+    res = CliRunner().invoke(
+        main, ["scan", "--discover", str(work), "--prefer", "nope", "--out", str(tmp_path / "g.json"), "-q"]
+    )
+    assert res.exit_code == 0
+    assert "warning: --prefer 'nope' matches none" in res.output

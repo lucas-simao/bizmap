@@ -2109,13 +2109,17 @@ def _scan_one(
     if walk.stats:
         # how much was left out (generated dirs/files, .gitignore), for `scan` output
         graph.attrs["skipped"] = dict(sorted(walk.stats.items()))
+        graph.attrs["skipped_paths"] = walk.skipped_paths()
     timings.parse += time.perf_counter() - t0
     progress.done(
         f"{graph.repo}: files ({len(go_files)} go, {len(py_files)} py, {len(js_files)} js/ts, "
         f"{len(sql_files)} sql)",
         t0,
     )
+
     t_go = time.perf_counter()
+    if go_files:
+        progress.begin(f"{graph.repo}: go", len(go_files))
 
     failures: list[str] = []
     go_analysis = _analyze_safely(
@@ -2135,6 +2139,8 @@ def _scan_one(
                 existing.append(item)
         graph.attrs["warnings"] = existing
     t_py = time.perf_counter()
+    if py_files:
+        progress.begin(f"{graph.repo}: python", len(py_files))
     py_failures: list[str] = []
     py_analysis = _analyze_safely(
         "Python",
@@ -2147,6 +2153,8 @@ def _scan_one(
     if py_files:
         progress.done(f"{graph.repo}: python", t_py)
     t_js = time.perf_counter()
+    if js_files:
+        progress.begin(f"{graph.repo}: js/ts", len(js_files))
     js_failures: list[str] = []
     js_analysis = _analyze_safely(
         "JS/TS",
@@ -2158,6 +2166,7 @@ def _scan_one(
     if js_files:
         progress.done(f"{graph.repo}: js/ts", t_js)
     t_graph = time.perf_counter()
+    progress.begin(f"{graph.repo}: graph")
     if py_failures or js_failures:
         existing = list(graph.attrs.get("warnings") or [])
         for item in py_failures + js_failures:

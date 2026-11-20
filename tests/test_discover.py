@@ -166,11 +166,28 @@ def test_most_recent_commit_wins_and_uses_git(tmp_path: Path) -> None:
     assert "git" in g.reason
 
 
-def test_ref_mtime_fallback_without_git(tmp_path: Path, monkeypatch) -> None:
+def test_commit_file_time_without_git(tmp_path: Path, monkeypatch) -> None:
     up = make_repo(tmp_path / "up" / "inventory")
     work = tmp_path / "work"
     a = clone(up, work / "a", "https://github.com/acme/inventory.git")
     b = clone(up, work / "b", "https://github.com/acme/inventory.git")
+    commit(a, 1_750_000_000)
+    commit(b, 1_760_000_000)
+    monkeypatch.setattr(disc.shutil, "which", lambda _name: None)
+    g = only_group(discover(work))
+    assert g.chosen.rel == "b"
+    assert g.criterion == "latest_commit"
+    assert (g.chosen.time_source, g.chosen.commit_time) == ("commit-file", 1_760_000_000)
+
+
+def test_ref_mtime_fallback_when_objects_are_packed(tmp_path: Path, monkeypatch) -> None:
+    up = make_repo(tmp_path / "up" / "inventory")
+    work = tmp_path / "work"
+    a = clone(up, work / "a", "https://github.com/acme/inventory.git")
+    b = clone(up, work / "b", "https://github.com/acme/inventory.git")
+    for repo in (a, b):
+        git(repo, "repack", "-a", "-d", "-q")
+        git(repo, "prune-packed")
     os.utime(a / ".git" / "refs" / "heads" / "main", (1_600_000_000, 1_600_000_000))
     os.utime(b / ".git" / "refs" / "heads" / "main", (1_650_000_000, 1_650_000_000))
     monkeypatch.setattr(disc.shutil, "which", lambda _name: None)
@@ -179,6 +196,36 @@ def test_ref_mtime_fallback_without_git(tmp_path: Path, monkeypatch) -> None:
     assert g.criterion == "latest_commit"
     assert g.chosen.time_source == "ref-mtime"
     assert "ref-mtime" in format_discovery(discover(work))
+
+
+def test_packed_refs_tie_says_why(tmp_path: Path, monkeypatch) -> None:
+    up = make_repo(tmp_path / "up" / "inventory")
+    work = tmp_path / "work"
+    for name in ("a", "b"):
+        repo = clone(up, work / name, "https://github.com/acme/inventory.git")
+        git(repo, "repack", "-a", "-d", "-q")
+        git(repo, "prune-packed")
+        git(repo, "pack-refs", "--all")
+        os.utime(repo / ".git" / "packed-refs", (1_600_000_000, 1_600_000_000))
+    monkeypatch.setattr(disc.shutil, "which", lambda _name: None)
+    g = only_group(discover(work))
+    assert g.criterion == "path_order" and g.chosen.rel == "a"
+    assert "without git, commit times could not be told apart" in g.reason
+
+
+def test_folder_named_like_the_repo_beats_a_newer_clone(tmp_path: Path) -> None:
+    # round 37: the main folder `shop-api` (feature branch) lost to a newer clone
+    up = make_repo(tmp_path / "up" / "shop-api")
+    work = tmp_path / "work"
+    main = clone(up, work / "shop-api", "https://github.com/acme/shop-api.git")
+    other = clone(up, work / "api-clone-ssh", "ssh://git@github.com:22/acme/shop-api.git")
+    git(main, "checkout", "-q", "-b", "feature-a")
+    git(other, "checkout", "-q", "-b", "feature-b")
+    commit(other, 1_900_000_000)
+    g = only_group(discover(work))
+    assert g.chosen.rel == "shop-api"
+    assert g.criterion == "folder_name"
+    assert "folder named like the repository (shop-api)" in g.reason
 
 
 def test_full_tie_breaks_by_path(tmp_path: Path) -> None:
@@ -299,3 +346,37 @@ def test_discover_settings_errors(tmp_path: Path, body: str, message: str) -> No
     (tmp_path / "bizmap.yaml").write_text(body)
     with pytest.raises(ValueError, match=message):
         load_discover_settings(tmp_path)
+
+
+def test_folders_with_code_but_no_git_are_reported(tmp_path: Path) -> None:
+    make_repo(tmp_path / "shop", "https://github.com/acme/shop.git")
+    (tmp_path / "design-studio" / "src").mkdir(parents=True)
+    (tmp_path / "design-studio" / "src" / "app.ts").write_text("export const a = 1\n")
+    (tmp_path / "clients" / "orders").mkdir(parents=True)
+    make_repo(tmp_path / "clients" / "customers", "https://github.com/acme/customers.git")
+    (tmp_path / "clients" / "orders" / "job.py").write_text("x = 1\n")
+    (tmp_path / "pictures").mkdir()
+    (tmp_path / "pictures" / "a.png").write_bytes(b"x")
+    d = discover(tmp_path)
+    assert ("design-studio", "no git; add with --include design-studio") in d.skipped
+    assert ("clients/orders", "no git; add with --include clients/orders") in d.skipped
+    assert not any(p in ("pictures", "clients") for p, _ in d.skipped)
+    d = discover(tmp_path, include=["design-studio"])
+    g = next(g for g in d.groups if g.name == "design-studio")
+    assert g.chosen.kind == "folder"
+    assert "folder · no git" in format_discovery(d)
+    assert not any(p == "design-studio" for p, _ in d.skipped)
+
+
+def test_prefer_that_matches_nothing_warns(tmp_path: Path) -> None:
+    make_repo(tmp_path / "shop", "https://github.com/acme/shop.git")
+    d = discover(tmp_path, prefer=["nope"])
+    assert d.warnings == ["--prefer 'nope' matches none of the folders found"]
+    assert "warning: --prefer 'nope'" in format_discovery(d)
+    assert discover(tmp_path, prefer=["shop"]).warnings == []
+
+
+def test_nothing_to_scan_line(tmp_path: Path) -> None:
+    make_repo(tmp_path / "docs", "https://github.com/acme/docs.git", code=False)
+    text = format_discovery(discover(tmp_path))
+    assert text.rstrip().endswith("nothing to scan") and "0 project(s)" not in text

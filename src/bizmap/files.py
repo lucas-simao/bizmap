@@ -27,12 +27,10 @@ SKIP_DIR_NAMES = {
     ".vscode",
 }
 
-# Build output, package-manager caches and coverage reports: never source.
-# Skipped by default; `scan: include: [".yarn"]` in bizmap.yaml brings one back.
+# Build output and package-manager caches: never source, skipped by name at
+# any depth. `scan: include: [".yarn"]` in bizmap.yaml brings one back.
 GENERATED_DIR_NAMES = {
     ".yarn",
-    "out",
-    "coverage",
     ".next",
     ".nuxt",
     ".svelte-kit",
@@ -46,6 +44,22 @@ GENERATED_DIR_NAMES = {
     ".serverless",
     "storybook-static",
 }
+# Common words that are also build-output folders (`out/`, `coverage/`): only
+# skipped next to a project manifest (package.json, go.mod, pyproject.toml…),
+# so `internal/coverage/` or `adapters/out/` in source code is still scanned.
+ROOT_GENERATED_DIR_NAMES = {"out", "coverage"}
+PROJECT_MANIFESTS = (
+    "package.json",
+    "go.mod",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements.txt",
+    "Pipfile",
+    "deno.json",
+    "tsconfig.json",
+)
+SKIPPED_PATHS_CAP = 200
 GENERATED_FILE_GLOBS = ("*.min.js", "*.min.mjs", "*.min.cjs", "*.bundle.js", "*.chunk.js")
 _MINIFY_SUFFIXES = {".js", ".mjs", ".cjs", ".jsx"}
 _MINIFY_SAMPLE = 256 * 1024
@@ -181,6 +195,7 @@ class WalkOptions:
     gitignore: bool = True
     skip_generated: bool = True
     stats: dict[str, int] = field(default_factory=dict)
+    paths: dict[str, list[str]] = field(default_factory=dict)
     _seen: set[tuple[str, str]] = field(default_factory=set, repr=False)
 
     def bump(self, key: str, rel_posix: str) -> None:
@@ -189,6 +204,12 @@ class WalkOptions:
             return
         self._seen.add((key, rel_posix))
         self.stats[key] = self.stats.get(key, 0) + 1
+        self.paths.setdefault(key, []).append(rel_posix)
+
+    def skipped_paths(self) -> dict[str, list[str]]:
+        """Skipped paths per reason, sorted, at most SKIPPED_PATHS_CAP each
+        (`skipped` has the full counts)."""
+        return {k: sorted(v)[:SKIPPED_PATHS_CAP] for k, v in sorted(self.paths.items())}
 
     def included(self, name: str, rel_posix: str) -> bool:
         return any(name == pat or path_excluded(rel_posix, [pat]) for pat in self.include)
@@ -306,7 +327,10 @@ def iter_files(
                 continue
             if d in SKIP_DIR_NAMES:
                 continue
-            if opts.skip_generated and d in GENERATED_DIR_NAMES:
+            if opts.skip_generated and (
+                d in GENERATED_DIR_NAMES
+                or (d in ROOT_GENERATED_DIR_NAMES and any(m in filenames for m in PROJECT_MANIFESTS))
+            ):
                 opts.bump("generated_dirs", d_rel)
                 continue
             if opts.gitignore and ignore.ignored((prefix + "/" + d_rel).strip("/") if prefix else d_rel, True):
