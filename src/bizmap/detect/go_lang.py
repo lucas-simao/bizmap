@@ -178,6 +178,7 @@ class UnresolvedCall:
     caller: str
     callee: str
     evidence: Evidence
+    reason: str = "no_scanned_implementer"  # or type_not_scanned
 
 
 @dataclass
@@ -1045,6 +1046,15 @@ def _join_path(*parts: str) -> str:
     return out or "/"
 
 
+def _same_project(a: str, b: str) -> bool:
+    """Two import paths of one project: same host and owner
+    (`example.com/acme/...`), never the standard library."""
+    pa, pb = a.split("/"), b.split("/")
+    if "." not in pa[0] or len(pa) < 3 or len(pb) < 3:
+        return False
+    return pa[:2] == pb[:2]
+
+
 def _import_specs(root: Node) -> Iterator[Node]:
     """`import_spec` nodes: imports are top-level declarations, so only the
     root's `import_declaration` children are visited, not the whole file."""
@@ -1283,12 +1293,19 @@ class GoAnalyzer:
                             for ref in self._const_refs_in_args(args, info, idx):
                                 if ref not in situations[callee.qualname]:
                                     situations[callee.qualname].append(ref)
-                    elif not callees and not is_go:
+                    if not is_go and not any(c.qualname != fn.qualname for c, _cf, _cs in callees):
                         note = self._unresolved_iface_note(node, fn, info, idx)
                         if note:
                             unresolved_calls.append(
-                                UnresolvedCall(caller=fn.qualname, callee=note, evidence=evidence)
+                                UnresolvedCall(
+                                    caller=fn.qualname,
+                                    callee=note,
+                                    evidence=evidence,
+                                    reason=self._unresolved_reason(node, fn, info, idx),
+                                )
                             )
+                    if callees and not is_go:
+                        self._method_value_calls(args, fn, info, idx, evidence, calls)
                     self._sql_from_helper_call(
                         node, args, fn, info, idx, env, package_consts, sql_sites, callees
                     )
@@ -2040,6 +2057,50 @@ class GoAnalyzer:
                 return _join_path(base, path), unresolved
         return "", False
 
+    def _unresolved_reason(self, call: Node, fn: GoFunction, info: _FileInfo, idx: _Indexes) -> str:
+        func = call.child_by_field_name("function")
+        operand = func.child_by_field_name("operand") if func is not None else None
+        gtype = self._type_of_expr(operand, fn, info, self._local_types(fn, info, idx), idx) if operand else None
+        if gtype is not None and (gtype.import_path or fn.import_path, gtype.name) not in idx.interfaces:
+            return "type_not_scanned"
+        return "no_scanned_implementer"
+
+    def _method_value_calls(
+        self,
+        args: list[Node],
+        fn: GoFunction,
+        info: _FileInfo,
+        idx: _Indexes,
+        evidence: Evidence,
+        calls: list[CallHit],
+    ) -> None:
+        """`c.observe(ctx, c.svc.SubmitMarks)`: a function or method passed as a
+        value to a scanned function is (inferred) called by the caller."""
+        local_types: dict[str, GoType] | None = None
+        for arg in args:
+            arg = _unwrap_literal(arg) or arg
+            target: GoFunction | None = None
+            if arg.type == "selector_expression":
+                if local_types is None:
+                    local_types = self._local_types(fn, info, idx)
+                target = self._resolve_selector(arg, fn, info, idx, local_types)
+            elif arg.type == "identifier":
+                name = text(arg)
+                if name in fn.params:
+                    continue
+                target = idx.by_func.get((fn.import_path, name))
+            if target is None or target.qualname == fn.qualname:
+                continue
+            calls.append(
+                CallHit(
+                    caller=fn.qualname,
+                    callee=target.qualname,
+                    evidence=evidence,
+                    confidence=Confidence.INFERRED,
+                    candidates=[],
+                )
+            )
+
     def _unresolved_iface_note(
         self,
         call: Node,
@@ -2061,8 +2122,15 @@ class GoAnalyzer:
             return None
         iface_key = (gtype.import_path or fn.import_path, gtype.name)
         if iface_key not in idx.interfaces:
+            ip = gtype.import_path or ""
+            if ip and ip != fn.import_path and _same_project(ip, fn.import_path) and not self._match_scanned_import(idx, ip):
+                return f"{gtype.name}.{method}"
             return None
-        impls = idx.implementers.get(iface_key) or []
+        impls = [
+            i
+            for i in idx.implementers.get(iface_key) or []
+            if not (fn.receiver and i == (fn.import_path, fn.receiver))
+        ]
         if impls:
             return None
         return f"{gtype.name}.{method}"
@@ -2349,8 +2417,8 @@ class GoAnalyzer:
             found = self._lookup_func(idx, fn.import_path, name)
             if found is None:
                 return []
-            conf = Confidence.EXACT if found.receiver and fn.receiver else Confidence.INFERRED
-            return [(found, conf, [])]
+            # `helper()` in the same package: resolved by package + name
+            return [(found, Confidence.EXACT, [])]
         if func.type == "selector_expression":
             return self._resolve_selector_callees(func, fn, info, idx, local_types, name)
         return []
@@ -2372,11 +2440,13 @@ class GoAnalyzer:
         )
         is_iface = bool(iface_key and iface_key in idx.interfaces)
         if found is not None and not is_iface:
-            conf = Confidence.EXACT if found.receiver and fn.receiver else Confidence.INFERRED
+            # `pkg.Func()` is resolved by import path + name; a method call on
+            # a value whose type was inferred stays inferred
+            conf = Confidence.EXACT if (not found.receiver or fn.receiver) else Confidence.INFERRED
             return [(found, conf, [])]
         if not is_iface or gtype is None or iface_key is None:
             if found is not None:
-                conf = Confidence.EXACT if found.receiver and fn.receiver else Confidence.INFERRED
+                conf = Confidence.EXACT if (not found.receiver or fn.receiver) else Confidence.INFERRED
                 return [(found, conf, [])]
             if operand is not None and operand.type == "selector_expression":
                 obj_t = self._type_of_expr(
@@ -2413,6 +2483,9 @@ class GoAnalyzer:
                 unique = list(dict.fromkeys((c.import_path, c.name) for c in concretes))
                 if len(unique) == 1:
                     impls = [unique[0]]
+        # a decorator implements the interface it wraps: `s.repo.X()` inside
+        # Service.X is not a call to itself
+        impls = [i for i in impls if not (fn.receiver and i == (fn.import_path, fn.receiver))]
         callees: list[GoFunction] = []
         for ip, typ in impls:
             gf = self._lookup_method(idx, ip, typ, method)
@@ -2475,7 +2548,14 @@ class GoAnalyzer:
         found: GoFunction | None = None
         for arg in args:
             inner = _unwrap_literal(arg) or arg
-            if inner.type not in {"identifier", "selector_expression", "call_expression"}:
+            if inner.type == "call_expression":
+                # wrap(mw(h.X)) unwraps to h.X; listCarts(newCartRepo(db)) does
+                # not: newCartRepo(db) builds a value, it is not the handler
+                nested = self._unwrap_wrapped_handler(inner, fn, info, idx)
+                if nested is not None:
+                    found = nested
+                continue
+            if inner.type not in {"identifier", "selector_expression"}:
                 continue
             resolved, _cands, conf = self._resolve_handler_node(inner, fn, info, idx)
             if resolved is not None and conf != Confidence.UNKNOWN:

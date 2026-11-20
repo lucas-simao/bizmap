@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from collections import defaultdict, deque
@@ -44,7 +45,7 @@ from bizmap.http_match import (
 )
 from bizmap.overrides import ScanConfig, apply_overrides, load_scan_config
 from bizmap.registry import merge_graphs
-from bizmap.schema_replay import Schema, replay_files
+from bizmap.schema_replay import DbTrigger, Schema, replay_files
 from bizmap.spans import (
     fill_spans,
     split_factory_members,
@@ -254,6 +255,37 @@ def _kind_edge(kind: str) -> str:
     return "writes" if kind.startswith("write") else "reads"
 
 
+_WRITE_OPS = re.compile(r"\b(INSERT\s+INTO|UPDATE\s|DELETE\s+FROM|MERGE\s+INTO|UPSERT)\b", re.IGNORECASE)
+
+
+def sql_write_ops(sql: str | None) -> list[str]:
+    """INSERT / UPDATE / DELETE in a statement (an upsert is INSERT + UPDATE)."""
+    ops: set[str] = set()
+    text_ = sql or ""
+    for m in _WRITE_OPS.finditer(text_):
+        word = m.group(1).split()[0].upper()
+        if word in {"MERGE", "UPSERT"}:
+            ops |= {"INSERT", "UPDATE"}
+        else:
+            ops.add(word)
+    if re.search(r"\bON\s+CONFLICT\b[\s\S]*\bDO\s+UPDATE\b|\bON\s+DUPLICATE\s+KEY\s+UPDATE\b", text_, re.I):
+        ops.add("UPDATE")
+    return sorted(ops)
+
+
+def _direct_data_edge(
+    graph: Graph, kind: str, fid: str, target: str, access: SqlAccess, **kwargs: object
+) -> None:
+    """A read/write the function itself runs. Writes remember which SQL
+    operations they come from (`ops`), so DB triggers fire only on their event."""
+    edge = graph.add_edge(kind, fid, target, **kwargs)  # type: ignore[arg-type]
+    if kind != "writes":
+        return
+    ops = sql_write_ops(access.raw_sql)
+    if ops:
+        edge.attrs["ops"] = sorted(set(edge.attrs.get("ops") or []) | set(ops))
+
+
 def _end_line(node: object) -> int | None:
     """Last line (1-based) of a tree-sitter node, for diff → function mapping."""
     point = getattr(node, "end_point", None)
@@ -351,13 +383,13 @@ def _propagate(
             target = _ensure_access_target(graph, schema, access)
             if not target:
                 continue
-            graph.add_edge(kind, fid, target, confidence=Confidence.INFERRED, evidence=ev)
+            graph.add_edge(kind, fid, target, confidence=Confidence.INFERRED, evidence=ev, derived="call")
         for ep in entrypoints_by_handler.get(anc, []):
             for kind, access in table_accesses:
                 target = _ensure_access_target(graph, schema, access)
                 if not target:
                     continue
-                graph.add_edge(kind, ep, target, confidence=Confidence.INFERRED, evidence=ev)
+                graph.add_edge(kind, ep, target, confidence=Confidence.INFERRED, evidence=ev, derived="call")
     for ep in entrypoints_by_handler.get(origin_fn, []):
         for kind, access in table_accesses:
             target = _ensure_access_target(graph, schema, access)
@@ -369,6 +401,7 @@ def _propagate(
                 target,
                 confidence=Confidence.INFERRED,
                 evidence=evidence_by_fn.get(origin_fn),
+                derived="call",
             )
 
 
@@ -388,7 +421,7 @@ def _apply_go(
     _attach_unresolved_calls(
         graph,
         [
-            (u.caller, u.callee)
+            (u.caller, u.callee, getattr(u, "reason", None))
             for u in getattr(analysis, "unresolved_calls", []) or []
         ],
     )
@@ -485,10 +518,12 @@ def _apply_go(
             target = _ensure_access_target(graph, schema, access)
             if not target:
                 continue
-            graph.add_edge(
+            _direct_data_edge(
+                graph,
                 _kind_edge(access.kind),
                 fid,
                 target,
+                access,
                 confidence=access.confidence,
                 evidence=site.evidence,
                 **sit_kwargs,
@@ -513,7 +548,7 @@ def _apply_go(
             schema,
             job_functions,
         )
-    _copy_unresolved_to_entrypoints(graph, entrypoints_by_handler)
+    _copy_unresolved_to_entrypoints(graph, entrypoints_by_handler, reverse)
     _copy_dynamic_table_to_entrypoints(graph, origin_unknown, reverse, entrypoints_by_handler)
     prop_s = time.perf_counter() - t_prop
     return sql_s, prop_s
@@ -729,10 +764,12 @@ def _apply_python(
                 extra_attrs["via"] = via
             if getattr(site, "sink_not_scanned", False):
                 extra_attrs["sink_not_scanned"] = True
-            graph.add_edge(
+            _direct_data_edge(
+                graph,
                 _kind_edge(access.kind),
                 fid,
                 target,
+                access,
                 confidence=conf,
                 evidence=site.evidence,
                 **extra_attrs,
@@ -779,7 +816,7 @@ def _apply_python(
     _propagate_collections(graph, analysis, reverse, entrypoints_by_handler)
     _apply_queues(graph, analysis, entrypoints_by_handler)
     _apply_rpc(graph, analysis, schema)
-    _copy_unresolved_to_entrypoints(graph, entrypoints_by_handler)
+    _copy_unresolved_to_entrypoints(graph, entrypoints_by_handler, reverse)
     _copy_dynamic_table_to_entrypoints(graph, origin_unknown, reverse, entrypoints_by_handler)
     return sql_s, time.perf_counter() - t_prop
 
@@ -807,10 +844,10 @@ def _propagate_collections(
                 continue
             for kind, cid in targets:
                 if anc != origin:
-                    graph.add_edge(kind, fid, cid, confidence=Confidence.INFERRED)
+                    graph.add_edge(kind, fid, cid, confidence=Confidence.INFERRED, derived="call")
             for ep in entrypoints_by_handler.get(anc, []):
                 for kind, cid in targets:
-                    graph.add_edge(kind, ep, cid, confidence=Confidence.INFERRED)
+                    graph.add_edge(kind, ep, cid, confidence=Confidence.INFERRED, derived="call")
 
 
 def _apply_queues(graph: Graph, analysis: PyAnalysis, entrypoints_by_handler: dict[str, list[str]]) -> None:
@@ -1013,11 +1050,18 @@ def _apply_rpc(graph: Graph, analysis: PyAnalysis, schema: Schema) -> None:
         )
 
 
-def _attach_unresolved_calls(graph: Graph, pairs: list[tuple[str, str]]) -> None:
+def _attach_unresolved_calls(graph: Graph, pairs: list[tuple]) -> None:
+    """``(caller, callee)`` or ``(caller, callee, reason)``; the reason lands
+    in ``unresolved_call_reasons`` (default: no_scanned_implementer)."""
     by_caller: dict[str, list[str]] = defaultdict(list)
-    for caller, callee in pairs:
+    reasons: dict[str, dict[str, str]] = defaultdict(dict)
+    for item in pairs:
+        caller, callee = item[0], item[1]
+        reason = item[2] if len(item) > 2 else None
         if callee and callee not in by_caller[caller]:
             by_caller[caller].append(callee)
+        if callee and reason:
+            reasons[caller].setdefault(callee, reason)
     for caller, names in by_caller.items():
         fid = function_id(caller)
         node = graph.get(fid)
@@ -1038,6 +1082,11 @@ def _attach_unresolved_calls(graph: Graph, pairs: list[tuple[str, str]]) -> None
                 existing.append(name)
         node.attrs["unresolved_calls"] = existing
         node.attrs.setdefault("confidence", Confidence.UNKNOWN.value)
+        if reasons.get(caller):
+            merged = dict(node.attrs.get("unresolved_call_reasons") or {})
+            for name, reason in reasons[caller].items():
+                merged.setdefault(name, reason)
+            node.attrs["unresolved_call_reasons"] = merged
 
 
 def _copy_dynamic_table_to_entrypoints(
@@ -1061,11 +1110,39 @@ def _copy_dynamic_table_to_entrypoints(
 
 
 def _copy_unresolved_to_entrypoints(
-    graph: Graph, entrypoints_by_handler: dict[str, list[str]]
+    graph: Graph,
+    entrypoints_by_handler: dict[str, list[str]],
+    reverse_calls: dict[str, set[str]] | None = None,
 ) -> None:
+    """Show on each entrypoint the unresolved calls of its handler and, with
+    ``reverse_calls``, of every function the handler reaches."""
+    forward: dict[str, set[str]] = defaultdict(set)
+    for callee, callers_ in (reverse_calls or {}).items():
+        for caller in callers_:
+            forward[caller].add(callee)
     for qual, eids in entrypoints_by_handler.items():
-        fn_node = graph.get(function_id(qual))
-        names = list((fn_node.attrs.get("unresolved_calls") or []) if fn_node else [])
+        reached = [qual]
+        seen = {qual}
+        queue = deque([qual])
+        while queue:
+            cur = queue.popleft()
+            for nxt in sorted(forward.get(cur, ())):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    reached.append(nxt)
+                    queue.append(nxt)
+        names: list[str] = []
+        reasons: dict[str, str] = {}
+        for fq in reached:
+            fn_node = graph.get(function_id(fq))
+            if fn_node is None:
+                continue
+            why = fn_node.attrs.get("unresolved_call_reasons") or {}
+            for name in fn_node.attrs.get("unresolved_calls") or []:
+                if name not in names:
+                    names.append(name)
+                if name in why:
+                    reasons.setdefault(name, why[name])
         if not names:
             continue
         for eid in eids:
@@ -1078,6 +1155,11 @@ def _copy_unresolved_to_entrypoints(
                     existing.append(name)
             ep.attrs["unresolved_calls"] = existing
             ep.attrs.setdefault("confidence", Confidence.UNKNOWN.value)
+            if reasons:
+                merged = dict(ep.attrs.get("unresolved_call_reasons") or {})
+                for name, reason in reasons.items():
+                    merged.setdefault(name, reason)
+                ep.attrs["unresolved_call_reasons"] = merged
 
 
 def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
@@ -1190,6 +1272,7 @@ def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
                         node.id,
                         target,
                         confidence=Confidence.INFERRED,
+                        derived="call",
                     )
     for rpc in analysis.rpc_calls:
         fname = rpc.name.split(".")[-1].lower()
@@ -1235,10 +1318,12 @@ def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
             target = _ensure_access_target(graph, schema, access)
             if not target:
                 continue
-            graph.add_edge(
+            _direct_data_edge(
+                graph,
                 _kind_edge(access.kind),
                 fid,
                 target,
+                access,
                 confidence=access.confidence,
                 evidence=Evidence(file=site.file, line=site.line, symbol=site.symbol),
             )
@@ -1249,6 +1334,7 @@ def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
                         function_id(caller),
                         target,
                         confidence=Confidence.INFERRED,
+                        derived="call",
                     )
                 for node in graph.nodes.values():
                     if node.type != "entrypoint":
@@ -1259,6 +1345,7 @@ def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
                             node.id,
                             target,
                             confidence=Confidence.INFERRED,
+                            derived="call",
                         )
     for acc in analysis.table_accesses:
         fid = function_id(acc.symbol)
@@ -1670,20 +1757,47 @@ def _apply_sql_functions(graph: Graph, schema: Schema) -> None:
             )
 
 
-def _apply_db_triggers(graph: Graph, schema: Schema) -> None:
-    writers_by_table: dict[str, list[tuple[str, Evidence | None]]] = defaultdict(list)
-    for edge in list(graph.edges.values()):
-        if edge.type != "writes":
-            continue
-        to = edge.to_id
-        table = None
-        if to.startswith("table:"):
-            table = to.split(":", 1)[1]
-        elif to.startswith("column:"):
-            table = to.split(":", 1)[1].split(".", 1)[0]
-        if table:
-            writers_by_table[table.lower()].append((edge.from_id, edge.evidence))
+_TRIGGER_CHAIN_DEPTH = 4
 
+
+def _data_table(to_id: str) -> str | None:
+    if to_id.startswith("table:"):
+        return to_id.split(":", 1)[1].lower()
+    if to_id.startswith("column:"):
+        return to_id.split(":", 1)[1].split(".", 1)[0].lower()
+    return None
+
+
+def _trigger_fires(trig: DbTrigger, ops: set[str] | None, columns: set[str] | None) -> bool:
+    """Does a write with these SQL ``ops`` (None: unknown) to these
+    ``columns`` (None: the whole row / unknown) fire ``trig``?"""
+    if not trig.events_known or not ops:
+        return True
+    events = {e.upper() for e in trig.events}
+    hit = ops & events
+    if not hit:
+        return False
+    if hit - {"UPDATE"}:
+        return True  # INSERT / DELETE fire whatever the columns
+    wanted = {c.lower() for c in trig.update_columns}
+    if not wanted or columns is None:
+        return True
+    return bool(columns & wanted)
+
+
+def _apply_db_triggers(graph: Graph, schema: Schema) -> None:
+    """DB triggers: link each trigger to its function and the data it
+    writes, then give that effect to the code whose own SQL fires it.
+
+    Only *direct* writes fire a trigger (not copies propagated to callers),
+    the SQL operation must match the trigger event (INSERT / UPDATE /
+    DELETE), and `UPDATE OF col` needs a write to one of those columns. The
+    effect is table-level: on the firing function (`via: db_trigger:NAME`)
+    and on its callers and entrypoints (also `derived: call`). Triggers whose
+    function writes another table with triggers are followed, up to
+    _TRIGGER_CHAIN_DEPTH levels."""
+    effects: dict[str, list[tuple[str, str]]] = {}  # trigger fn id → (edge type, table target)
+    fn_of_trigger: dict[str, str] = {}
     for trig in schema.triggers.values():
         tid = trigger_id(trig.name)
         graph.add_node(
@@ -1697,61 +1811,152 @@ def _apply_db_triggers(graph: Graph, schema: Schema) -> None:
             evidence=trig.evidence.to_dict() if trig.evidence else None,
         )
         fn = schema.functions.get(trig.function)
-        if fn:
-            fid = function_id(f"sql.{fn.name}")
-            graph.add_node(
-                fid,
-                "function",
-                name=fn.name,
-                language=fn.language,
-                why=None,
-                evidence=fn.evidence.to_dict() if fn.evidence else None,
-            )
-            graph.add_edge(
-                "triggers",
-                tid,
-                fid,
-                confidence=Confidence.EXACT,
-                evidence=trig.evidence,
-            )
-            for access in fn.accesses:
-                target = _ensure_access_target(graph, schema, access)
-                if not target:
-                    continue
+        if not fn:
+            if trig.table:
                 graph.add_edge(
-                    _kind_edge(access.kind),
-                    fid,
-                    target,
-                    confidence=access.confidence,
-                    evidence=fn.evidence,
-                )
-                graph.add_edge(
-                    _kind_edge(access.kind),
+                    "triggers",
                     tid,
-                    target,
+                    table_id(trig.table),
                     confidence=Confidence.EXACT,
                     evidence=trig.evidence,
                 )
-                if access.kind.startswith("write"):
-                    for writer_id, ev in writers_by_table.get(trig.table.lower(), []):
-                        if writer_id in {fid, tid}:
-                            continue
-                        graph.add_edge(
-                            "writes",
-                            writer_id,
-                            target,
-                            confidence=Confidence.INFERRED,
-                            evidence=ev or trig.evidence,
-                            via=f"db_trigger:{trig.name}",
-                        )
-        elif trig.table:
-            graph.add_edge(
-                "triggers",
-                tid,
-                table_id(trig.table),
-                confidence=Confidence.EXACT,
-                evidence=trig.evidence,
+            continue
+        fid = function_id(f"sql.{fn.name}")
+        fn_of_trigger[trig.name] = fid
+        graph.add_node(
+            fid,
+            "function",
+            name=fn.name,
+            language=fn.language,
+            why=None,
+            evidence=fn.evidence.to_dict() if fn.evidence else None,
+        )
+        graph.add_edge("triggers", tid, fid, confidence=Confidence.EXACT, evidence=trig.evidence)
+        out: list[tuple[str, str]] = []
+        for access in fn.accesses:
+            target = _ensure_access_target(graph, schema, access)
+            if not target:
+                continue
+            edge = graph.add_edge(
+                _kind_edge(access.kind), fid, target, confidence=access.confidence, evidence=fn.evidence
             )
+            if edge.type == "writes":
+                ops = sql_write_ops(access.raw_sql)
+                if ops:
+                    edge.attrs["ops"] = sorted(set(edge.attrs.get("ops") or []) | set(ops))
+            graph.add_edge(
+                _kind_edge(access.kind), tid, target, confidence=Confidence.EXACT, evidence=trig.evidence
+            )
+            if access.kind.startswith("write"):
+                table = (access.table or "").lower()
+                if table and not access.unknown_table and table != "unknown":
+                    tgt = _ensure_access_target(
+                        graph,
+                        schema,
+                        SqlAccess(kind=access.kind, table=table, column=None, confidence=Confidence.INFERRED, raw_sql=""),
+                    )
+                    if tgt and ("writes", tgt) not in out:
+                        out.append(("writes", tgt))
+        effects[fid] = out
+
+    if not effects:
+        return
+
+    # direct writers per table: (function id) → ops / columns / evidence
+    writers: dict[str, dict[str, dict]] = defaultdict(dict)
+    for edge in graph.edges.values():
+        if edge.type != "writes" or edge.attrs.get("derived") or edge.attrs.get("via"):
+            continue
+        src = graph.nodes.get(edge.from_id)
+        if src is None or src.type != "function":
+            continue
+        table = _data_table(edge.to_id)
+        if not table:
+            continue
+        info = writers[table].setdefault(edge.from_id, {"ops": set(), "any_op": False, "cols": set(), "row": False, "ev": edge.evidence})
+        ops = edge.attrs.get("ops")
+        if ops:
+            info["ops"].update(str(o).upper() for o in ops)
+        else:
+            info["any_op"] = True
+        if edge.to_id.startswith("column:"):
+            info["cols"].add(edge.to_id.split(".", 1)[1].lower())
+        else:
+            info["row"] = True
+
+    # who fires which trigger function
+    fired_by: dict[str, dict[str, tuple[str, Evidence | None]]] = defaultdict(dict)  # fid → writer → (trigger, ev)
+    for trig in sorted(schema.triggers.values(), key=lambda t: t.name):
+        fid = fn_of_trigger.get(trig.name)
+        if not fid or not trig.table:
+            continue
+        for writer, info in sorted(writers.get(trig.table.lower(), {}).items()):
+            if writer == fid:
+                continue
+            ops = None if info["any_op"] else set(info["ops"])
+            cols = None if info["row"] else set(info["cols"])
+            if _trigger_fires(trig, ops, cols):
+                fired_by[fid].setdefault(writer, (trig.name, info["ev"]))
+
+    # call graph for the effect on callers and entrypoints
+    reverse: dict[str, set[str]] = defaultdict(set)
+    entry_of: dict[str, list[str]] = defaultdict(list)
+    for edge in graph.edges.values():
+        if edge.type == "calls" and edge.confidence != Confidence.UNKNOWN:
+            reverse[edge.to_id].add(edge.from_id)
+        elif edge.type == "triggers":
+            src = graph.nodes.get(edge.from_id)
+            if src is not None and src.type == "entrypoint":
+                entry_of[edge.to_id].append(edge.from_id)
+
+    def callers(fid: str) -> set[str]:
+        seen: set[str] = set()
+        queue = deque([fid])
+        while queue:
+            cur = queue.popleft()
+            for parent in reverse.get(cur, ()):
+                if parent not in seen and parent != fid:
+                    seen.add(parent)
+                    queue.append(parent)
+        return seen
+
+    for fid in sorted(effects):
+        targets = effects[fid]
+        if not targets:
+            continue
+        # writers that fire it, and (for chained triggers) whoever fires those
+        causers: dict[str, tuple[str, Evidence | None]] = {}
+        frontier = [(fid, 0)]
+        while frontier:
+            cur, depth = frontier.pop()
+            if depth >= _TRIGGER_CHAIN_DEPTH:
+                continue
+            for writer, (tname, ev) in sorted(fired_by.get(cur, {}).items()):
+                if writer in causers or writer == fid:
+                    continue
+                causers[writer] = (tname, ev)
+                if writer in effects:  # a trigger function itself
+                    frontier.append((writer, depth + 1))
+        for writer, (tname, ev) in sorted(causers.items()):
+            via = f"db_trigger:{tname}"
+            for kind, target in targets:
+                graph.add_edge(kind, writer, target, confidence=Confidence.INFERRED, evidence=ev, via=via)
+            for anc in sorted(callers(writer)):
+                anc_node = graph.nodes.get(anc)
+                if anc_node is None or anc_node.type != "function":
+                    continue
+                if _is_func_main(str(anc_node.attrs.get("name") or anc.split(":", 1)[-1])):
+                    continue
+                for kind, target in targets:
+                    graph.add_edge(
+                        kind, anc, target, confidence=Confidence.INFERRED, evidence=ev, via=via, derived="call"
+                    )
+            for holder in {writer, *callers(writer)}:
+                for ep in entry_of.get(holder, []):
+                    for kind, target in targets:
+                        graph.add_edge(
+                            kind, ep, target, confidence=Confidence.INFERRED, evidence=ev, via=via, derived="call"
+                        )
 
 
 def scan_path(
