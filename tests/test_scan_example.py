@@ -118,7 +118,7 @@ def test_cli_scan_and_why(example_root: Path, tmp_path: Path) -> None:
     mmd = out.with_suffix(".mmd").read_text(encoding="utf-8")
     assert "flowchart LR" in mmd
     data = json.loads(out.read_text(encoding="utf-8"))
-    assert data["version"] == "0.3.0"
+    assert data["version"] == "0.3.1"
     assert data["nodes"]
     assert data["schema"]["tables"]["orders"]
 
