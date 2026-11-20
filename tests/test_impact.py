@@ -45,7 +45,8 @@ def test_parse_unified_diff_lines() -> None:
 
 def test_functions_carry_end_lines_and_repo_roots() -> None:
     graph = scan_path(CHECKOUT)
-    assert set(graph.attrs["repo_roots"].values()) == {"web", "api", "billing"}
+    assert set(graph.attrs["repo_roots"].values()) == {f"{PREFIX}/{r}" for r in ("web", "api", "billing")}
+    assert graph.attrs["repo_roots_base"] == "git"
     langs = {}
     for node in graph.nodes.values():
         if node.type != "function":
@@ -241,3 +242,35 @@ def test_quoted_non_ascii_paths() -> None:
         '--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -3,0 +4,1 @@\n+x\n'
     )
     assert parse_unified_diff(d) == {"café.py": {4}}
+
+
+def test_registry_merge_keeps_roots(tmp_path: Path) -> None:
+    """per-repo scans + `registry merge` map a diff like the joint scan."""
+    runner = CliRunner()
+    parts = []
+    for repo in ("web", "api", "billing"):
+        out = tmp_path / f"{repo}.json"
+        assert runner.invoke(main, ["scan", str(CHECKOUT / repo), "--out", str(out)]).exit_code == 0
+        parts.append(str(out))
+    merged = tmp_path / "merged.json"
+    res = runner.invoke(main, ["registry", "merge", *parts, "--out", str(merged)])
+    assert res.exit_code == 0, res.output
+    from bizmap.registry import graph_from_json
+
+    g = graph_from_json(json.loads(merged.read_text(encoding="utf-8")))
+    diff = _diff(f"{PREFIX}/api/billing.go", 27) + _diff(f"{PREFIX}/billing/app.py", 35)
+    joint = compute_impact(scan_path(CHECKOUT), diff)
+    via_merge = compute_impact(g, diff)
+    assert [f.function for f in via_merge.functions] == [f.function for f in joint.functions]
+    assert len(joint.functions) == 2
+
+
+def test_hint_when_nothing_maps(tmp_path: Path) -> None:
+    (tmp_path / "svc").mkdir()
+    (tmp_path / "svc" / "app.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    graph = scan_path(tmp_path / "svc")  # no git: roots relative to the scan path
+    assert graph.attrs["repo_roots_base"] == "scan"
+    miss = compute_impact(graph, _diff("svc/app.py", 2))
+    assert miss.functions == [] and miss.hint and "--prefix" in miss.hint
+    hit = compute_impact(graph, _diff("svc/app.py", 2), prefix="svc")
+    assert len(hit.functions) == 1 and hit.hint is None

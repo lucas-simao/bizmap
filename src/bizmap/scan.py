@@ -1806,7 +1806,9 @@ def scan_paths(
         )
         roots_by_repo[str(graphs[-1].repo)] = Path(os.path.relpath(root, base_dir)).as_posix()
     merged = merge_graphs(graphs)
-    merged.attrs["repo_roots"] = roots_by_repo
+    if merged.attrs.get("repo_roots_base") != "git":
+        merged.attrs["repo_roots"] = roots_by_repo
+        merged.attrs["repo_roots_base"] = "scan"
     parent_cfg = load_scan_config(roots[0].parent if roots else Path("."), config=config)
     services.update(parent_cfg.services)
     merged.attrs["services"] = services
@@ -1999,6 +2001,13 @@ def _relink_queues_from_graph(graph: Graph, services: dict[str, str]) -> None:
                 )
 
 
+def _git_toplevel(path: Path) -> Path | None:
+    for cand in (path, *path.parents):
+        if (cand / ".git").exists():
+            return cand
+    return None
+
+
 def _scan_one(
     root: Path,
     *,
@@ -2021,7 +2030,14 @@ def _scan_one(
     graph.database = cfg.database
     graph.attrs["repo"] = graph.repo
     graph.attrs["database"] = graph.database
-    graph.attrs["repo_roots"] = {graph.repo: "."}
+    git_root = _git_toplevel(root)
+    if git_root is not None:
+        # relative to the git root, like diff paths: survives `registry merge`
+        graph.attrs["repo_roots"] = {graph.repo: Path(os.path.relpath(root, git_root)).as_posix()}
+        graph.attrs["repo_roots_base"] = "git"
+    else:
+        graph.attrs["repo_roots"] = {graph.repo: "."}
+        graph.attrs["repo_roots_base"] = "scan"
     graph.attrs["services"] = cfg.services
     graph.attrs["queues"] = (cfg.raw or {}).get("queues") or {}
     graph.version = GRAPH_VERSION
