@@ -1,4 +1,4 @@
-# Dogfood: the BizMap impact Action from this checkout, on this repo's PRs.
+# Dogfood: runs the BizMap impact Action from this checkout on this repo's PRs.
 name: Impact
 on: pull_request
 permissions:
