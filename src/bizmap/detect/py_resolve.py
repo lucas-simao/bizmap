@@ -61,6 +61,8 @@ class ImportMap:
     from_names: dict[str, tuple[str, str]] = field(default_factory=dict)
     # alias -> module for `import mod as alias`
     modules: dict[str, str] = field(default_factory=dict)
+    # modules re-exported with `from .x import *`
+    star_modules: list[str] = field(default_factory=list)
 
 
 def unquote(raw: str) -> str:
@@ -150,8 +152,10 @@ def _local_base_field(attr_name: str, found: ResolvedString) -> bool:
     return leaf in _BASE_FIELD_NAMES or leaf == attr_name.lower()
 
 
-def parse_imports(root: Node, module: str) -> ImportMap:
+def parse_imports(root: Node, module: str, is_package: bool = False) -> ImportMap:
     imap = ImportMap()
+    # in a package's __init__.py, `.` is the package itself
+    current = f"{module}.__init__" if is_package else module
     for node in walk(root):
         if node.type == "import_statement":
             imap.raw.append(text(node))
@@ -159,7 +163,7 @@ def parse_imports(root: Node, module: str) -> ImportMap:
                 _record_import_mod(imap, child)
         elif node.type == "import_from_statement":
             imap.raw.append(text(node))
-            mod = _from_module(node, module)
+            mod = _from_module(node, current)
             skip_module = True
             for child in node.named_children:
                 if child.type == "relative_import":
@@ -167,6 +171,10 @@ def parse_imports(root: Node, module: str) -> ImportMap:
                     continue
                 if child.type == "dotted_name" and skip_module:
                     skip_module = False
+                    continue
+                if child.type == "wildcard_import":
+                    if mod and mod not in imap.star_modules:
+                        imap.star_modules.append(mod)
                     continue
                 if child.type == "aliased_import":
                     orig_n = child.child_by_field_name("name") or next(

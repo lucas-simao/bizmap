@@ -195,3 +195,60 @@ def notes2(conn=None):
     graph = scan_path(root)
     assert "table:notes" in _reach(graph, "entrypoint:http:GET:/notes")
     assert "table:notes" in _reach(graph, "entrypoint:http:GET:/notes2")
+
+
+def test_py_barrel_reexport_call(tmp_path: Path) -> None:
+    """`pkg/image_utils/__init__.py` re-exports from `.crop`; callers import the
+    name from the package. Also `import *` re-exports, two-level barrels and
+    `import image_utils; image_utils.fn()`."""
+    _write(tmp_path, "schema.sql", "CREATE TABLE thumbs (id text);\n")
+    _write(
+        tmp_path,
+        "pkg/image_utils/__init__.py",
+        "from .crop import crop_to_data_uri, normalize_bytes\nfrom .resize import *\n",
+    )
+    _write(
+        tmp_path,
+        "pkg/image_utils/crop.py",
+        """
+from sqlalchemy import text
+
+
+def crop_to_data_uri(conn, img):
+    conn.execute(text("INSERT INTO thumbs (id) VALUES ('x')"))
+
+
+def normalize_bytes(b):
+    return b
+""",
+    )
+    _write(tmp_path, "pkg/image_utils/resize.py", "def shrink(img):\n    return img\n")
+    _write(tmp_path, "pkg/media/__init__.py", "from image_utils import crop_to_data_uri\n")
+    _write(
+        tmp_path,
+        "pkg/api.py",
+        """
+import image_utils
+from image_utils import crop_to_data_uri, shrink
+from media import crop_to_data_uri as crop2
+
+
+def upload(conn, img):
+    crop_to_data_uri(conn, img)
+    shrink(img)
+    crop2(conn, img)
+    return image_utils.normalize_bytes(img)
+""",
+    )
+    graph = scan_path(tmp_path)
+    callees = {
+        e.to_id for e in graph.edges.values() if e.type == "calls" and e.from_id == function_id("pkg.api.upload")
+    }
+    assert {
+        function_id("image_utils.crop.crop_to_data_uri"),
+        function_id("image_utils.resize.shrink"),
+        function_id("image_utils.crop.normalize_bytes"),
+    } <= callees, callees
+    node = graph.get(function_id("pkg.api.upload"))
+    assert not (node.attrs.get("unresolved_calls") or []), node.attrs.get("unresolved_calls")
+    assert "table:thumbs" in _reach(graph, function_id("pkg.api.upload"))
