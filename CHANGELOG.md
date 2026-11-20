@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Express `router.route('/x').get(a).post(b)`** registers one entrypoint per
+  method, with the path from `.route()` and each handler's own span and SQL.
+- `docs/graph-schema.md`: for an inline route handler, `evidence.line` is where
+  the registration call (or chain) starts; `start_line`/`end_line` are the
+  handler's own lines.
+
 ## 0.3.8 — 2026-11-20
 
 ### Known limitations

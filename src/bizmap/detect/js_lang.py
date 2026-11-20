@@ -740,6 +740,37 @@ def _enclosing_js_params(node: Node | None) -> list[str]:
     return names
 
 
+def _route_chain(call: Node, consts: dict[str, str]) -> tuple[str, str | None] | None:
+    """`router.route('/x').get(h).post(h2)`: (root receiver, '/x') for each
+    method call of the chain, else None."""
+    func = call.child_by_field_name("function")
+    obj = func.child_by_field_name("object") if func is not None and func.type == "member_expression" else None
+    path: str | None = None
+    found = False
+    while obj is not None and obj.type == "call_expression":
+        fn = obj.child_by_field_name("function")
+        if fn is None or fn.type != "member_expression":
+            return None
+        prop = fn.child_by_field_name("property")
+        if prop is not None and text(prop) == "route":
+            args = call_args(obj)
+            if not args:
+                return None
+            path, _u = _resolve_js_string(args[0], consts)
+            found = True
+            root = fn.child_by_field_name("object")
+            while root is not None and root.type in {"member_expression", "parenthesized_expression"}:
+                if root.type == "parenthesized_expression":
+                    root = root.named_children[0] if root.named_children else None
+                    continue
+                break
+            if root is None:
+                return None
+            return (text(root) if root.type == "identifier" else text(root)), path
+        obj = fn.child_by_field_name("object")
+    return ("", path) if found else None
+
+
 def _receiver_ident(call: Node) -> str:
     func = call.child_by_field_name("function")
     func = unwrap_callee_expr(func) or func
@@ -1216,6 +1247,14 @@ class JsAnalyzer:
                     continue
                 if is_router and method == "route":
                     continue
+                # Express `router.route('/x').get(h).post(h2)`: the path comes from
+                # `.route()`, each method call takes only the handler
+                chained = _route_chain(node, consts) if method in ROUTE_HTTP_METHODS else None
+                if chained is not None and chained[1] and (chained[0] in routers or is_router):
+                    path_val, path_unresolved = chained[1], False
+                    prefix = routers.get(chained[0], prefix) if chained[0] in routers else prefix
+                    is_router = True
+                    args = [*args[:0], None, *args] if len(args) == 1 else args  # handler = args[-1]
                 if is_router and method in ROUTE_HTTP_METHODS and path_val is not None and (
                     path_val.startswith("/") or path_val.startswith("{") or "://" in path_val
                 ):
