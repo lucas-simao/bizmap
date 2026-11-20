@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **Per-call `baseURL` overrides the instance base**: `http.post(url, body,
+  { baseURL: V2 })`, `http.get(url, { baseURL })` and
+  `http.request({ baseURL, url })` use the call's own base (axios/ky config
+  position only; `baseURL`/`baseUrl`/`prefixUrl`). An unresolvable override is
+  an unknown explicit base, so the URL must match whole — the
+  `/api/v2/items/:id/pdf-report` false link to `/api/v1/client/...` is gone.
+
 - **Silent drop of calls into unscanned submodules of scanned packages**:
   with an `__init__.py` chain, `pkg.store.lens.counts.tenant_counts` was
   skipped because `pkg` / `pkg.store` are scanned (their `__init__.py`). Now
