@@ -60,7 +60,7 @@ def _graph_bytes(graph) -> bytes:
 
 
 def test_graph_version() -> None:
-    assert GRAPH_VERSION == "0.3.3"
+    assert GRAPH_VERSION == "0.3.4"
 
 
 def test_fastapi_router_factory_is_not_calls_http(tmp_path: Path) -> None:
