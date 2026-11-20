@@ -44,7 +44,12 @@ from bizmap.http_match import (
 from bizmap.overrides import ScanConfig, apply_overrides, load_scan_config
 from bizmap.registry import merge_graphs
 from bizmap.schema_replay import Schema, replay_files
-from bizmap.spans import fill_spans, split_factory_members, split_go_route_closures
+from bizmap.spans import (
+    fill_spans,
+    split_factory_members,
+    split_go_route_closures,
+    split_js_inline_handlers,
+)
 from bizmap.sql_analyze import (
     SqlAccess,
     analyze_sql,
@@ -2189,6 +2194,7 @@ def _scan_one(
     fill_spans(graph, root, span_cache)
     split_factory_members(graph, root, span_cache)
     split_go_route_closures(graph, root, span_cache)  # its own edge index: after the JS moves
+    split_js_inline_handlers(graph)
     timings.propagate += go_prop + py_prop + (time.perf_counter() - t_prop)
 
     if profile:

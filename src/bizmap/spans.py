@@ -524,3 +524,42 @@ def _table_hits(
             for member in component:
                 memo[member] = hits
     return memo[fid]
+
+
+def split_js_inline_handlers(graph: Graph, index: _OutIndex | None = None) -> None:
+    """`app.post('/x', async (req, res) => { await pool.query(...) })`: code in
+    an inline handler is detected as module-level code (`<module>.module`).
+    Move the edges whose evidence is inside the handler's span to the
+    handler node (`<module>.POST /x`) and roll its tables up onto the route,
+    like a named handler."""
+    index = index or _OutIndex(graph)
+    memo: dict[str, set[tuple[str, str]]] = {}
+    for edge in [e for e in graph.edges.values() if e.type == "triggers"]:
+        handler = graph.nodes.get(edge.to_id)
+        ep = graph.nodes.get(edge.from_id)
+        if handler is None or ep is None or ep.type != "entrypoint":
+            continue
+        if handler.attrs.get("language") != "javascript":
+            continue
+        name = str(handler.attrs.get("name") or "")
+        if " " not in name:
+            continue  # named handlers own their code already
+        ev = handler.attrs.get("evidence") or {}
+        rel = ev.get("file")
+        start = handler.attrs.get("start_line") or ev.get("line")
+        end = handler.attrs.get("end_line")
+        if not rel or not isinstance(start, int) or not isinstance(end, int):
+            continue
+        module = name[: name.index(" ")].rsplit(".", 1)[0]
+        owner = f"function:{module}.module"
+        moved = False
+        for out in [e for e in index.out(owner) if e.type in _MOVABLE]:
+            e_ev = out.evidence
+            if e_ev is None or e_ev.file != rel or not (start <= e_ev.line <= end):
+                continue
+            index.move(out, handler.id)
+            moved = True
+        if moved:
+            evidence = Evidence(file=str(rel), line=int(ev.get("line") or start), symbol=name)
+            for etype, target in sorted(_table_hits(graph, index, handler.id, memo)):
+                index.add(etype, ep.id, target, confidence="inferred", evidence=evidence)

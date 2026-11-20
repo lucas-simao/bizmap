@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Inline Express handlers own their SQL**: `app.post('/x', async (req, res) =>
+  { await pool.query(...) })` writes from the handler (and the route), no
+  longer from `<module>.module`.
+- **Route handlers imported as default or through a namespace**
+  (`import listHandler from`, `h.cancelHandler` with `import * as h`) resolve to
+  the scanned function: the route gets its tables and `why`, and no empty
+  `<module>.default` / `<module>.h.cancelHandler` nodes are left.
+- **`why` license filter** only drops real license text (`Copyright`, `SPDX`,
+  "licensed under", "all rights reserved", `(c) 2024`, `/*!`); a comment that
+  merely starts with "License …" is kept.
+
 ### Added
 
 - **Schema changes in the PR comment**: changed lines of `.sql` files inside
