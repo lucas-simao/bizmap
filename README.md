@@ -178,7 +178,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4   # the base commit is fetched if missing; fetch-depth: 0 also works
-      - uses: lucas-simao/bizmap@v0.3.10
+      - uses: lucas-simao/bizmap@v0.4.0
         with:
           path: .            # or the workspace dir holding bizmap.yaml with `repos:`
 ```
@@ -199,7 +199,7 @@ don't produce impact.
 
 ## MCP server (for coding agents)
 
-*Requires bizmap 0.4.0+ (until it is on PyPI: `pip install "git+https://github.com/lucas-simao/bizmap"`).*
+*Requires bizmap 0.4.0+.*
 
 `bizmap mcp` lets Claude Code, Cursor, Claude Desktop or any MCP client ask the
 graph *what writes `orders.status`?*, *which routes reach `markPaid`?* or *what does
@@ -285,8 +285,9 @@ and marks those links `inferred`. Details: [docs/how-it-works.md](docs/how-it-wo
 
 - **Shipped in v0.3.3** — `bizmap impact` + GitHub Action that comments on each PR
   with the routes, functions, tables and columns it impacts (and a Mermaid diagram).
-- **v0.4** — MCP server so coding agents can ask `why orders.status` instead of grepping
-  (`bizmap mcp`, in progress on `main`).
+- **Shipped in v0.4.0** — `bizmap mcp`, a read-only MCP server so coding agents can ask
+  `why orders.status` instead of grepping; `bizmap scan --discover` for work folders
+  full of clones and worktrees.
 - Static graph page (GitHub Pages).
 
 Full history: [CHANGELOG.md](CHANGELOG.md). Graph format:

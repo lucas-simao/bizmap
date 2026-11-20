@@ -1,7 +1,6 @@
 # BizMap MCP server
 
-> Requires **bizmap 0.4.0 or newer**. Until 0.4.0 is on PyPI, install from the
-> repository: `pip install "git+https://github.com/lucas-simao/bizmap"`.
+> Requires **bizmap 0.4.0 or newer** (`pip install -U bizmap`).
 
 `bizmap mcp` lets a coding agent (Claude Code, Cursor, Claude Desktop, or any
 MCP client) ask the lineage graph questions — *what writes `orders.status`?*,
@@ -211,7 +210,7 @@ multi-repo graph a name that exists in several repos is an error listing the ids
 |---|---|
 | `graph not found: …` | run `bizmap scan`, then use the absolute path it wrote |
 | `graph not found: …/${workspaceFolder}/…` | the client doesn't expand `${workspaceFolder}` (only some do, e.g. Cursor): write the absolute path |
-| `No such command 'mcp'` | your bizmap is older than 0.4.0: upgrade (or install from the repository, above) |
+| `No such command 'mcp'` | your bizmap is older than 0.4.0: upgrade with `pip install -U bizmap` |
 | client shows no tools | check the client's server log for the `serving …` line or an error |
 | `command not found: bizmap` in the client log | use the full path from `which bizmap` |
 | answers look stale | re-run `bizmap scan` (the server reloads the file automatically) |
