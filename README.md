@@ -242,6 +242,21 @@ Full history: [CHANGELOG.md](CHANGELOG.md). Graph format:
 [docs/graph-schema.md](docs/graph-schema.md). Detector rules:
 [docs/detector-rules.md](docs/detector-rules.md).
 
+## Releasing
+
+Bump the version (`pyproject.toml`, `src/bizmap/__init__.py`, graph version,
+`docs/graph-schema.md`, README `@vX.Y.Z`), date the CHANGELOG section, merge, then
+push a tag on that commit:
+
+```bash
+git tag -a v0.3.5 <commit> -m "v0.3.5" && git push origin v0.3.5
+```
+
+`.github/workflows/release.yml` checks that the tag matches the version and the
+CHANGELOG, runs the tests, builds, publishes to PyPI with Trusted Publishing (no
+token) and creates the GitHub release with that CHANGELOG section. One-time setup
+is described at the top of the workflow.
+
 ## Development
 
 ```bash
