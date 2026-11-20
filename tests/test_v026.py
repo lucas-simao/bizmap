@@ -49,7 +49,7 @@ def _http_urls(graph) -> set[tuple[str, str]]:
 
 
 def test_graph_version() -> None:
-    assert GRAPH_VERSION == "0.3.1"
+    assert GRAPH_VERSION == "0.3.2"
 
 
 def test_hono_chained_export_nested_mounts(tmp_path: Path) -> None:

@@ -1,35 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 — 2026-11-20
 
-### Fixed
+0.3.1 was bumped on `main` but never tagged; its additions ship here.
 
-- **`end_line` for every function node**: inline JS/TS handlers, Go func
-  literals, `<module>.module` pseudo-functions and SQL functions from
-  migrations now have spans, so a diff inside them maps (`start_line` is set
-  when the literal starts below the registration line).
-- **Factory members own their calls** (`createClient(http) { return { a: () =>
-  http.get(...), b() {...} } }`): each returned function becomes
-  `<factory>.<key>`, called by the factory (`via: returned_member`), and holds
-  the `calls_http`/`reads`/`writes` inside it. ID change: these edges no longer
-  leave the factory itself.
-- **`registry merge` keeps `repo_roots`**: roots are recorded relative to the
-  git root (`repo_roots_base: git`), so per-repo scans + merge map a diff like
-  the joint scan (merge == joint is byte-equal again). `impact` warns when no
-  changed path is under a scanned root (`--prefix` hint without git).
-- **PR comment size**: rows ranked by reach and capped (`--max-rows`), functions
-  with no route/table summarized, hard cap `--max-chars 60000`, `--details-url`.
-- **Action hardening**: a failed comment listing skips posting instead of
-  creating a duplicate; install/setup failures still produce a failure
-  comment; `ref: <head>` checkouts diff from the merge base; the job fails on
-  BizMap errors only with `fail-on-error: "true"` (advisory by default).
-- **Action robustness**: fork PRs write only the step summary; only the
-  bot's own marker comment is updated; base commit fetched with a clear error;
-  non-PR events are skipped; non-ASCII paths (`core.quotepath=false` and
-  unquoting in the parser); a failed scan updates the comment with a log link
-  and fails the job.
+### Upgrading — ids that changed
 
-## 0.3.1 — 2026-11-19
+- **Nested JS/TS functions** are qualified by every named function around them:
+  `function createA(http) { function build() {} }` → `<module>.createA.build`
+  (was `<module>.build`, which collided across factories).
+- **Factory members**: functions in an object returned by a named function
+  (`return { one: (id) => ... }`, `=> ({ ... })`, `stock() {...}`) are
+  `<factory>.<key>`; their `calls_http`, `unresolved_http`, reads and writes
+  leave the factory, which `calls` each member.
+- **Go inline route closures** (`e.GET("/x", func(c echo.Context) error {...})`)
+  are `<enclosing>.funcN` (Go's numbering), triggered by the route; the SQL and
+  calls inside move off the enclosing function.
 
 ### Added
 
@@ -43,6 +29,34 @@
 - **Graph**: function nodes carry `end_line`; the graph records `repo_roots`
   (repo name → directory relative to the scan path) so diff paths map to
   functions in joint scans.
+- **`fail-on-error`** Action input (default `"false"`: advisory check).
+- **Graph**: `start_line` on function nodes whose definition starts below the
+  evidence line; `repo_roots_base` (`git` or `scan`).
+
+### Fixed
+
+- **`end_line` for every function node**: inline JS/TS handlers, Go func
+  literals, `<module>.module` pseudo-functions and SQL functions from
+  migrations have spans, so a diff inside them maps.
+- **Diff parsing**: a replacement is described by its added lines only (no
+  longer marks the line above); a pure deletion marks the lines around the gap
+  (`{c, c+1}` when the new side is empty); hunk bodies are read by header
+  counts, so a removed `-- comment` is not a file header.
+- **Calls to local helpers**: `one: (id) => build(id)` / `addUser: () =>
+  loadUser()` with helpers declared in an enclosing function produce `calls`.
+- **`registry merge` keeps `repo_roots`**: roots are relative to the git root,
+  so per-repo scans + merge map a diff like the joint scan (merge == joint is
+  byte-equal again inside git). `impact` hints when changed code files are
+  unknown to the graph.
+- **PR comment size**: rows ranked by reach and capped (`--max-rows`), functions
+  with no route/table summarized, hard cap `--max-chars 60000` that always keeps
+  the marker and header, `--details-url`.
+- **Action**: fork PRs write only the step summary; only `comment-author`'s
+  marker comment is updated; a failed comment listing skips posting (no
+  duplicates); base commit fetched with a clear error; `ref: <head>` checkouts
+  diff from the merge base; non-PR events are skipped; non-ASCII paths
+  (`core.quotepath=false` + unquoting); install/scan failures update the
+  comment with a log link.
 
 ## 0.3.0 — 2026-11-19
 
