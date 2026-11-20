@@ -1,4 +1,4 @@
-# BizMap graph schema (v0.3.1)
+# BizMap graph schema (v0.3.2)
 
 `bizmap scan` writes `bizmap.graph.json`. The graph is fully deterministic: every
 node and edge is produced from source text (SQL, tree-sitter ASTs, comments, or
