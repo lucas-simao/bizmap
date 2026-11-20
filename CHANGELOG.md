@@ -7,8 +7,12 @@
 - **`bizmap mcp`**: a read-only MCP server over stdio for coding agents. It reads
   the graph JSON (reloaded when it changes), never uses the network or a model,
   and answers deterministically. Tools: `search`, `call_graph`, `function_data`,
-  `table_usage`, `impact` (same logic as `bizmap impact`) and `why_column`. No new
-  dependency: the JSON-RPC/MCP layer is built in.
+  `table_usage`, `impact` (same logic as `bizmap impact`) and `why_column`. Every
+  item carries `evidence` (`file:line`) and, when it comes from an edge, a
+  `confidence`; lists are capped (`limit`, default 20, max 100) with totals and
+  `truncated`, results stay under 20,000 characters, and order is documented.
+  No new dependency: the JSON-RPC/MCP layer is built in (no `bizmap[mcp]` extra
+  is needed). Setup for Claude Code, Cursor and Claude Desktop: `docs/mcp.md`.
 
 ## 0.3.10 — 2026-11-20
 

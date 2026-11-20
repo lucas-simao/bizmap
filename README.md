@@ -189,35 +189,41 @@ don't produce impact.
 
 ## MCP server (for coding agents)
 
-`bizmap mcp` serves a graph to MCP clients over stdio, so an agent can ask
-"what writes `orders.status`?" instead of grepping. It is **read-only and
-offline**: it reads the JSON from `bizmap scan` (reloaded when you rescan), never
-touches the network or runs a model, and answers deterministically.
+`bizmap mcp` lets Claude Code, Cursor, Claude Desktop or any MCP client ask the
+graph *what writes `orders.status`?*, *which routes reach `markPaid`?* or *what does
+this diff touch?* instead of grepping. It is **read-only and offline** (reads the JSON
+from `bizmap scan`, reloads it when you rescan), deterministic, and needs no extra
+dependency.
 
 ```bash
 bizmap scan . --out bizmap.graph.json
-bizmap mcp --graph bizmap.graph.json        # stdio; logs go to stderr
+claude mcp add bizmap -- bizmap mcp --graph "$PWD/bizmap.graph.json"   # Claude Code
 ```
 
-Client config (Claude Code: `claude mcp add bizmap -- bizmap mcp --graph /abs/path/bizmap.graph.json`;
-other clients take the usual `mcpServers` entry):
+Cursor (`.cursor/mcp.json`):
 
 ```json
-{ "mcpServers": { "bizmap": { "command": "bizmap", "args": ["mcp", "--graph", "/abs/path/bizmap.graph.json"] } } }
+{ "mcpServers": { "bizmap": { "command": "bizmap", "args": ["mcp", "--graph", "${workspaceFolder}/bizmap.graph.json"] } } }
+```
+
+Claude Desktop (`claude_desktop_config.json`, absolute paths):
+
+```json
+{ "mcpServers": { "bizmap": { "command": "/home/you/.local/bin/bizmap", "args": ["mcp", "--graph", "/home/you/code/shop/bizmap.graph.json"] } } }
 ```
 
 | Tool | Answers |
 |---|---|
-| `search` | find functions, routes, tables, columns by name / path / doc comment → ids |
-| `call_graph` | who calls a function (and which routes/jobs reach it), what it calls — across services |
+| `search` | functions, routes, tables, columns by name / path / doc comment → ids |
+| `call_graph` | callers (and the routes/jobs that reach a function) and callees, across services |
 | `function_data` | tables/columns a function or route reads and writes (`transitive` through callees) |
-| `table_usage` | functions and routes that read/write a table or one column (`orders.status`) |
+| `table_usage` | functions and routes that read/write a table or one column |
 | `impact` | a unified diff → changed functions, routes and data (same as `bizmap impact`) |
-| `why_column` | the `bizmap why` text for `table.column` |
+| `why_column` | the `bizmap why` report for `table.column` |
 
-Functions and routes can be named by id (from `search`), by name (`markPaid`) or as
-`METHOD /path`; an ambiguous name returns the candidate ids. `--repo-root` lets
-`impact` read changed `.sql` files (off by default).
+Every item carries `evidence` (`file:line`) and, when it comes from an edge, a
+`confidence`; lists are capped (`limit`, default 20) with totals. Setup per client,
+the full input/output contract and troubleshooting: [docs/mcp.md](docs/mcp.md).
 
 ## What it understands
 

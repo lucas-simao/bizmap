@@ -365,10 +365,11 @@ def impact_cmd(
 @click.option(
     "--graph",
     "graph_path",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     default=Path("bizmap.graph.json"),
     show_default=True,
-    help="Graph JSON produced by `bizmap scan` (reloaded when it changes).",
+    help="Graph JSON produced by `bizmap scan` (reloaded when it changes). "
+    "Use an absolute path in editor configs.",
 )
 @click.option(
     "--repo-root",
@@ -383,12 +384,25 @@ def mcp_cmd(graph_path: Path, repo_root: Path | None) -> None:
     """
     from bizmap.mcp_server import GraphStore, serve
 
+    resolved = graph_path.expanduser().resolve()
+    if not resolved.is_file():
+        raise click.ClickException(
+            f"graph not found: {resolved}\n"
+            f"Create it with `bizmap scan <repo> --out {resolved}`, then point --graph at it "
+            "(MCP clients start servers from their own directory, so use an absolute path)."
+        )
     try:
-        store = GraphStore(graph_path, repo_root=repo_root)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise click.ClickException(f"cannot read graph {graph_path}: {exc}") from exc
+        store = GraphStore(resolved, repo_root=repo_root)
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(
+            f"{resolved} is not a BizMap graph (invalid JSON: {exc}). Re-run `bizmap scan`."
+        ) from exc
+    except OSError as exc:
+        raise click.ClickException(f"cannot read graph {resolved}: {exc}") from exc
     click.echo(
-        f"bizmap mcp: serving {graph_path} ({len(store.graph.nodes)} nodes) on stdio", err=True
+        f"bizmap mcp {__version__}: serving {resolved} "
+        f"({len(store.graph.nodes)} nodes, {len(store.graph.edges)} edges) on stdio",
+        err=True,
     )
     serve(store)
 
