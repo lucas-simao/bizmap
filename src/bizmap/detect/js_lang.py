@@ -3086,7 +3086,9 @@ def _collect_route_literals(
                 # `export const paths = { pdfReport: (id) => `/items/${id}/...` }`
                 symbol = f"{module}.{owner}"
                 member = True
-        dedupe = (symbol, path, method)
+        # The base context is part of the key: two members of one object can
+        # share a path but not a base (`{ url, baseURL: ALT }` vs plain `{ url }`).
+        dedupe = (symbol, path, method, config_base)
         if dedupe in seen:
             continue
         seen.add(dedupe)
