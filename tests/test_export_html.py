@@ -239,6 +239,13 @@ def test_html_lang_and_script_safety() -> None:
     assert any("alert(1)" in w for w in _payload_blob(html)["why"].values())
 
 
+def test_html_title_names_the_graph() -> None:
+    assert "<title>BizMap — 5 services</title>" in export_graph(shop_graph(), "html")
+    assert "<title>BizMap — 5 serviços</title>" in export_graph(shop_graph(), "html", lang="pt-BR")
+    one = {"repo": "shop", "nodes": [_n("function:a", "function")], "edges": []}
+    assert "<title>BizMap — shop</title>" in export_graph(one, "html")
+
+
 def test_llm_format_is_reserved_for_051() -> None:
     with pytest.raises(ExportError, match="0.5.1"):
         export_graph(shop_graph(), "llm")
@@ -276,6 +283,30 @@ def test_browser_reach_js_matches_python(tmp_path: Path) -> None:
             py = table_reach(store, order[int(i)])
             assert sorted(order[f] for f in got["f"]) == sorted(py["functions"])
             assert {order[int(k)]: v for k, v in got["e"].items()} == py["entrypoints"]
+
+
+@pytest.mark.skipif(_node() is None, reason="node not installed")
+def test_browser_reach_lists_http_callers_from_other_services(tmp_path: Path) -> None:
+    """Front-end functions are not entrypoints: the filter lists them as callers."""
+    data = shop_graph()
+    svc = assign_services(data)
+    payload = build_payload(data, svc)
+    order = node_order(data, svc, [r["name"] for r in payload["services"]])
+    (tmp_path / "p.json").write_text(json.dumps(payload))
+    script = tmp_path / "run.js"
+    script.write_text(
+        "const R = require(process.argv[2]); const D = require(process.argv[3]);\n"
+        "const G = R.buildIndex(D); const t = D.nodes.findIndex(n => n[0] === 2 && n[2] === 'orders');\n"
+        "const r = R.tableReach(G, t);\n"
+        "console.log(JSON.stringify(Object.fromEntries([...r.callers].map(([k, v]) => [k, v]))));\n"
+    )
+    res = subprocess.run([_node(), str(script), str(EXPORT / "reach.js"), str(tmp_path / "p.json")],
+                         capture_output=True, text=True, check=True)
+    callers = {order[int(k)]: sorted(order[e] for e in v) for k, v in json.loads(res.stdout).items()}
+    assert callers["web/function:src.checkout.placeOrder"] == [
+        "api/entrypoint:http:POST:/orders", "billing/entrypoint:http:POST:/invoices"]
+    assert callers["admin/function:admin.charge"] == ["billing/entrypoint:http:POST:/invoices"]
+    assert callers["api/function:main.Billing.Charge"] == ["billing/entrypoint:http:POST:/invoices"]
 
 
 # ── scale ───────────────────────────────────────────────────────────────────

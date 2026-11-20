@@ -186,7 +186,15 @@ def render_html(
 ) -> str:
     payload = build_payload(data, svc_of, lang)
     blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    name = title or data.get("repo") or ("+".join(s["name"] for s in payload["services"][:3]) or "graph")
+    services = payload["services"]
+    if title:
+        name = title
+    elif len(services) == 1:
+        name = services[0]["name"]
+    elif services:
+        name = f"{len(services)} {'serviços' if payload['lang'] == 'pt-BR' else 'services'}"
+    else:
+        name = data.get("repo") or "graph"
     page = _asset("template.html")
     parts = {
         "__TITLE__": _html_escape(f"BizMap — {name}"),

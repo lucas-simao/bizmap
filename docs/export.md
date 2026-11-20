@@ -29,7 +29,9 @@ to an e-mail or a ticket. Nothing is fetched from a CDN or a server.
   write that table, across services: the same multi-hop traversal as the MCP
   `table_usage` tool (functions with a `reads`/`writes` edge to the table or a
   column, and every entrypoint reaching them through `calls`, `calls_http`,
-  `triggers` or `enqueues`).
+  `triggers` or `enqueues`). Functions of other services that enter that
+  chain through `calls_http` (a front end has functions, not routes) are
+  listed as **called from other services**.
 - **"Many depend on it"**: a service called by 3 or more other services, or a
   table read or written by 3 or more services. The 5 most used are marked ⚠
   in red on the graph and listed in the side panel.
@@ -71,10 +73,16 @@ about 0.5 s, a service expanded in 0.4–0.7 s, a table filter in about 0.2 s.
 `pytest -m perf` regenerates that graph and checks the file size and
 generation time.
 
-## Libraries embedded in the page
+## What the page is made of
 
-| Library | Version | License |
+| Part | What | License |
 | --- | --- | --- |
-| [Cytoscape.js](https://js.cytoscape.org/) | 3.34.1 | MIT (notice kept at the top of the inlined file) |
+| [Cytoscape.js](https://js.cytoscape.org/) 3.34.1 | graph drawing, zoom and pan (inlined, minified) | MIT (notice kept at the top of the inlined file) |
+| `export/reach.js`, `export/app.js` | BizMap's own plain JavaScript: no framework, no build step | MIT (BizMap) |
+| `export/template.html` | the page and its CSS | MIT (BizMap) |
 
-No Python dependency is added.
+`bizmap export` fills the template with these files and the graph data
+(JSON in a `<script type="application/json">` element). No Python dependency
+is added and nothing is downloaded when the page is generated or opened.
+
+A graph with a single service opens already expanded.

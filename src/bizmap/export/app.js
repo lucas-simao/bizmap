@@ -27,6 +27,7 @@
       generated: "Graph", unresolved: "unmatched HTTP calls",
       confidence: "confidence", legendCall: "calls", legendHttp: "HTTP", legendRead: "reads", legendWrite: "writes",
       legendVia: "through functions not drawn",
+      calledFrom: "Called from other services",
     },
     "pt-BR": {
       search: "Buscar rota, função, tabela, coluna…", filter: "Filtrar por tabela…",
@@ -50,6 +51,7 @@
       generated: "Grafo", unresolved: "chamadas HTTP sem destino",
       confidence: "confiança", legendCall: "chama", legendHttp: "HTTP", legendRead: "lê", legendWrite: "escreve",
       legendVia: "por funções não desenhadas",
+      calledFrom: "Chamada por outros serviços",
     },
   };
 
@@ -140,21 +142,24 @@
 
   // ── cytoscape ────────────────────────────────────────────────────────────
   var cy = cytoscape({
-    container: $("cy"), wheelSensitivity: 0.25, minZoom: 0.02, maxZoom: 3,
+    container: $("cy"), minZoom: 0.02, maxZoom: 3,
     boxSelectionEnabled: false, autounselectify: false,
     style: [
+      { selector: "node[label]", style: { "label": "data(label)" } },
       { selector: "node", style: {
-        "label": "data(label)", "font-size": 11, "text-valign": "center", "text-halign": "center",
+        "font-size": 11, "text-valign": "center", "text-halign": "center",
         "min-zoomed-font-size": 6, "width": 220, "height": 22, "shape": "round-rectangle",
         "background-color": "#f6f8fa", "border-width": 1, "border-color": "#8c959f", "color": "#1f2328",
         "text-max-width": 210, "text-wrap": "ellipsis" } },
       { selector: "node.svc", style: {
         "width": SVC_W, "height": SVC_H, "font-size": 13, "font-weight": 600, "text-wrap": "wrap",
-        "color": "#ffffff", "background-color": "data(color)", "border-color": "data(color)", "border-width": 2 } },
+        "color": "#ffffff", "border-width": 2 } },
+      { selector: "node.svc[color]", style: { "background-color": "data(color)", "border-color": "data(color)" } },
       { selector: "node.group", style: {
-        "shape": "round-rectangle", "background-color": "data(color)", "background-opacity": 0.05,
-        "border-color": "data(color)", "border-width": 2, "text-valign": "top", "text-halign": "center",
-        "font-size": 15, "font-weight": 700, "color": "data(color)", "padding": 18, "text-margin-y": -4 } },
+        "shape": "round-rectangle", "background-opacity": 0.05,
+        "border-width": 2, "text-valign": "top", "text-halign": "center",
+        "font-size": 15, "font-weight": 700, "padding": 18, "text-margin-y": -4 } },
+      { selector: "node.group[color]", style: { "background-color": "data(color)", "border-color": "data(color)", "color": "data(color)" } },
       { selector: "node.ep", style: { "background-color": "#ddf4ff", "border-color": "#0969da" } },
       { selector: "node.queue", style: { "background-color": "#fbefff", "border-color": "#8250df" } },
       { selector: "node.fn", style: { "background-color": "#f6f8fa", "border-color": "#8c959f" } },
@@ -171,9 +176,11 @@
       { selector: "edge.reads", style: { "line-color": "#2da44e", "target-arrow-color": "#2da44e" } },
       { selector: "edge.writes", style: { "line-color": "#cf222e", "target-arrow-color": "#cf222e" } },
       { selector: "edge.via", style: { "line-style": "dashed" } },
+      { selector: "edge.agg[label]", style: { "label": "data(label)" } },
+      { selector: "edge.agg[w]", style: { "width": "data(w)" } },
       { selector: "edge.agg", style: {
-        "label": "data(label)", "font-size": 12, "text-background-color": "#ffffff", "text-background-opacity": 1,
-        "text-background-padding": 2, "width": "data(w)", "min-zoomed-font-size": 5 } },
+        "font-size": 12, "text-background-color": "#ffffff", "text-background-opacity": 1,
+        "text-background-padding": 2, "min-zoomed-font-size": 5 } },
       { selector: ".faded", style: { "opacity": 0.12 } },
       { selector: "edge.hl", style: { "opacity": 1, "width": 3, "z-index": 10 } },
     ],
@@ -433,14 +440,16 @@
     var bySvc = function (a, b) { return (N[a][1] - N[b][1]) || a - b; };
     var eps = Array.from(R.entrypoints.keys()).sort(bySvc);
     var fns = Array.from(R.functions.keys()).sort(bySvc);
-    var hidden = Math.max(0, eps.length - FILTER_CAP) + Math.max(0, fns.length - FILTER_CAP);
-    eps = eps.slice(0, FILTER_CAP); fns = fns.slice(0, FILTER_CAP);
-    var g = gridColumns([eps.map(function (i) { return "n" + i; }), fns.map(function (i) { return "n" + i; }), ["n" + t]]);
+    var callers = Array.from(R.callers.keys()).filter(function (c) { return !R.functions.has(c); }).sort(bySvc);
+    var hidden = Math.max(0, eps.length - FILTER_CAP) + Math.max(0, fns.length - FILTER_CAP) + Math.max(0, callers.length - FILTER_CAP);
+    eps = eps.slice(0, FILTER_CAP); fns = fns.slice(0, FILTER_CAP); callers = callers.slice(0, FILTER_CAP);
+    var ids = function (l) { return l.map(function (i) { return "n" + i; }); };
+    var g = gridColumns([ids(callers), ids(eps), ids(fns), ["n" + t]]);
     var lab = function (i) { var s = N[i][1]; return short((s >= 0 ? SV[s].name + " · " : "") + N[i][2], 40); };
     var posOf = {};
     g.pos.forEach(function (p) { posOf[p[0]] = { x: p[1], y: p[2] }; });
     var svcs = new Set();
-    eps.concat(fns).forEach(function (i) {
+    callers.concat(eps, fns).forEach(function (i) {
       var el = nodeEl(i, null, lab(i));
       el.position = posOf["n" + i];
       el.classes += " svc-" + N[i][1];
@@ -450,7 +459,12 @@
     var tel = nodeEl(t, null, N[t][2]);
     tel.position = posOf["n" + t];
     els.push(tel);
-    var k = 0, inView = new Set(eps.concat(fns));
+    var k = 0, inView = new Set(callers.concat(eps, fns));
+    callers.forEach(function (c) {
+      R.callers.get(c).forEach(function (ep) {
+        if (inView.has(ep)) els.push({ group: "edges", data: { id: "f" + (k++), source: "n" + c, target: "n" + ep }, classes: "http" });
+      });
+    });
     fns.forEach(function (f) {
       var slot = R.functions.get(f);
       ["reads", "writes"].forEach(function (kind) {
@@ -729,6 +743,16 @@
         });
         h += "</ul>";
       }
+      var calls = Array.from(reach.callers.keys()).filter(function (c) { return !reach.functions.has(c); })
+        .sort(function (a, b) { return (N[a][1] - N[b][1]) || a - b; });
+      if (calls.length) {
+        h += "<h3>" + esc(L.calledFrom) + " (" + calls.length + ")</h3><ul>";
+        calls.slice(0, 300).forEach(function (c) {
+          var to = reach.callers.get(c).map(function (e) { return N[e][2]; }).join(", ");
+          h += li('<span class="grow">' + nodeLink(c) + ' <span class=muted>→ ' + esc(short(to, 60)) + '</span></span><span class="svc">' + esc(svcName(N[c][1])) + "</span>");
+        });
+        h += "</ul>";
+      }
       var fns = Array.from(reach.functions.keys()).sort(function (a, b) { return (N[a][1] - N[b][1]) || a - b; });
       if (fns.length) {
         h += "<h3>" + esc(L.functions) + " (" + fns.length + ")</h3><ul>";
@@ -879,8 +903,8 @@
   };
   $("loading").remove();
   initialLayout();
-  render({});
-  showOverview();
+  if (NS === 1) { state.expanded.add(0); render({ focusId: "s0" }); showService(0); }
+  else { render({}); showOverview(); }
   window.__bizmap.readyMs = Math.round(performance.now() - t0);
   document.body.setAttribute("data-ready", "1");
 })();

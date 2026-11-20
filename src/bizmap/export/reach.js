@@ -54,7 +54,8 @@ var BizReach = (function () {
   }
 
   // rank = confidence code + 1 (unknown 1 ... exact 4), as in mcp_server._RANK
-  function entrypointsReaching(G, start) {
+  // httpIn (optional Map): every calls_http edge crossed, "from>to" -> [from, to]
+  function entrypointsReaching(G, start, httpIn) {
     var best = new Map([[start, 4]]);
     var frontier = [start];
     while (frontier.length) {
@@ -62,7 +63,9 @@ var BizReach = (function () {
       for (var f = 0; f < frontier.length; f++) {
         var cur = frontier[f], bc = best.get(cur);
         for (var c = 0; c < CALL_KINDS.length; c++) {
-          each(G, "inc", CALL_KINDS[c], cur, function (from, fl) {
+          var kind = CALL_KINDS[c];
+          each(G, "inc", kind, cur, function (from, fl) {
+            if (httpIn && kind === "calls_http") httpIn.set(from + ">" + cur, [from, cur]);
             var rank = Math.min(bc, (fl & 3) + 1);
             if (rank > (best.get(from) || 0)) {
               best.set(from, rank);
@@ -100,10 +103,10 @@ var BizReach = (function () {
         });
       });
     });
-    var eps = new Map(direct), via = new Map();
+    var eps = new Map(direct), via = new Map(), httpIn = new Map();
     functions.forEach(function (slot, fid) {
       var fnRank = Math.max(slot.reads || 0, slot.writes || 0);
-      entrypointsReaching(G, fid).forEach(function (pair) {
+      entrypointsReaching(G, fid, httpIn).forEach(function (pair) {
         var ep = pair[0], rank = Math.min(fnRank, pair[1]);
         eps.set(ep, Math.max(eps.get(ep) || 0, rank));
         var list = via.get(ep);
@@ -111,7 +114,17 @@ var BizReach = (function () {
         list.push(fid);
       });
     });
-    return { functions: functions, entrypoints: eps, via: via };
+    // functions of another service that enter this chain through calls_http
+    // (a front end has functions, not entrypoints): {fn -> [entrypoints it calls]}
+    var callers = new Map();
+    httpIn.forEach(function (pair) {
+      var from = pair[0], to = pair[1], n = G.D.nodes;
+      if (n[from][0] !== T_FUNC || n[from][1] === n[to][1]) return;
+      var list = callers.get(from);
+      if (!list) callers.set(from, (list = []));
+      if (list.indexOf(to) < 0) list.push(to);
+    });
+    return { functions: functions, entrypoints: eps, via: via, callers: callers };
   }
 
   return {
