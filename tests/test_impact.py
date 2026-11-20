@@ -716,7 +716,7 @@ def test_spans_post_passes_scale_linearly() -> None:
         graph.add_node(f"function:f{i}", "function", name=f"f{i}")
     graph.add_node("table:orders", "table", name="orders")
     for i in range(n - 1):
-        graph.add_edge("calls", f"function:f{i}", f"function:f{i + 1}", evidence=Evidence(file="a.go", line=i))
+        graph.add_edge("calls", f"function:f{i}", f"function:f{i + 1}", evidence=Evidence(file="a.go", line=i, symbol=f"f{i}"))
     graph.add_edge("reads", f"function:f{n - 1}", "table:orders")
     index = _OutIndex(graph)
     memo: dict = {}
@@ -724,3 +724,25 @@ def test_spans_post_passes_scale_linearly() -> None:
     for start in range(0, n, 10):
         assert _table_hits(graph, index, f"function:f{start}", memo) == {("reads", "table:orders")}
     assert time.perf_counter() - t0 < 20
+
+
+def test_table_hits_with_cycles() -> None:
+    from bizmap.graph import Graph
+    from bizmap.spans import _OutIndex, _table_hits
+
+    g = Graph()
+    for n in ("a", "b", "c", "d"):
+        g.add_node(f"function:{n}", "function", name=n)
+    g.add_node("table:t1", "table", name="t1")
+    g.add_node("table:t2", "table", name="t2")
+    g.add_edge("calls", "function:a", "function:b")
+    g.add_edge("calls", "function:b", "function:c")
+    g.add_edge("calls", "function:c", "function:a")  # cycle a→b→c→a
+    g.add_edge("calls", "function:c", "function:d")
+    g.add_edge("reads", "function:b", "table:t1")
+    g.add_edge("writes", "function:d", "table:t2")
+    idx, memo = _OutIndex(g), {}
+    want = {("reads", "table:t1"), ("writes", "table:t2")}
+    assert _table_hits(g, idx, "function:a", memo) == want
+    assert _table_hits(g, idx, "function:c", memo) == want
+    assert _table_hits(g, idx, "function:d", memo) == {("writes", "table:t2")}

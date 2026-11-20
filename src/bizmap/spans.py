@@ -350,9 +350,26 @@ def _go_route_literal(cache: dict[str, Any], rel: str, tree: Any, line: int) -> 
     return None
 
 
-def _go_literal_suffix(decl: Any, lit: Any) -> str:
+def _literal_children(scope: Any, memo: dict[int, list[Any]]) -> list[Any]:
+    """func_literals directly in ``scope`` (not inside another literal)."""
+    key = scope.start_byte * 2 + (1 if scope.type == "func_literal" else 0)
+    if key not in memo:
+        found: list[Any] = []
+        stack = list(reversed(scope.named_children))
+        while stack:
+            cur = stack.pop()
+            if cur.type == "func_literal":
+                found.append(cur)
+                continue  # its own literals belong to the next level
+            stack.extend(reversed(cur.named_children))
+        memo[key] = found
+    return memo[key]
+
+
+def _go_literal_suffix(decl: Any, lit: Any, memo: dict[int, list[Any]] | None = None) -> str:
     """Go's closure naming: `func2` for the second literal directly in the
     declaration, `func2.1` for the first literal inside that one."""
+    memo = {} if memo is None else memo
     chain = []
     cur = lit
     while cur is not None and cur is not decl and cur.type not in _GO_DECLS:
@@ -363,14 +380,7 @@ def _go_literal_suffix(decl: Any, lit: Any) -> str:
     parts: list[str] = []
     scope = decl
     for node in chain:
-        siblings = []
-        stack = list(reversed(scope.named_children)) if scope is not None else []
-        while stack:
-            cur = stack.pop()
-            if cur.type == "func_literal":
-                siblings.append(cur)
-                continue  # its own literals belong to the next level
-            stack.extend(reversed(cur.named_children))
+        siblings = _literal_children(scope, memo)
         index = next((i for i, n in enumerate(siblings) if n.start_byte == node.start_byte), 0) + 1
         parts.append(str(index))
         scope = node
@@ -393,6 +403,7 @@ def split_go_route_closures(
             if nev.get("file") and isinstance(nev.get("line"), int):
                 go_fns.setdefault((str(nev["file"]), int(nev["line"])), node)
     rollup_memo: dict[str, set[tuple[str, str]]] = {}
+    literal_memo: dict[int, list[Any]] = {}
     for ep in list(graph.nodes.values()):
         if ep.type != "entrypoint" or ep.attrs.get("kind") != "http" or ep.id in triggered:
             continue
@@ -416,7 +427,7 @@ def split_go_route_closures(
         if owner is None:
             continue
         owner_name = str(owner.attrs.get("name") or owner.id.split("function:", 1)[-1])
-        name = f"{owner_name}.{_go_literal_suffix(decl, lit)}"
+        name = f"{owner_name}.{_go_literal_suffix(decl, lit, literal_memo)}"
         fid = f"function:{name}"
         graph.add_node(
             fid,
@@ -442,30 +453,74 @@ def split_go_route_closures(
 def _table_hits(
     graph: Graph, index: _OutIndex, fid: str, memo: dict[str, set[tuple[str, str]]]
 ) -> set[tuple[str, str]]:
-    """Table-level reads/writes ``fid`` (or what it calls) does: what the
+    """Table-level reads/writes ``fid`` (or anything it calls) does: what the
     route gets rolled up, like named handlers, so report/why see them.
-    ``memo`` caches each function's own (non-transitive) hits."""
-    seen: set[str] = set()
-    todo = [fid]
-    hits: set[tuple[str, str]] = set()
-    while todo:
-        cur = todo.pop()
-        if cur in seen:
+
+    ``memo`` holds each finished function's *transitive* hits, shared across
+    routes; cycles are resolved per strongly connected component (Tarjan), so
+    each function is expanded once per scan."""
+
+    def own(node_id: str) -> set[tuple[str, str]]:
+        out: set[tuple[str, str]] = set()
+        for edge in index.out(node_id):
+            if edge.type in {"reads", "writes"}:
+                target = edge.to_id
+                if target.startswith("column:"):
+                    target = "table:" + target.removeprefix("column:").split(".", 1)[0]
+                if target in graph.nodes:
+                    out.add((edge.type, target))
+        return out
+
+    def callees(node_id: str) -> list[str]:
+        return [e.to_id for e in index.out(node_id) if e.type == "calls"]
+
+    if fid in memo:
+        return memo[fid]
+    counter = 0
+    num: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    work: list[tuple[str, list[str], int]] = [(fid, [c for c in callees(fid)], 0)]
+    num[fid] = low[fid] = counter
+    counter += 1
+    stack.append(fid)
+    on_stack.add(fid)
+    while work:
+        node_id, kids, i = work[-1]
+        if i < len(kids):
+            work[-1] = (node_id, kids, i + 1)
+            kid = kids[i]
+            if kid in memo:
+                continue
+            if kid not in num:
+                num[kid] = low[kid] = counter
+                counter += 1
+                stack.append(kid)
+                on_stack.add(kid)
+                work.append((kid, callees(kid), 0))
+            elif kid in on_stack:
+                low[node_id] = min(low[node_id], num[kid])
             continue
-        seen.add(cur)
-        own = memo.get(cur)
-        callees: list[str] = []
-        if own is None:
-            own = set()
-            for edge in index.out(cur):
-                if edge.type in {"reads", "writes"}:
-                    target = edge.to_id
-                    if target.startswith("column:"):
-                        target = "table:" + target.removeprefix("column:").split(".", 1)[0]
-                    if target in graph.nodes:
-                        own.add((edge.type, target))
-            memo[cur] = own
-        callees = [e.to_id for e in index.out(cur) if e.type == "calls"]
-        hits |= own
-        todo.extend(callees)
-    return hits
+        work.pop()
+        if work:
+            parent = work[-1][0]
+            low[parent] = min(low[parent], low[node_id])
+        if low[node_id] == num[node_id]:
+            component: list[str] = []
+            while True:
+                top = stack.pop()
+                on_stack.discard(top)
+                component.append(top)
+                if top == node_id:
+                    break
+            members = set(component)
+            hits: set[tuple[str, str]] = set()
+            for member in component:
+                hits |= own(member)
+                for kid in callees(member):
+                    if kid not in members:
+                        hits |= memo.get(kid, set())
+            for member in component:
+                memo[member] = hits
+    return memo[fid]
