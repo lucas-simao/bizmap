@@ -15,3 +15,21 @@ jobs:
       - uses: ./
         with:
           path: .
+  # The PR head checked out directly (shallow): exercises the merge-base path
+  # (base-branch drift must not count as the PR's change). Summary only.
+  impact-head-ref:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: ./
+        id: bizmap
+        with:
+          path: .
+          comment: "false"
+      - name: The report was produced
+        env:
+          STATUS: ${{ steps.bizmap.outputs.status }}
+        run: |
+          test "$STATUS" = ok

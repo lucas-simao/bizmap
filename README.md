@@ -177,7 +177,12 @@ The comment lists at most `max-rows` functions (default 50, ranked by how many
 routes and tables they reach) and stays under GitHub's size limit; the workflow
 run summary has the full list. PRs from forks get a read-only token, so they
 only get the summary. If the scan fails, the comment says so and links the log.
-Only comments by `comment-author` (default `github-actions[bot]`) are updated.
+Only comments by `comment-author` (default `github-actions[bot]`) are updated;
+if the comments can't be listed, nothing is posted (no duplicates). The check is
+advisory: a BizMap failure is reported in the comment and as a warning, and
+fails the job only with `fail-on-error: "true"`. With `ref: <head sha>`
+checkouts the diff starts at the merge base, so base-branch drift is not
+reported.
 
 Lines outside any function (imports, migrations, docs) are listed as unmapped and
 don't produce impact.

@@ -19,6 +19,9 @@ inputs:
   max-rows:
     description: Max functions listed in the comment (the step summary lists all).
     default: "50"
+  fail-on-error:
+    description: Fail the job when BizMap itself fails (the check is advisory by default; the comment always says it failed).
+    default: "false"
   python-version:
     description: Python used to run BizMap.
     default: "3.12"
@@ -38,9 +41,6 @@ runs:
     - uses: actions/setup-python@v5
       with:
         python-version: ${{ inputs.python-version }}
-    - name: Install BizMap
-      shell: bash
-      run: python -m pip install --quiet "$GITHUB_ACTION_PATH"
     - name: Scan and map the diff
       id: impact
       shell: bash
@@ -65,6 +65,10 @@ runs:
           echo "status=$1" >> "$GITHUB_OUTPUT"
           exit 0
         }
+        if ! python -m pip install --quiet "$GITHUB_ACTION_PATH"; then
+          echo "::error::could not install BizMap"
+          finish failed "Failed: BizMap could not be installed."
+        fi
         if [ -z "${BASE_SHA:-}" ]; then
           echo "::warning::bizmap-impact only runs on pull_request events (no base commit here)."
           finish skipped "Skipped: not a pull_request event."
@@ -75,10 +79,25 @@ runs:
             finish failed "Failed: base commit \`$BASE_SHA\` is not available (use \`fetch-depth: 0\`)."
           fi
         fi
-        # HEAD is what actions/checkout checked out (the PR merge commit), so the
-        # diff line numbers match the code being scanned. quotepath=false keeps
-        # non-ASCII paths readable.
-        if ! git -c core.quotepath=false diff --no-color --no-ext-diff --unified=0 "$BASE_SHA" HEAD > "$out/pr.diff"; then
+        # Diff against what the PR changes, in the code being scanned (HEAD):
+        # - default checkout (the PR merge commit, first parent = base): base..HEAD;
+        # - `ref: <head>` checkout: merge-base..HEAD, so base-branch drift is not
+        #   reported as the PR's change.
+        from="$BASE_SHA"
+        if [ "$(git rev-parse -q --verify 'HEAD^1' 2>/dev/null)" != "$BASE_SHA" ]; then
+          mb="$(git merge-base "$BASE_SHA" HEAD 2>/dev/null || true)"
+          if [ -z "$mb" ]; then
+            git fetch --no-tags --deepen=200 origin "$BASE_SHA" >/dev/null 2>&1 || true
+            mb="$(git merge-base "$BASE_SHA" HEAD 2>/dev/null || true)"
+          fi
+          if [ -z "$mb" ]; then
+            echo "::error::no merge base between $BASE_SHA and HEAD; use actions/checkout with fetch-depth: 0."
+            finish failed "Failed: no merge base with the base branch (use \`fetch-depth: 0\`)."
+          fi
+          from="$mb"
+        fi
+        # quotepath=false keeps non-ASCII paths readable.
+        if ! git -c core.quotepath=false diff --no-color --no-ext-diff --unified=0 "$from" HEAD > "$out/pr.diff"; then
           echo "::error::git diff failed"
           finish failed "Failed: \`git diff\` against the base failed."
         fi
@@ -106,29 +125,41 @@ runs:
         HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         AUTHOR: ${{ inputs.comment-author }}
         BODY_FILE: ${{ steps.impact.outputs.markdown }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         set -uo pipefail
         if [ "$HEAD_REPO" != "$REPO" ]; then
           echo "::notice::PR from a fork: the token is read-only, so the impact is only in the step summary."
           exit 0
         fi
-        if [ ! -s "$BODY_FILE" ]; then
-          echo "::warning::no impact report to post"
+        marker='<!-- bizmap-impact -->'
+        body="${BODY_FILE:-}"
+        if [ -z "$body" ] || [ ! -s "$body" ]; then
+          # an earlier step (setup-python, the scan step itself) died before writing a report
+          body="$RUNNER_TEMP/bizmap-failed.md"
+          printf '%s\n### BizMap impact\n\nFailed before a report was written ([log](%s)).\n' "$marker" "$RUN_URL" > "$body"
+        fi
+        if ! listing="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+          --jq ".[] | select(.user.login == \"$AUTHOR\" and (.body | startswith(\"$marker\"))) | .id")"; then
+          echo "::warning::could not list PR comments (permissions or rate limit); not posting, to avoid a duplicate."
           exit 0
         fi
-        marker='<!-- bizmap-impact -->'
-        id="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-          --jq ".[] | select(.user.login == \"$AUTHOR\" and (.body | startswith(\"$marker\"))) | .id" 2>/dev/null | head -n1)"
+        id="$(printf '%s\n' "$listing" | head -n1)"
         if [ -n "$id" ]; then
-          gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$BODY_FILE" > /dev/null \
+          gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$body" > /dev/null \
             || echo "::warning::could not update the comment (does the token have pull-requests: write?)"
         else
-          gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$BODY_FILE" > /dev/null \
+          gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$body" > /dev/null \
             || echo "::warning::could not post the comment (does the token have pull-requests: write?)"
         fi
-    - name: Fail when the scan failed
-      if: steps.impact.outputs.status == 'failed'
+    - name: Report a BizMap failure
+      if: always() && (steps.impact.outputs.status == 'failed' || steps.impact.outcome == 'failure')
       shell: bash
+      env:
+        FAIL: ${{ inputs.fail-on-error }}
       run: |
-        echo "::error::BizMap impact failed; see the step above."
-        exit 1
+        if [ "$FAIL" = "true" ]; then
+          echo "::error::BizMap impact failed; see the steps above."
+          exit 1
+        fi
+        echo "::warning::BizMap impact failed (advisory; set fail-on-error: true to fail the job)."
