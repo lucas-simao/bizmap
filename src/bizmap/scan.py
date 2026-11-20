@@ -7,7 +7,6 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from bizmap.spans import fill_spans
 from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
 from bizmap.detect.js_lang import JsAnalysis, JsAnalyzer
 from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer
@@ -45,6 +44,7 @@ from bizmap.http_match import (
 from bizmap.overrides import ScanConfig, apply_overrides, load_scan_config
 from bizmap.registry import merge_graphs
 from bizmap.schema_replay import Schema, replay_files
+from bizmap.spans import fill_spans
 from bizmap.sql_analyze import (
     SqlAccess,
     analyze_sql,
