@@ -1005,3 +1005,59 @@ def test_base_tsconfig_only_reaches_extending_apps(tmp_path: Path) -> None:
     calls = {(e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls"}
     assert ("function:apps.web.page.page", "function:libs.shared.fmt.fmt") in calls, calls
     assert not [c for c in calls if c[0] == "function:apps.solo.page.page"], calls
+
+
+def test_js_ts_why_from_jsdoc_and_line_comments(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/schema.sql": "CREATE TABLE orders (id int primary key, status text);\n",
+            "svc/orders.ts": (
+                "import { db } from './db';\n"
+                "/** Marks an order as paid. */\n"
+                "export async function markPaid(id: number) {\n"
+                "  await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['paid', id]);\n"
+                "}\n"
+                "\n"
+                "/**\n"
+                " * Cancels an order.\n"
+                " * Only pending orders can be cancelled.\n"
+                " * @param id order id\n"
+                " */\n"
+                "export const cancel = async (id: number) => id;\n"
+                "\n"
+                "// Restocks the inventory\n"
+                "// after a cancellation.\n"
+                "const restock = function () { return 1 };\n"
+                "\n"
+                "// detached comment\n"
+                "\n"
+                "export function noDoc() { return 2 }\n"
+                "\n"
+                "export class Orders {\n"
+                "  /** Lists open orders. */\n"
+                "  list() { return [] }\n"
+                "}\n"
+            ),
+            "svc/db.ts": "export const db = { query: async (q: string, a?: unknown[]) => [] };\n",
+            "svc/server.ts": (
+                "import express from 'express';\nimport { markPaid } from './orders';\n"
+                "const app = express();\n"
+                "app.post('/orders/:id/paid', async (req, res) => { await markPaid(1); res.json({}); });\n"
+            ),
+        },
+    )
+
+    def why(name: str) -> str | None:
+        return graph.nodes[f"function:svc.orders.{name}"].attrs.get("why")
+
+    assert why("markPaid") == "Marks an order as paid."
+    assert why("cancel") == "Cancels an order. Only pending orders can be cancelled."
+    assert why("restock") == "Restocks the inventory after a cancellation."
+    assert why("noDoc") is None
+    assert why("list") == "Lists open orders."
+    out = tmp_path / "g.json"
+    out.write_text(json.dumps(graph.to_dict()), encoding="utf-8")
+    res = CliRunner().invoke(main, ["why", "orders.status", "--graph", str(out)])
+    assert res.exit_code == 0, res.output
+    assert "Marks an order as paid." in res.output, res.output

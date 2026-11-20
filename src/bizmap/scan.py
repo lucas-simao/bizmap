@@ -1076,12 +1076,14 @@ def _copy_unresolved_to_entrypoints(
 
 def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
     ends = getattr(analysis, "function_ends", None) or {}
+    whys = getattr(analysis, "function_why", None) or {}
     for qual, (file, line) in (analysis.functions or {}).items():
         graph.add_node(
             function_id(qual),
             "function",
             name=qual,
             language="javascript",
+            why=whys.get(qual),
             end_line=ends.get(qual),
             evidence={"file": file, "line": line, "symbol": qual},
         )
