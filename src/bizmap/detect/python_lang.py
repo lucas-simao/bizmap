@@ -3847,7 +3847,7 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
         return
     existing = {(c, d) for c, d, _e, _k in analysis.calls}
 
-    for _path, rel_file, _src, _tree, _module, _imap, fns in parsed:
+    for _path, rel_file, _src, _tree, module, imap, fns in parsed:
         for fn in fns:
             fdef = fn.node
             if fdef.type == "decorated_definition":
