@@ -13,6 +13,7 @@ from tree_sitter import Language, Node, Parser
 from bizmap.detect.tsutil import (
     call_args,
     call_callee_name,
+    flatten_plus,
     line_of,
     text,
     unwrap_callee_expr,
@@ -216,25 +217,25 @@ def _resolve_js_string(node: Node | None, consts: dict[str, str]) -> tuple[str |
                     return "{" + key + "}", True
         return None, False
     if node.type == "binary_expression":
-        op_nodes = [c for c in node.children if not c.is_named]
-        op = text(op_nodes[0]) if op_nodes else "+"
-        if op != "+":
+        operands = flatten_plus(node, {"binary_expression"})
+        if not operands:
             return None, False
-        left = node.child_by_field_name("left") or (
-            node.named_children[0] if node.named_children else None
-        )
-        right = node.child_by_field_name("right") or (
-            node.named_children[1] if len(node.named_children) > 1 else None
-        )
-        lv, lu = _resolve_js_string(left, consts)
-        rv, ru = _resolve_js_string(right, consts)
-        if lv is None and left is not None and left.type == "identifier":
-            lv, lu = "{" + text(left) + "}", True
-        if rv is None and right is not None and right.type == "identifier":
-            rv, ru = "{" + text(right) + "}", True
-        if lv is None and rv is None:
-            return None, False
-        return (lv or "") + (rv or ""), lu or ru or lv is None or rv is None
+
+        def leaf(operand: Node) -> tuple[str | None, bool]:
+            value, unresolved = _resolve_js_string(operand, consts)
+            if value is None and operand.type == "identifier":
+                return "{" + text(operand) + "}", True
+            return value, unresolved
+
+        # left fold, same result as the left-associative pairwise evaluation
+        acc, acc_u = leaf(operands[0])
+        for operand in operands[1:]:
+            value, unresolved = leaf(operand)
+            if acc is None and value is None:
+                acc, acc_u = None, False
+            else:
+                acc, acc_u = (acc or "") + (value or ""), acc_u or unresolved or acc is None or value is None
+        return acc, acc_u
     if node.type == "parenthesized_expression" and node.named_children:
         return _resolve_js_string(node.named_children[0], consts)
     if node.type == "call_expression":
@@ -978,6 +979,7 @@ class JsAnalyzer:
     ) -> JsAnalysis:
         analysis = JsAnalysis()
         _REEXPORTS.clear()
+        _LITERAL_TOP.clear()
         yaml_constants = constants or {}
         path_aliases = _ts_path_aliases(root)
         parsed: list[tuple[Path, str, str, Node, bytes]] = []
@@ -3429,14 +3431,37 @@ def _is_plus(node: Node) -> bool:
     return bool(ops) and text(ops[0]) == "+"
 
 
+# node key -> top of its `+` chain; filled while climbing so sibling literals
+# of a long chain reuse it (in tree-sitter `node.parent` costs a walk from the
+# root, so climbing from every literal of an n-term chain was ~O(n^3)).
+_LITERAL_TOP: dict[tuple[int, int, int], Node] = {}
+
+
+def _node_key(node: Node) -> tuple[int, int, int]:
+    return (node.id, node.start_byte, node.end_byte)
+
+
 def _literal_top(node: Node) -> Node:
+    path: list[Node] = []
     cur = node
-    while cur.parent is not None and (
-        (cur.parent.type == "binary_expression" and _is_plus(cur.parent))
-        or cur.parent.type == "parenthesized_expression"
-    ):
-        cur = cur.parent
-    return cur
+    while True:
+        hit = _LITERAL_TOP.get(_node_key(cur))
+        if hit is not None:
+            top = hit
+            break
+        parent = cur.parent
+        if parent is not None and (
+            (parent.type == "binary_expression" and _is_plus(parent))
+            or parent.type == "parenthesized_expression"
+        ):
+            path.append(cur)
+            cur = parent
+            continue
+        top = cur
+        break
+    for visited in path:
+        _LITERAL_TOP[_node_key(visited)] = top
+    return top
 
 
 def _is_route_registration(call: Node, routers: dict[str, str]) -> bool:

@@ -15,6 +15,7 @@ from bizmap.detect.rules import Rule, import_matches, method_matches
 from bizmap.detect.tsutil import (
     call_args,
     call_callee_name,
+    flatten_plus,
     line_of,
     text,
     walk,
@@ -775,15 +776,13 @@ def _resolve_expr(
             return ResolvedString(None, False, True, placeholder=f"{{{pkg}.{name}}}")
         return ResolvedString(None, False, True, placeholder=f"{{{text(node)}}}")
     if node.type == "binary_expression":
-        left = node.child_by_field_name("left")
-        right = node.child_by_field_name("right")
-        op_nodes = [c for c in node.children if not c.is_named]
-        op = text(op_nodes[0]) if op_nodes else "+"
-        lv = _resolve_expr(left, env, package_consts, aliases, consts_by_import)
-        rv = _resolve_expr(right, env, package_consts, aliases, consts_by_import)
-        if op != "+":
-            return ResolvedString(None, False, True)
-        return _plus(lv, rv)
+        operands = flatten_plus(node, {"binary_expression"})
+        if operands is None:
+            return ResolvedString(None, False, True)  # not a string `+`
+        acc = _resolve_expr(operands[0], env, package_consts, aliases, consts_by_import)
+        for operand in operands[1:]:
+            acc = _plus(acc, _resolve_expr(operand, env, package_consts, aliases, consts_by_import))
+        return acc
     if node.type == "parenthesized_expression" and node.named_children:
         return _resolve_expr(node.named_children[0], env, package_consts, aliases, consts_by_import)
     if node.type == "expression_list" and node.named_children:

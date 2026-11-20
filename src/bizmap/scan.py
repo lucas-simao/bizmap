@@ -11,7 +11,7 @@ from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
 from bizmap.detect.js_lang import JsAnalysis, JsAnalyzer
 from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer
 from bizmap.detect.rules import load_rules
-from bizmap.files import discover_sql_files, iter_files
+from bizmap.files import discover_sql_files, iter_files, rel
 from bizmap.graph import (
     GRAPH_VERSION,
     Confidence,
@@ -2024,6 +2024,35 @@ def _git_toplevel(path: Path) -> Path | None:
     return None
 
 
+def _analyze_safely(label, analyze, files, root, failures):  # noqa: ANN001, ANN202
+    """Run a detector over ``files``; if it crashes, find the files that make
+    it crash (each analysed alone), skip them with a warning and analyse the
+    rest, so one pathological file never aborts the whole scan."""
+    try:
+        return analyze(files)
+    except Exception as exc:  # noqa: BLE001 - a detector bug must not kill the scan
+        first_error = exc
+    bad: list[Path] = []
+    for path in files:
+        try:
+            analyze([path])
+        except Exception:  # noqa: BLE001
+            bad.append(path)
+    good = [p for p in files if p not in bad]
+    for path in bad:
+        failures.append(
+            f"{label} detector failed on {rel(path, root)} ({type(first_error).__name__}); file skipped"
+        )
+    if not bad:
+        failures.append(f"{label} detector failed ({type(first_error).__name__}: {first_error}); results skipped")
+        return analyze([])
+    try:
+        return analyze(good)
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"{label} detector failed ({type(exc).__name__}); results skipped")
+        return analyze([])
+
+
 def _scan_one(
     root: Path,
     *,
@@ -2066,10 +2095,15 @@ def _scan_one(
     js_files = iter_files(root, [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"], exclude=exclude_pats)
     timings.parse += time.perf_counter() - t0
 
-    go_analysis = GoAnalyzer(rules).analyze(
-        go_files, root, profile=timings, constants=cfg.constants
+    failures: list[str] = []
+    go_analysis = _analyze_safely(
+        "Go",
+        lambda files: GoAnalyzer(rules).analyze(files, root, profile=timings, constants=cfg.constants),
+        go_files,
+        root,
+        failures,
     )
-    warnings = list(getattr(go_analysis, "warnings", None) or [])
+    warnings = list(getattr(go_analysis, "warnings", None) or []) + failures
     if warnings:
         existing = list(graph.attrs.get("warnings") or [])
         for item in warnings:
@@ -2077,9 +2111,29 @@ def _scan_one(
                 existing.append(item)
         graph.attrs["warnings"] = existing
     t_py = time.perf_counter()
-    py_analysis = PythonAnalyzer(rules).analyze(py_files, root, constants=cfg.constants)
+    py_failures: list[str] = []
+    py_analysis = _analyze_safely(
+        "Python",
+        lambda files: PythonAnalyzer(rules).analyze(files, root, constants=cfg.constants),
+        py_files,
+        root,
+        py_failures,
+    )
     timings.resolve += time.perf_counter() - t_py
-    js_analysis = JsAnalyzer(rules).analyze(js_files, root, constants=cfg.constants)
+    js_failures: list[str] = []
+    js_analysis = _analyze_safely(
+        "JS/TS",
+        lambda files: JsAnalyzer(rules).analyze(files, root, constants=cfg.constants),
+        js_files,
+        root,
+        js_failures,
+    )
+    if py_failures or js_failures:
+        existing = list(graph.attrs.get("warnings") or [])
+        for item in py_failures + js_failures:
+            if item not in existing:
+                existing.append(item)
+        graph.attrs["warnings"] = existing
 
     _merge_schema(schema, py_analysis.schema)
     _add_schema_nodes(graph, schema)
