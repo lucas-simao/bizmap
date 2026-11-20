@@ -3789,7 +3789,26 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                         method_names.add(mname)
 
     field_targets: dict[str, set[str]] = {}
+    class_field_targets: dict[tuple[str, str], set[str]] = {}
     key_targets: dict[str, set[str]] = {}
+    # module → roster name → dataclass names of its elements
+    rosters: dict[str, dict[str, set[str]]] = {}
+    for _path, _rf, _src, tree, module, _imap, _fns in parsed:
+        local: dict[str, set[str]] = {}
+        for name, value in collect_module_assignments(tree):
+            elems: list[Node] = []
+            if value.type in {"list", "tuple", "set"}:
+                elems = list(value.named_children)
+            elif value.type == "dictionary":
+                elems = [p.child_by_field_name("value") for p in value.named_children if p.type == "pair"]
+            classes = {
+                call_callee_name(el)
+                for el in elems
+                if el is not None and el.type == "call" and call_callee_name(el) in class_fields
+            }
+            if classes:
+                local[name] = classes
+        rosters[module] = local
     for _path, _rf, _src, tree, module, imap, _fns in parsed:
         for node in walk(tree):
             if node.type == "call":
@@ -3801,6 +3820,7 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                     if i < len(fields):
                         for ref in _callable_refs(arg, module, imap, functions):
                             field_targets.setdefault(fields[i], set()).add(ref)
+                            class_field_targets.setdefault((cname, fields[i]), set()).add(ref)
                 args = node.child_by_field_name("arguments")
                 for kw in args.named_children if args is not None else []:
                     if kw.type != "keyword_argument":
@@ -3811,6 +3831,7 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                         continue
                     for ref in _callable_refs(value, module, imap, functions):
                         field_targets.setdefault(text(name), set()).add(ref)
+                        class_field_targets.setdefault((cname, text(name)), set()).add(ref)
             elif node.type == "dictionary":
                 for pair in node.named_children:
                     if pair.type != "pair":
@@ -3866,6 +3887,66 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                         return field_targets[name_]
                 return set()
 
+            def _roster_classes(expr: Node | None) -> set[str]:
+                """Classes of a roster expression: `SECTIONS`, `cfg.SECTIONS`,
+                `SECTIONS[i]`, `SECTIONS.values()`."""
+                if expr is None:
+                    return set()
+                if expr.type == "subscript":
+                    return _roster_classes(expr.child_by_field_name("value"))
+                if expr.type == "call" and call_callee_name(expr) in {"values", "items"}:
+                    f_ = expr.child_by_field_name("function")
+                    return _roster_classes(f_.child_by_field_name("object") if f_ is not None else None)
+                if expr.type == "call" and call_callee_name(expr) in {"enumerate", "sorted", "list", "reversed"}:
+                    pos_ = call_posargs(expr)
+                    return _roster_classes(pos_[0]) if pos_ else set()
+                if expr.type == "identifier":
+                    nm = text(expr)
+                    if nm in (rosters.get(module) or {}):
+                        return rosters[module][nm]
+                    if nm in imap.from_names:
+                        src_mod, orig = imap.from_names[nm]
+                        return (rosters.get(src_mod) or {}).get(orig, set())
+                if expr.type == "attribute":
+                    o_ = expr.child_by_field_name("object")
+                    a_ = expr.child_by_field_name("attribute")
+                    if o_ is not None and a_ is not None and o_.type == "identifier":
+                        mod_ = imap.modules.get(text(o_))
+                        if mod_ is None and text(o_) in imap.from_names:
+                            sm, so = imap.from_names[text(o_)]
+                            mod_ = f"{sm}.{so}"
+                        if mod_:
+                            return (rosters.get(mod_) or {}).get(text(a_), set())
+                return set()
+
+            roster_vars: dict[str, set[str]] = {}
+            for node in walk(fdef):
+                if node.type in {"for_statement", "for_in_clause"}:
+                    left = node.child_by_field_name("left")
+                    right = node.child_by_field_name("right")
+                    classes = _roster_classes(right)
+                    if classes and left is not None:
+                        idents = [n for n in walk(left) if n.type == "identifier"]
+                        if idents:
+                            roster_vars[text(idents[-1])] = classes
+                elif node.type == "assignment":
+                    left = node.child_by_field_name("left")
+                    right = node.child_by_field_name("right")
+                    classes = _roster_classes(right) if right is not None and right.type == "subscript" else set()
+                    if classes and left is not None and left.type == "identifier":
+                        roster_vars[text(left)] = classes
+
+            def _roster_targets(recv: Node | None, field_name: str) -> set[str]:
+                classes: set[str] = set()
+                if recv is not None and recv.type == "identifier":
+                    classes = roster_vars.get(text(recv), set())
+                elif recv is not None and recv.type == "subscript":
+                    classes = _roster_classes(recv)
+                out_: set[str] = set()
+                for c in classes:
+                    out_ |= class_field_targets.get((c, field_name), set())
+                return out_
+
             local_alias: dict[str, set[str]] = {}
             for node in walk(fdef):
                 if node.type == "assignment":
@@ -3889,6 +3970,16 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                     targets = local_alias[text(func)]
                 elif func.type == "call" and call_callee_name(func) == "get":
                     targets = _field_targets_of(func)
+                elif func.type == "attribute" and _roster_targets(
+                    func.child_by_field_name("object"),
+                    text(func.child_by_field_name("attribute") or func),
+                ):
+                    # receiver comes from a roster of dataclass instances: it is
+                    # field dispatch even if a scanned class has a same-named method
+                    targets = _roster_targets(
+                        func.child_by_field_name("object"),
+                        text(func.child_by_field_name("attribute") or func),
+                    )
                 elif func.type == "attribute":
                     obj = func.child_by_field_name("object")
                     attr = func.child_by_field_name("attribute")

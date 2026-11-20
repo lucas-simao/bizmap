@@ -204,6 +204,13 @@
 
 ### Added
 
+- **Dataclass rosters**: a receiver taken from a roster — a module-level
+  list/tuple/dict of dataclass instances, possibly imported from another
+  module (`for s in SECTIONS`, comprehensions, `roster.SECTIONS[0]`,
+  `.values()`, `enumerate`/`sorted`) — is field dispatch even when a scanned
+  class has a method with the same name (`query`). It links only to the
+  functions assigned to that class's field.
+
 - **Python configuration rosters**: functions stored in nested dicts / lists of
   dicts are dispatched through local aliases (`q = cfg["query"]; q(conn)`),
   `cfg.get("query")(…)` and `ROSTER[k]["query"](…)`; a `lambda` value
