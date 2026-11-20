@@ -1564,11 +1564,28 @@ class GoAnalyzer:
         recv = text(operand) if operand is not None else ""
         ip = info.import_aliases.get(recv) or ""
         is_net_http = ip == "net/http" or recv == "http"
+        if (
+            not is_net_http
+            and method in {"Get", "Post", "Head", "PostForm"}
+            and "net/http" in info.imports
+            and (
+                recv == "http.DefaultClient"
+                or recv.rsplit(".", 1)[-1].lower() in {"http", "client", "httpclient", "hc"}
+            )
+        ):
+            # method on an *http.Client value: `c.http.Get(url)`, `client.Post(url, …)`
+            is_net_http = True
         evidence = Evidence(file=info.rel, line=line_of(node), symbol=fn.qualname)
 
         def emit(http_method: str, url: str, unresolved: bool) -> None:
             if skip or not url:
                 return
+            if url.startswith("{base}") and fn.receiver:
+                bases = getattr(self, "_field_bases", None) or {}
+                for (ip_, typ_, _field), base in bases.items():
+                    if ip_ == fn.import_path and typ_ == fn.receiver and base.usable:
+                        url = (base.path_text or "").rstrip("/") + url[len("{base}"):]
+                        break
             if not (
                 url.startswith("/")
                 or url.startswith("{")
@@ -2436,6 +2453,8 @@ class GoAnalyzer:
         self, infos: list[_FileInfo], idx: _Indexes
     ) -> dict[str, GoHttpHelper]:
         field_bases = self._struct_http_bases(infos, idx)
+        # direct calls in methods (`c.http.Get(c.baseURL + "/x")`) use them too
+        self._field_bases = field_bases
         helpers: dict[str, GoHttpHelper] = {}
         for info in infos:
             for fn in info.functions:

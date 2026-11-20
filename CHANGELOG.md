@@ -10,7 +10,9 @@
   `os.Getenv("X")` in some literal), resolves to `{X}`; a base assigned from a
   constructor parameter takes the value every call site passes when they
   agree. `{X}` then selects the service in `services:` (`inferred`), instead
-  of a generic `{base}`.
+  of a generic `{base}`. Direct calls in methods use the struct's resolved
+  base too, and Get/Post/Head/PostForm on an `*http.Client` value
+  (`c.http.Get(url)`, `http.DefaultClient.Get`) are detected.
 
 - **Python package re-exports**: names re-exported by a package's
   `__init__.py` (`from .crop import f`, `from .resize import *`, chained
