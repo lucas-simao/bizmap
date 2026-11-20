@@ -910,6 +910,7 @@ class JsAnalysis:
     rpc_calls: list[JsRpcCall] = field(default_factory=list)
     functions: dict[str, tuple[str, int]] = field(default_factory=dict)
     function_ends: dict[str, int] = field(default_factory=dict)
+    function_why: dict[str, str] = field(default_factory=dict)
     accesses: list[JsAccess] = field(default_factory=list)
     table_accesses: list[JsTableAccess] = field(default_factory=list)
     sql_sites: list[JsSqlSite] = field(default_factory=list)
@@ -996,6 +997,9 @@ class JsAnalyzer:
                         analysis.functions[qual] = (rel_file, line_of(node))
                         analysis.function_ends[qual] = node.end_point[0] + 1
                         fn_nodes[qual] = node
+                        why = _js_why(node)
+                        if why:
+                            analysis.function_why[qual] = why
                         # `return { stock(sku) {...} }`: a method member
                         if node.type == "method_definition" and _is_returned_object(node.parent):
                             parent_qual = qual.rsplit(".", 1)[0]
@@ -1017,6 +1021,9 @@ class JsAnalyzer:
                         analysis.functions[qual] = (rel_file, line_of(node))
                         analysis.function_ends[qual] = node.end_point[0] + 1
                         fn_nodes[qual] = value
+                        why = _js_why(value)
+                        if why:
+                            analysis.function_why[qual] = why
                 if node.type == "pair":
                     value = node.child_by_field_name("value")
                     if value is not None and value.type in {
@@ -1031,6 +1038,9 @@ class JsAnalyzer:
                             analysis.functions[qual] = (rel_file, line_of(value))
                             analysis.function_ends[qual] = value.end_point[0] + 1
                             fn_nodes[qual] = value
+                            why = _js_why(value)
+                            if why:
+                                analysis.function_why[qual] = why
                             # the factory reaches what its members call
                             analysis.calls.append(
                                 JsCall(caller=parent_qual, callee=qual, file=rel_file, line=line_of(value))
@@ -1678,6 +1688,53 @@ _NAMED_FN_TYPES = {
     "function_expression",
     "generator_function",
 }
+
+
+def _js_why_anchor(fn: Node) -> Node:
+    """The statement a doc comment sits above: `export function f`,
+    `export const f = () =>`, a class method or an object member."""
+    cur = fn
+    if cur.parent is not None and cur.parent.type in {"variable_declarator", "pair"}:
+        cur = cur.parent
+    if cur.type == "variable_declarator" and cur.parent is not None:
+        cur = cur.parent  # lexical_declaration / variable_declaration
+    if cur.parent is not None and cur.parent.type == "export_statement":
+        cur = cur.parent
+    return cur
+
+
+def _js_why(fn: Node) -> str | None:
+    """`/** Marks an order as paid. */` or `// ...` lines right above the
+    function (a blank line breaks the link). JSDoc `@param`-style tag lines
+    are dropped; the description is kept."""
+    anchor = _js_why_anchor(fn)
+    comments: list[Node] = []
+    prev = anchor.prev_sibling
+    expect_row = anchor.start_point[0]
+    while prev is not None and prev.type == "comment":
+        if prev.end_point[0] < expect_row - 1:
+            break  # blank line between the comment and what follows it
+        comments.append(prev)
+        expect_row = prev.start_point[0]
+        prev = prev.prev_sibling
+    if not comments:
+        return None
+    comments.reverse()
+    lines: list[str] = []
+    for comment in comments:
+        raw = text(comment)
+        for line in raw.splitlines():
+            line = line.strip()
+            line = re.sub(r"^/\*\*?", "", line)
+            line = re.sub(r"\*/$", "", line)
+            line = re.sub(r"^//+", "", line)
+            line = re.sub(r"^\*+", "", line).strip()
+            if line.startswith("@"):
+                continue
+            if line:
+                lines.append(line)
+    why = " ".join(lines).strip()
+    return why or None
 
 
 def _fn_own_name(cur: Node) -> str | None:

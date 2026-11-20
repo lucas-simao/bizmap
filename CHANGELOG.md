@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`why` for JS/TS**: a JSDoc block (`/** ... */`, tag lines like `@param`
+  dropped) or `//` lines right above a function declaration, a `const` arrow or
+  function expression, a class method or an object member become its `why`, as
+  in Python and Go. A blank line between comment and code breaks the link.
+
 ## 0.3.5 — 2026-11-20
 
 ### Fixed
