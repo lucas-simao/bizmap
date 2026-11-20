@@ -517,3 +517,9 @@ def test_go_inline_closure_handler(tmp_path: Path) -> None:
     assert [f.function for f in imp.functions] == [closure]
     assert imp.functions[0].entrypoints == [ep]
     assert any("orders" in r for r in imp.functions[0].reads)
+
+
+def test_no_hint_for_docs_only_diffs() -> None:
+    graph = scan_path(CHECKOUT)
+    imp = compute_impact(graph, _diff("README.md", 3) + _diff(".github/workflows/x.yml", 1))
+    assert imp.functions == [] and imp.hint is None

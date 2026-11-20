@@ -296,7 +296,14 @@ def compute_impact(graph: Graph, diff_text: str, *, prefix: str = ".") -> Impact
             )
         )
     hint = None
-    if changes and len(unmapped) == len(changes):
+    code_exts = {".go", ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".sql"}
+    known = {
+        p for n in graph.nodes.values() if n.type == "function" for p in [_function_file(n, graph, prefix)] if p
+    }
+    code_changes = [p for p in changes if PurePosixPath(p).suffix.lower() in code_exts]
+    # only when code changed and none of it is a file the graph knows: the
+    # roots/prefix are probably wrong (docs/CI-only diffs need no hint)
+    if code_changes and not any(_norm(p) in known for p in changes):
         roots = sorted(set((graph.attrs.get("repo_roots") or {}).values())) or ["."]
         hint = (
             "none of the changed paths is under a scanned root "
