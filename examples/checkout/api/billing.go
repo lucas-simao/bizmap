@@ -5,13 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"os"
+	"strings"
 )
 
-type Billing struct{}
+type Billing struct {
+	baseURL string
+	http    *http.Client
+}
 
-func NewBilling() *Billing {
-	return &Billing{}
+// NewBilling builds the billing client; the base comes from BILLING_URL.
+func NewBilling(baseURL string) *Billing {
+	return &Billing{baseURL: strings.TrimRight(baseURL, "/"), http: http.DefaultClient}
 }
 
 // CreateInvoice asks the billing service to open an invoice for a new order.
@@ -20,12 +24,12 @@ func (b *Billing) CreateInvoice(ctx context.Context, orderID string, totalCents 
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, os.Getenv("BILLING_URL")+"/invoices", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.baseURL+"/invoices", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := b.http.Do(req)
 	if err != nil {
 		return err
 	}

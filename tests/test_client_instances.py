@@ -329,3 +329,85 @@ func Wire(cfg config.Config) (*ExportClient, *ExportClient) {
             [e.id for e in edges],
             [u for u in graph.attrs.get("unresolved_http") or [] if fn.split(".")[-2] in str(u.get("from"))],
         )
+
+
+def _inventory_project(tmp_path: Path, ctor_value: str) -> object:
+    worker, inv = tmp_path / "worker", tmp_path / "inventory"
+    _write(tmp_path, "bizmap.yaml", "services:\n  inventory:\n    env: INVENTORY_URL\n")
+    _write(
+        inv,
+        "server.ts",
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.get('/internal/stock', h);
+""",
+    )
+    _write(worker, "go.mod", "module worker\n\ngo 1.22\n")
+    _write(
+        worker,
+        "inv/client.go",
+        f"""
+package inv
+
+import (
+    "net/http"
+    "strings"
+)
+
+type Client struct {{
+    baseURL string
+    http    *http.Client
+}}
+
+func New(baseURL string, tp http.RoundTripper) *Client {{
+    return &Client{{baseURL: {ctor_value}, http: &http.Client{{Transport: tp}}}}
+}}
+
+func (c *Client) Stock() error {{
+    req, _ := http.NewRequest("GET", c.baseURL+"/internal/stock", nil)
+    _, err := c.http.Do(req)
+    _ = strings.TrimSpace
+    return err
+}}
+""",
+    )
+    _write(
+        worker,
+        "main.go",
+        """
+package main
+
+import (
+    "net/http"
+    "os"
+
+    "worker/inv"
+)
+
+func main() {
+    c := inv.New(os.Getenv("INVENTORY_URL"), http.DefaultTransport)
+    _ = c.Stock()
+}
+""",
+    )
+    return scan_paths([worker, inv], config=tmp_path / "bizmap.yaml")
+
+
+def test_go_client_ctor_trimright_param(tmp_path: Path) -> None:
+    """Regression (#50): `strings.TrimRight(baseURL, "/")` around a constructor
+    parameter must not turn the base into an opaque path_dynamic hole."""
+    graph = _inventory_project(tmp_path, 'strings.TrimRight(baseURL, "/")')
+    edges = _calls_http(graph, "inv.Client.Stock")
+    assert [(e.to_id, e.confidence.value) for e in edges] == [
+        ("inventory/entrypoint:http:GET:/internal/stock", "inferred")
+    ], ([e.id for e in edges], graph.attrs.get("unresolved_http"))
+
+
+def test_go_client_ctor_plain_param_control(tmp_path: Path) -> None:
+    graph = _inventory_project(tmp_path, "baseURL")
+    edges = _calls_http(graph, "inv.Client.Stock")
+    assert [(e.to_id, e.confidence.value) for e in edges] == [
+        ("inventory/entrypoint:http:GET:/internal/stock", "inferred")
+    ], ([e.id for e in edges], graph.attrs.get("unresolved_http"))

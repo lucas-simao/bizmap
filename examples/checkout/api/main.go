@@ -21,7 +21,7 @@ func main() {
 	defer pool.Close()
 
 	repo := NewRepo(pool)
-	h := NewHandler(repo, NewBilling())
+	h := NewHandler(repo, NewBilling(os.Getenv("BILLING_URL")))
 	expire := NewExpireJob(repo)
 
 	e := echo.New()

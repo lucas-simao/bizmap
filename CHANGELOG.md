@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **Go base wrapped in `strings.TrimRight` (regression from the struct-base
+  change)**: `strings.TrimRight/TrimLeft/TrimSuffix/TrimPrefix/TrimSpace/Trim/
+  ToLower` are transparent for bases (like `encodeURIComponent` in TS), and
+  `url.JoinPath` / `path.Join` compose; a struct base replaces `{base}` only
+  when it is concrete (env placeholder, absolute URL, static text), never an
+  opaque expression. `examples/checkout` now builds its billing client this way
+  (`NewBilling(os.Getenv("BILLING_URL"))` + `TrimRight`), so the link guard
+  covers it.
+
 - **Go client base from config structs and constructor parameters**: a
   struct base field (`baseURL`) assigned `cfg.ReportAPIURL`, where the config
   struct field has an `env:"X"` / `envconfig:"X"` tag (or is populated with
