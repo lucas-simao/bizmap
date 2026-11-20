@@ -307,6 +307,13 @@ def report_cmd(
     show_default=True,
     help="Scanned directory relative to the git root (the path given to `bizmap scan`).",
 )
+@click.option(
+    "--repo-root",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("."),
+    show_default=True,
+    help="Checkout the diff paths are relative to (read for changed .sql files).",
+)
 @click.option("--json", "as_json", is_flag=True, help="Print the impact as JSON.")
 @click.option("--limit", type=int, default=40, show_default=True, help="Max nodes in the diagram.")
 @click.option("--max-rows", type=int, default=50, show_default=True, help="Max table rows (functions with impact).")
@@ -322,6 +329,7 @@ def impact_cmd(
     graph_path: Path,
     diff_path: Path,
     prefix: str,
+    repo_root: Path,
     as_json: bool,
     limit: int,
     max_rows: int,
@@ -337,7 +345,7 @@ def impact_cmd(
     except json.JSONDecodeError as exc:
         raise click.ClickException(f"invalid graph JSON: {exc}") from exc
     diff_text = sys.stdin.read() if str(diff_path) == "-" else diff_path.read_text(encoding="utf-8")
-    result = compute_impact(graph, diff_text, prefix=prefix)
+    result = compute_impact(graph, diff_text, prefix=prefix, repo_root=repo_root)
     if result.hint:
         click.echo(f"warning: {result.hint}", err=True)
     if as_json:

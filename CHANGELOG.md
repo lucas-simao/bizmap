@@ -4,6 +4,18 @@
 
 ### Added
 
+- **Schema changes in the PR comment**: changed lines of `.sql` files inside
+  `CREATE TABLE` / `ALTER TABLE` that name a known column are listed with the
+  entrypoints and functions that read or write it ("not used yet" for a new
+  column). `bizmap impact --repo-root` (default `.`) is where those files are
+  read; the Action passes the checkout.
+- **Pass-through handlers folded**: a changed function that only calls another
+  changed function with the same impact (an inline route handler calling
+  `cancelOrder`) is shown as "also changed" on the callee's row; JSON keeps
+  both.
+- Other changed files outside any function are named in the comment, and the
+  header reads "writes 2 tables · reads 1 table".
+
 - **`why` for JS/TS**: a JSDoc block (`/** ... */`, tag lines like `@param`
   dropped) or `//` lines right above a function declaration, a `const` arrow or
   function expression, a class method or an object member become its `why`, as

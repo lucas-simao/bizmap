@@ -107,7 +107,7 @@ runs:
           echo "::error::bizmap scan failed"
           finish failed "Failed: \`bizmap scan\` did not finish."
         fi
-        common=(--graph "$out/graph.json" --diff "$out/pr.diff" --prefix "$SCAN_PATH")
+        common=(--graph "$out/graph.json" --diff "$out/pr.diff" --prefix "$SCAN_PATH" --repo-root .)
         if ! bizmap impact "${common[@]}" --max-rows 100000 --max-chars 900000 > "$out/full.md" \
           || ! bizmap impact "${common[@]}" --max-rows "$MAX_ROWS" --details-url "$RUN_URL" > "$comment"; then
           echo "::error::bizmap impact failed"

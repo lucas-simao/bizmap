@@ -1061,3 +1061,65 @@ def test_js_ts_why_from_jsdoc_and_line_comments(tmp_path: Path) -> None:
     res = CliRunner().invoke(main, ["why", "orders.status", "--graph", str(out)])
     assert res.exit_code == 0, res.output
     assert "Marks an order as paid." in res.output, res.output
+
+
+SHOP = {
+    "shop/schema.sql": (
+        "CREATE TABLE orders (\n"            # 1
+        "  id int primary key,\n"            # 2
+        "  status text,\n"                   # 3
+        "  discount_pct numeric\n"           # 4
+        ");\n"                               # 5
+        "CREATE TABLE inventory (sku text primary key, qty int);\n"  # 6
+        "ALTER TABLE orders ADD COLUMN note text;\n"                 # 7
+    ),
+    "shop/src/db.ts": "export const db = { query: async (q: string, a?: unknown[]) => [] };\n",
+    "shop/src/orders.ts": (
+        "import { db } from './db';\n"                                                       # 1
+        "export async function cancelOrder(id: number) {\n"                                  # 2
+        "  await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['cancelled', id]);\n"  # 3
+        "  await db.query('UPDATE inventory SET qty = qty + 1 WHERE sku = $1', ['x']);\n"   # 4
+        "}\n"                                                                                # 5
+    ),
+    "shop/src/server.ts": (
+        "import express from 'express';\n"                                                   # 1
+        "import { cancelOrder } from './orders';\n"                                          # 2
+        "const app = express();\n"                                                           # 3
+        "app.post('/orders/:id/cancel', async (req, res) => {\n"                             # 4
+        "  await cancelOrder(Number(req.params.id));\n"                                      # 5
+        "  res.json({ ok: true });\n"                                                        # 6
+        "});\n"                                                                              # 7
+    ),
+}
+
+
+def test_pass_through_handler_is_folded_into_its_callee(tmp_path: Path) -> None:
+    graph = _scan(tmp_path, SHOP)
+    diff = _added("shop/src/orders.ts", 3) + _added("shop/src/server.ts", 6)
+    imp = compute_impact(graph, diff)
+    assert len(imp.functions) == 2, [f.function for f in imp.functions]  # JSON keeps both
+    md = render_markdown(graph, imp)
+    rows = [line for line in md.splitlines() if line.startswith("| `")]
+    assert len(rows) == 1 and "cancelOrder" in rows[0] and "also changed" in rows[0], rows
+    assert "writes **2** tables · reads **0** tables" in md or "writes **2** tables" in md, md
+
+
+def test_schema_only_change_is_listed(tmp_path: Path) -> None:
+    graph = _scan(tmp_path, SHOP)
+    for rel, body in SHOP.items():  # repo_root = the checkout
+        (tmp_path / rel).write_text(body, encoding="utf-8")
+    diff = _added("shop/schema.sql", 3) + _added("shop/schema.sql", 4) + _added("shop/schema.sql", 7) + _added("README.md", 1)
+    imp = compute_impact(graph, diff, repo_root=tmp_path)
+    cols = sorted(graph.nodes[c.column].attrs["name"] for c in imp.schema_changes)
+    assert cols == ["discount_pct", "note", "status"], cols
+    status = next(c for c in imp.schema_changes if graph.nodes[c.column].attrs["name"] == "status")
+    assert any(e.endswith("entrypoint:http:POST:/orders/:id/cancel") for e in status.entrypoints), status
+    md = render_markdown(graph, imp)
+    assert "Schema changes" in md and "orders.discount_pct" in md and "not used yet" in md, md
+    assert "outside any function: `README.md`" in md, md
+
+
+def test_header_names_units() -> None:
+    graph = scan_path(CHECKOUT)
+    md = render_markdown(graph, compute_impact(graph, _diff(f"{PREFIX}/api/billing.go", 27), prefix=PREFIX))
+    assert "· writes **1** table · reads **" in md or "· writes **1** table ·" in md, md
