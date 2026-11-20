@@ -1123,3 +1123,62 @@ def test_header_names_units() -> None:
     graph = scan_path(CHECKOUT)
     md = render_markdown(graph, compute_impact(graph, _diff(f"{PREFIX}/api/billing.go", 27), prefix=PREFIX))
     assert "· writes **1** table · reads **" in md or "· writes **1** table ·" in md, md
+
+
+def _why_of(tmp_path: Path, source: str, name: str) -> str | None:
+    graph = _scan(tmp_path, {"svc/f.ts": source})
+    return graph.nodes[f"function:svc.f.{name}"].attrs.get("why")
+
+
+def test_js_why_ignores_trailing_comment_of_previous_line(tmp_path: Path) -> None:
+    src = "const limit = 5; // max retries\nexport function afterTrailing(id: number) { return id }\n"
+    assert _why_of(tmp_path, src, "afterTrailing") is None
+
+
+def test_js_why_skips_tool_directives(tmp_path: Path) -> None:
+    src = (
+        "/** Ships an order. */\n"
+        "// eslint-disable-next-line no-console\n"
+        "export function ship() { return 1 }\n"
+        "// TODO: remove after the migration\n"
+        "export function legacy() { return 2 }\n"
+        "// @ts-ignore\n"
+        "// prettier-ignore\n"
+        "export function raw() { return 3 }\n"
+    )
+    graph = _scan(tmp_path, {"svc/f.ts": src})
+    why = {n: graph.nodes[f"function:svc.f.{n}"].attrs.get("why") for n in ("ship", "legacy", "raw")}
+    assert why == {"ship": "Ships an order.", "legacy": None, "raw": None}, why
+
+
+def test_js_why_skips_license_header(tmp_path: Path) -> None:
+    src = (
+        "/* Copyright (c) Example Shop Inc. All rights reserved. */\n"
+        "export async function firstInFile() { return 1 }\n"
+    )
+    assert _why_of(tmp_path, src, "firstInFile") is None
+    src2 = "/*! shop-ui v1.2.3 */\nexport function banner() { return 1 }\n"
+    assert _why_of(tmp_path, src2, "banner") is None
+
+
+def test_js_why_on_named_route_handler_and_overloads(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/orders.ts": (
+                "/** Shows one order. */\n"
+                "export function showOrder(req: any, res: any) { res.json({}) }\n"
+                "/** Formats an id. */\n"
+                "export function overloaded(id: number): number;\n"
+                "export function overloaded(id: string): string;\n"
+                "export function overloaded(id: any) { return id }\n"
+            ),
+            "svc/server.ts": (
+                "import express from 'express';\nimport { showOrder } from './orders';\n"
+                "const app = express();\napp.get('/orders/:id', showOrder);\n"
+            ),
+        },
+    )
+    ep = graph.nodes["entrypoint:http:GET:/orders/:id"]
+    assert ep.attrs.get("why") == "Shows one order.", ep.attrs
+    assert graph.nodes["function:svc.orders.overloaded"].attrs.get("why") == "Formats an id."

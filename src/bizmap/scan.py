@@ -1099,6 +1099,9 @@ def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
             language="javascript",
             evidence={"file": route.file, "line": route.line, "symbol": route.handler},
         )
+        handler_why = whys.get(route.handler_qual or "") or whys.get(route.handler)
+        if handler_why:
+            kwargs["why"] = handler_why  # like Python/Go: the route shows its handler's doc
         if route.unresolved:
             kwargs["unresolved"] = True
             kwargs["confidence"] = Confidence.UNKNOWN.value
