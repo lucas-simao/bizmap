@@ -573,7 +573,9 @@ def split_js_inline_handlers(graph: Graph, index: _OutIndex | None = None) -> No
                 continue
             index.move(out, handler.id)
             moved = True
-        if moved:
+        # SQL is attributed to inline handlers at detection now; whether or not
+        # anything moved here, the route gets the table-level rollup
+        if moved or any(e.type in {"reads", "writes", "calls"} for e in index.out(handler.id)):
             evidence = Evidence(file=str(rel), line=int(ev.get("line") or start), symbol=name)
             for etype, target in sorted(_table_hits(graph, index, handler.id, memo)):
                 index.add(etype, ep.id, target, confidence="inferred", evidence=evidence)
