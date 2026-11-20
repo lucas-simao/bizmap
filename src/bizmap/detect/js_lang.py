@@ -344,6 +344,28 @@ def _url_uses_enclosing_path_param(url: str, params: list[str]) -> bool:
     return False
 
 
+_PER_CALL_BASE_KEYS = ("baseURL", "baseUrl", "prefixUrl")
+_CONFIG_ARG_INDEX = {"get": 1, "delete": 1, "head": 1, "options": 1, "post": 2, "put": 2, "patch": 2}
+
+
+def _per_call_base(method: str, args: list[Node], consts: dict[str, str]) -> str | None:
+    """`http.post(url, body, { baseURL: V2 })` / `http.get(url, { baseURL })` /
+    `http.request({ baseURL, url })` → the call's own base (unknown → `{baseURL}`)."""
+    candidates: list[Node] = []
+    idx = _CONFIG_ARG_INDEX.get(method)
+    if idx is not None and len(args) > idx:
+        candidates.append(args[idx])
+    if method == "request" and args:
+        candidates.append(args[0])
+    for arg in candidates:
+        node = _object_prop_node(arg, _PER_CALL_BASE_KEYS)
+        if node is None:
+            continue
+        value, _u = _resolve_js_string(node, consts)
+        return value if value else "{baseURL}"
+    return None
+
+
 def _js_client_url_and_method(
     method: str, args: list[Node], consts: dict[str, str]
 ) -> tuple[str | None, bool, str]:
@@ -1359,6 +1381,10 @@ class JsAnalyzer:
             base = bound or ("{" + leaf + "}" if not bound else bound)
             if not bound:
                 client_unknown = True
+        override = _per_call_base(method, args, consts)
+        if override is not None:
+            # axios/ky config `{ baseURL }` on the call wins over the instance
+            base = override
         if path_val is None and args and (known or param_client or client_unknown):
             # The path expression could not be evaluated (opaque helper,
             # variable). Record the call with an explicit hole instead of

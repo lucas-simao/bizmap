@@ -831,3 +831,41 @@ app.get('/v9/reports/:id', h);
     graph = scan_paths([web, api])
     assert _calls_http_from(graph, function_id("src.screens.loadReport")) == {"api/entrypoint:http:GET:/v9/reports/:id"}
     assert not [e for e in graph.edges.values() if e.type == "calls_http" and ".module" in e.from_id]
+
+
+def test_ts_object_member_baseurl_override_false_link(tmp_path: Path) -> None:
+    """The per-call `{ baseURL }` overrides the instance's: `/api/v2/items/:id/pdf-report`
+    must not link to POST /api/v1/client/items/:id/pdf-report."""
+    web, api = _two_repos(
+        tmp_path,
+        {
+            "src/pdf.ts": """
+import axios from 'axios';
+
+const API_URL = `${import.meta.env.VITE_API_URL}/api/v1/client`;
+const V2_BASE_URL = window.__cfg.v2;
+const http = axios.create({ baseURL: API_URL });
+const paths = { report: (id: string) => `/items/${id}/pdf-report` };
+
+export const makePdf = (id: string, body: unknown) =>
+  http.post(paths.report(id), body, { baseURL: V2_BASE_URL });
+
+export const keepV1 = (id: string, body: unknown) => http.post(paths.report(id), body);
+""",
+        },
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.post('/api/v1/client/items/:id/pdf-report', h);
+""",
+    )
+    _write(tmp_path, "bizmap.yaml", "services:\n  api:\n    env: VITE_API_URL\n")
+    graph = scan_paths([web, api], config=tmp_path / "bizmap.yaml")
+    assert _calls_http_from(graph, function_id("src.pdf.makePdf")) == set()
+    notes = [u for u in graph.attrs.get("unresolved_http") or [] if str(u.get("from", "")).endswith("makePdf")]
+    assert notes, "the overridden call is reported, not dropped"
+    # same helper without override keeps the instance base and links
+    assert _calls_http_from(graph, function_id("src.pdf.keepV1")) == {
+        "api/entrypoint:http:POST:/api/v1/client/items/:id/pdf-report"
+    }
