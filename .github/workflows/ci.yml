@@ -45,6 +45,12 @@ jobs:
           cat /tmp/checkout*.mmd
           bizmap why orders.status --graph /tmp/checkout.json
           bizmap report examples/checkout
+      - name: TEMP js baseline and profile
+        continue-on-error: true
+        run: |
+          python -m venv /tmp/base && /tmp/base/bin/pip install -q "git+https://github.com/lucas-simao/bizmap@main"
+          cd /tmp && /tmp/base/bin/python $GITHUB_WORKSPACE/scripts/bench_js.py 1000 4000 && cd -
+          python scripts/bench_js.py 2000 --profile 2>&1 | head -90
       - name: Go phase scaling (informational)
         run: |
           python scripts/bench_go.py 500 1000 2000 4000
