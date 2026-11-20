@@ -1799,16 +1799,19 @@ def scan_paths(
     config: Path | None = None,
     profile: bool = False,
     base: Path | None = None,
+    names: dict[Path, str] | None = None,
 ) -> Graph:
     """Scan several repos jointly. ``base`` is the directory ``repo_roots`` are
-    relative to (the workspace root for `repos:` in bizmap.yaml, else cwd)."""
+    relative to (the workspace root for `repos:` in bizmap.yaml, else cwd).
+    ``names`` gives a repo name per root, used when its bizmap.yaml sets none."""
     graphs: list[Graph] = []
     services: dict[str, str] = {}
     roots_by_repo: dict[str, str] = {}
     base_dir = (base or Path.cwd()).resolve()
     for root in roots:
         root = root.resolve()
-        cfg = _config_for_root(root, config=config, shared_name=False)
+        default_name = (names or {}).get(root)
+        cfg = _config_for_root(root, config=config, shared_name=False, default_name=default_name)
         services.update(cfg.services)
         graphs.append(
             _scan_one(
@@ -1827,7 +1830,8 @@ def scan_paths(
     if merged.attrs.get("repo_roots_base") != "git":
         merged.attrs["repo_roots"] = roots_by_repo
         merged.attrs["repo_roots_base"] = "scan"
-    parent_cfg = load_scan_config(roots[0].parent if roots else Path("."), config=config)
+    parent_dir = base.resolve() if base is not None else (roots[0].parent if roots else Path("."))
+    parent_cfg = load_scan_config(parent_dir, config=config)
     services.update(parent_cfg.services)
     merged.attrs["services"] = services
     _relink_from_graph(merged, services)
@@ -1839,16 +1843,16 @@ def scan_paths(
 
 
 def _config_for_root(
-    root: Path, *, config: Path | None, shared_name: bool
+    root: Path, *, config: Path | None, shared_name: bool, default_name: str | None = None
 ) -> ScanConfig:
     """Load scan config, keeping each repo's own name on multi-root scans."""
     local = load_scan_config(root, config=None)
     cfg = load_scan_config(root, config=config)
     if config is None or shared_name:
-        if not cfg.name:
-            cfg.name = root.name
+        if not cfg.name or (default_name and not local.name):
+            cfg.name = default_name or root.name
         return cfg
-    name = local.name or root.name
+    name = local.name or default_name or root.name
     services = dict(cfg.services)
     services.update(local.services)
     exclude = list(dict.fromkeys([*cfg.exclude, *local.exclude]))

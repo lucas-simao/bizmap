@@ -33,6 +33,19 @@
 
 ### Added
 
+- **`bizmap scan --discover DIR`**: finds the git repositories under a work
+  folder (`--depth`, default 2; never inside dependency/build dirs or another
+  repo), groups the copies of one repository (worktrees sharing a git dir,
+  clones whose `origin` URLs match once normalized: https/ssh, user, host case,
+  `.git`, trailing slash) and scans one copy of each, jointly. The copy is chosen
+  deterministically: `--prefer`, then main checkout over worktree, then the
+  default branch (`origin/HEAD`, else main/master), then the most recent commit
+  (`git log`, or the ref file's mtime when git is not installed), then path.
+  Repos with no supported code are skipped. `--list` (and `--list --json`) shows
+  every group, the chosen copy, the criterion that decided and the other copies,
+  without scanning. `--include`, `--exclude`, `--prefer` and `--depth` can also
+  live in a `discover:` section of the folder's bizmap.yaml. See
+  [docs/discover.md](docs/discover.md).
 - **`bizmap mcp`**: a read-only MCP server over stdio for coding agents. It reads
   the graph JSON (reloaded when it changes), never uses the network or a model,
   and answers deterministically. Tools: `search`, `call_graph`, `function_data`,
