@@ -339,7 +339,10 @@ def first(conn):
     return roster.SECTIONS[0].query(conn, "1")
 
 
-def unrelated(repo):
+from repo import PropertyRepo
+
+
+def unrelated(repo: PropertyRepo):
     return repo.query("x")
 """,
     )
@@ -348,4 +351,6 @@ def unrelated(repo):
     for fn in ("api.summary", "api.looped", "api.first"):
         assert {ident, sales} <= _callees(graph, fn), (fn, _callees(graph, fn))
     assert {"table:properties", "table:sales"} <= _reach(graph, "entrypoint:http:GET:/properties/{pid}/summary")
+    # a typed receiver is a method call, never roster dispatch (an untyped one
+    # keeps the older object-dispatch candidates)
     assert not ({ident, sales} & _callees(graph, "api.unrelated")), _callees(graph, "api.unrelated")
