@@ -348,6 +348,7 @@ def unrelated(repo: PropertyRepo):
     )
     graph = scan_path(tmp_path)
     ident, sales = function_id("reports.identity.identity_query"), function_id("reports.sales.sales_query")
+    assert not ({ident, sales} & _callees(graph, "api.unrelated")), ("EXPERIMENT_MAIN", _callees(graph, "api.unrelated"))
     for fn in ("api.summary", "api.looped", "api.first"):
         assert {ident, sales} <= _callees(graph, fn), (fn, _callees(graph, fn))
     assert {"table:properties", "table:sales"} <= _reach(graph, "entrypoint:http:GET:/properties/{pid}/summary")
