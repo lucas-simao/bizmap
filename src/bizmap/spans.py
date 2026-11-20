@@ -216,14 +216,58 @@ def _members(obj: Any) -> list[tuple[str, Any]]:
     return out
 
 
+class _OutIndex:
+    """Outgoing edges by source, kept in sync while edges are moved."""
+
+    def __init__(self, graph: Graph) -> None:
+        self.graph = graph
+        self.by_from: dict[str, dict[str, Any]] = {}
+        for edge in graph.edges.values():
+            self.by_from.setdefault(edge.from_id, {})[edge.id] = edge
+
+    def out(self, node_id: str) -> list[Any]:
+        return list((self.by_from.get(node_id) or {}).values())
+
+    def add(self, etype: str, from_id: str, to_id: str, **kw: Any) -> None:
+        edge = self.graph.add_edge(etype, from_id, to_id, **kw)
+        self.by_from.setdefault(from_id, {})[edge.id] = edge
+
+    def move(self, edge: Any, new_from: str) -> None:
+        if edge.id not in self.graph.edges:
+            return
+        del self.graph.edges[edge.id]
+        (self.by_from.get(edge.from_id) or {}).pop(edge.id, None)
+        self.add(edge.type, new_from, edge.to_id, confidence=edge.confidence, evidence=edge.evidence, **edge.attrs)
+
+
+def _fn_nodes_by_end(cache: dict[str, Any], rel: str, tree: Any) -> dict[int, list[Any]]:
+    key = "\0fn_by_end:" + rel
+    if key not in cache:
+        idx: dict[int, list[Any]] = {}
+        for cand in _walk(tree.root_node):
+            if cand.type in _FN_TYPES:
+                idx.setdefault(cand.end_point[0] + 1, []).append(cand)
+        cache[key] = idx
+    return cache[key]
+
+
 def split_factory_members(
-    graph: Graph, root: Path, cache: dict[str, tuple[list[str], Any]] | None = None
+    graph: Graph, root: Path, cache: dict[str, Any] | None = None, index: _OutIndex | None = None
 ) -> None:
     """`createClient(http) { return { a: () => http.get(...), b() {...} } }`:
     each returned member becomes ``<factory>.<key>`` (a ``calls`` child of the
     factory) and takes the edges whose evidence is inside it, so a change to
     ``b`` reaches only ``b``'s routes."""
     cache = {} if cache is None else cache
+    index = index or _OutIndex(graph)
+    spans_by_file: dict[str, set[tuple[Any, Any]]] = {}
+    for n in graph.nodes.values():
+        if n.type == "function":
+            nev = n.attrs.get("evidence") or {}
+            if nev.get("file"):
+                spans_by_file.setdefault(str(nev["file"]), set()).add(
+                    (n.attrs.get("start_line") or nev.get("line"), n.attrs.get("end_line"))
+                )
     for node in list(graph.nodes.values()):
         if node.type != "function" or node.attrs.get("language") != "javascript":
             continue
@@ -240,28 +284,18 @@ def split_factory_members(
         if tree is None:
             continue
         start = int(node.attrs.get("start_line") or line)
-        fn = None
-        for cand in _walk(tree.root_node):
-            if (
-                cand.type in _FN_TYPES
-                and cand.end_point[0] + 1 == end
-                and start <= cand.start_point[0] + 1 <= end
-            ):
-                fn = cand
-                break
+        fn = next(
+            (c for c in _fn_nodes_by_end(cache, str(rel), tree).get(end, []) if start <= c.start_point[0] + 1 <= end),
+            None,
+        )
         if fn is None:
             continue
         members = [m for obj in _returned_objects(fn) for m in _members(obj)]
         if not members:
             continue
-        outgoing = [e for e in graph.edges.values() if e.from_id == node.id and e.type in _MOVABLE]
-        # members already measured as functions of their own (method
-        # definitions the detector named) keep their node
-        taken = {
-            ((n.attrs.get("start_line") or (n.attrs.get("evidence") or {}).get("line")), n.attrs.get("end_line"))
-            for n in graph.nodes.values()
-            if n.type == "function" and (n.attrs.get("evidence") or {}).get("file") == rel and n.id != node.id
-        }
+        outgoing = [e for e in index.out(node.id) if e.type in _MOVABLE]
+        # members already measured as functions of their own keep their node
+        taken = spans_by_file.get(str(rel), set()) - {(start, end), (line, end)}
         for key, mnode in members:
             m_start, m_end = mnode.start_point[0] + 1, mnode.end_point[0] + 1
             child_name = f"{name}.{key}"
@@ -277,7 +311,8 @@ def split_factory_members(
                 parent=node.id,
                 evidence={"file": rel, "line": m_start, "symbol": child_name},
             )
-            graph.add_edge(
+            spans_by_file.setdefault(str(rel), set()).add((m_start, m_end))
+            index.add(
                 "calls",
                 node.id,
                 child_id,
@@ -288,31 +323,24 @@ def split_factory_members(
                 e_ev = edge.evidence
                 if e_ev is None or e_ev.file != rel or not (m_start <= e_ev.line <= m_end):
                     continue
-                if edge.id not in graph.edges:
-                    continue
-                del graph.edges[edge.id]
-                graph.add_edge(
-                    edge.type,
-                    child_id,
-                    edge.to_id,
-                    confidence=edge.confidence,
-                    evidence=e_ev,
-                    **edge.attrs,
-                )
-
+                index.move(edge, child_id)
 
 # ── Go route closures ────────────────────────────────────────────────────────
 
 _GO_DECLS = {"function_declaration", "method_declaration"}
 
 
-def _go_route_literal(tree: Any, line: int) -> Any | None:
+def _go_route_literal(cache: dict[str, Any], rel: str, tree: Any, line: int) -> Any | None:
     """The `func(c echo.Context) error {...}` argument of the registration
     call that starts on ``line``."""
-    row = line - 1
-    for node in _walk(tree.root_node):
-        if node.type != "call_expression" or node.start_point[0] != row:
-            continue
+    key = "\0go_calls_by_row:" + rel
+    if key not in cache:
+        by_row: dict[int, list[Any]] = {}
+        for node in _walk(tree.root_node):
+            if node.type == "call_expression":
+                by_row.setdefault(node.start_point[0], []).append(node)
+        cache[key] = by_row
+    for node in cache[key].get(line - 1, []):
         args = node.child_by_field_name("arguments")
         if args is None:
             continue
@@ -322,14 +350,49 @@ def _go_route_literal(tree: Any, line: int) -> Any | None:
     return None
 
 
+def _go_literal_suffix(decl: Any, lit: Any) -> str:
+    """Go's closure naming: `func2` for the second literal directly in the
+    declaration, `func2.1` for the first literal inside that one."""
+    chain = []
+    cur = lit
+    while cur is not None and cur is not decl and cur.type not in _GO_DECLS:
+        if cur.type == "func_literal":
+            chain.append(cur)
+        cur = cur.parent
+    chain.reverse()
+    parts: list[str] = []
+    scope = decl
+    for node in chain:
+        siblings = []
+        stack = list(reversed(scope.named_children)) if scope is not None else []
+        while stack:
+            cur = stack.pop()
+            if cur.type == "func_literal":
+                siblings.append(cur)
+                continue  # its own literals belong to the next level
+            stack.extend(reversed(cur.named_children))
+        index = next((i for i, n in enumerate(siblings) if n.start_byte == node.start_byte), 0) + 1
+        parts.append(str(index))
+        scope = node
+    return "func" + ".".join(parts)
+
+
 def split_go_route_closures(
-    graph: Graph, root: Path, cache: dict[str, tuple[list[str], Any]] | None = None
+    graph: Graph, root: Path, cache: dict[str, Any] | None = None, index: _OutIndex | None = None
 ) -> None:
     """`e.GET("/x", func(c echo.Context) error {...})`: the closure becomes
     ``<enclosing>.funcN`` (Go's own naming), the route ``triggers`` it, and the
     edges whose evidence is inside it move off the enclosing function."""
     cache = {} if cache is None else cache
+    index = index or _OutIndex(graph)
     triggered = {e.from_id for e in graph.edges.values() if e.type == "triggers"}
+    go_fns: dict[tuple[str, int], Any] = {}
+    for node in graph.nodes.values():
+        if node.type == "function" and node.attrs.get("language") == "go":
+            nev = node.attrs.get("evidence") or {}
+            if nev.get("file") and isinstance(nev.get("line"), int):
+                go_fns.setdefault((str(nev["file"]), int(nev["line"])), node)
+    rollup_memo: dict[str, set[tuple[str, str]]] = {}
     for ep in list(graph.nodes.values()):
         if ep.type != "entrypoint" or ep.attrs.get("kind") != "http" or ep.id in triggered:
             continue
@@ -340,7 +403,7 @@ def split_go_route_closures(
         _lines, tree = _load(cache, root, str(rel))
         if tree is None:
             continue
-        lit = _go_route_literal(tree, line)
+        lit = _go_route_literal(cache, str(rel), tree, line)
         if lit is None:
             continue
         decl = lit.parent
@@ -349,22 +412,11 @@ def split_go_route_closures(
         if decl is None:
             continue
         l_start, l_end = lit.start_point[0] + 1, lit.end_point[0] + 1
-        d_start = decl.start_point[0] + 1
-        owner = None
-        for node in graph.nodes.values():
-            if node.type != "function" or node.attrs.get("language") != "go":
-                continue
-            nev = node.attrs.get("evidence") or {}
-            if nev.get("file") == rel and nev.get("line") == d_start:
-                owner = node
-                break
+        owner = go_fns.get((str(rel), decl.start_point[0] + 1))
         if owner is None:
             continue
-        lits = [n for n in _walk(decl) if n.type == "func_literal"]
-        lits.sort(key=lambda n: n.start_byte)
-        index = next((i for i, n in enumerate(lits) if n.start_byte == lit.start_byte), 0) + 1
         owner_name = str(owner.attrs.get("name") or owner.id.split("function:", 1)[-1])
-        name = f"{owner_name}.func{index}"
+        name = f"{owner_name}.{_go_literal_suffix(decl, lit)}"
         fid = f"function:{name}"
         graph.add_node(
             fid,
@@ -375,25 +427,24 @@ def split_go_route_closures(
             parent=owner.id,
             evidence={"file": rel, "line": l_start, "symbol": name},
         )
-        graph.add_edge(
-            "triggers",
-            ep.id,
-            fid,
-            evidence=Evidence(file=str(rel), line=line, symbol=name),
-        )
+        index.add("triggers", ep.id, fid, evidence=Evidence(file=str(rel), line=line, symbol=name))
         ep.attrs["symbol"] = name
-        for edge in [e for e in graph.edges.values() if e.from_id == owner.id and e.type in _MOVABLE]:
+        for edge in [e for e in index.out(owner.id) if e.type in _MOVABLE]:
             e_ev = edge.evidence
             if e_ev is None or e_ev.file != rel or not (l_start <= e_ev.line <= l_end):
                 continue
-            del graph.edges[edge.id]
-            graph.add_edge(edge.type, fid, edge.to_id, confidence=edge.confidence, evidence=e_ev, **edge.attrs)
-        _rollup_to_entrypoint(graph, ep.id, fid, Evidence(file=str(rel), line=line, symbol=name))
+            index.move(edge, fid)
+        evidence = Evidence(file=str(rel), line=line, symbol=name)
+        for etype, target in sorted(_table_hits(graph, index, fid, rollup_memo)):
+            index.add(etype, ep.id, target, confidence="inferred", evidence=evidence)
 
 
-def _rollup_to_entrypoint(graph: Graph, ep_id: str, fid: str, evidence: Evidence) -> None:
-    """Table-level reads/writes the closure (or what it calls) does, on the
-    route itself, like named handlers get, so report/why see them."""
+def _table_hits(
+    graph: Graph, index: _OutIndex, fid: str, memo: dict[str, set[tuple[str, str]]]
+) -> set[tuple[str, str]]:
+    """Table-level reads/writes ``fid`` (or what it calls) does: what the
+    route gets rolled up, like named handlers, so report/why see them.
+    ``memo`` caches each function's own (non-transitive) hits."""
     seen: set[str] = set()
     todo = [fid]
     hits: set[tuple[str, str]] = set()
@@ -402,16 +453,19 @@ def _rollup_to_entrypoint(graph: Graph, ep_id: str, fid: str, evidence: Evidence
         if cur in seen:
             continue
         seen.add(cur)
-        for edge in graph.edges.values():
-            if edge.from_id != cur:
-                continue
-            if edge.type in {"reads", "writes"}:
-                target = edge.to_id
-                if target.startswith("column:"):
-                    target = "table:" + target.removeprefix("column:").split(".", 1)[0]
-                if target in graph.nodes:
-                    hits.add((edge.type, target))
-            elif edge.type == "calls":
-                todo.append(edge.to_id)
-    for etype, target in sorted(hits):
-        graph.add_edge(etype, ep_id, target, confidence="inferred", evidence=evidence)
+        own = memo.get(cur)
+        callees: list[str] = []
+        if own is None:
+            own = set()
+            for edge in index.out(cur):
+                if edge.type in {"reads", "writes"}:
+                    target = edge.to_id
+                    if target.startswith("column:"):
+                        target = "table:" + target.removeprefix("column:").split(".", 1)[0]
+                    if target in graph.nodes:
+                        own.add((edge.type, target))
+            memo[cur] = own
+        callees = [e.to_id for e in index.out(cur) if e.type == "calls"]
+        hits |= own
+        todo.extend(callees)
+    return hits

@@ -234,7 +234,16 @@ def _changed_functions(graph: Graph, changes: dict[str, set[int]], prefix: str) 
     return {k: sorted(v) for k, v in hits.items()}, unmapped
 
 
-def _entrypoints_reaching(graph: Graph, node_id: str) -> set[str]:
+def _edge_indexes(graph: Graph) -> tuple[dict[str, list[Any]], dict[str, list[Any]]]:
+    out: dict[str, list[Any]] = {}
+    inc: dict[str, list[Any]] = {}
+    for edge in graph.edges.values():
+        out.setdefault(edge.from_id, []).append(edge)
+        inc.setdefault(edge.to_id, []).append(edge)
+    return out, inc
+
+
+def _entrypoints_reaching(graph: Graph, node_id: str, inc: dict[str, list[Any]] | None = None) -> set[str]:
     found: set[str] = set()
     seen: set[str] = set()
     q = deque([node_id])
@@ -246,13 +255,15 @@ def _entrypoints_reaching(graph: Graph, node_id: str) -> set[str]:
         node = graph.get(cur)
         if node is not None and node.type == "entrypoint":
             found.add(cur)
-        for edge in graph.incoming(cur):
+        for edge in (inc.get(cur, []) if inc is not None else graph.incoming(cur)):
             if edge.type in _CALL_EDGES:
                 q.append(edge.from_id)
     return found
 
 
-def _data_reached(graph: Graph, node_id: str) -> tuple[set[str], set[str]]:
+def _data_reached(
+    graph: Graph, node_id: str, out_idx: dict[str, list[Any]] | None = None
+) -> tuple[set[str], set[str]]:
     writes: set[str] = set()
     reads: set[str] = set()
     seen: set[str] = set()
@@ -262,7 +273,7 @@ def _data_reached(graph: Graph, node_id: str) -> tuple[set[str], set[str]]:
         if cur in seen:
             continue
         seen.add(cur)
-        for edge in graph.outgoing(cur):
+        for edge in (out_idx.get(cur, []) if out_idx is not None else graph.outgoing(cur)):
             if edge.type == "writes":
                 writes.add(edge.to_id)
             elif edge.type == "reads":
@@ -281,16 +292,17 @@ def compute_impact(graph: Graph, diff_text: str, *, prefix: str = ".") -> Impact
     changes = parse_unified_diff(diff_text)
     hits, unmapped = _changed_functions(graph, changes, prefix)
     out: list[FunctionImpact] = []
+    out_idx, in_idx = _edge_indexes(graph)
     for nid, lines in sorted(hits.items()):
         node = graph.nodes[nid]
-        writes, reads = _data_reached(graph, nid)
+        writes, reads = _data_reached(graph, nid, out_idx)
         reads -= writes
         out.append(
             FunctionImpact(
                 function=nid,
                 file=_function_file(node, graph, prefix) or "",
                 lines=lines,
-                entrypoints=sorted(_entrypoints_reaching(graph, nid)),
+                entrypoints=sorted(_entrypoints_reaching(graph, nid, in_idx)),
                 writes=sorted(writes),
                 reads=sorted(reads),
             )
