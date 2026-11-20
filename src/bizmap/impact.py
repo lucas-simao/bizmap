@@ -336,6 +336,11 @@ _SQL_NOT_COLUMN = {
 _SQL_OPS = {"add": "added", "alter": "altered", "drop": "dropped", "rename": "renamed"}
 
 
+# removed `.sql` lines per file from the last `_sql_cosmetic_lines` call: a
+# column definition is "added" when no removed line names it
+_SQL_REMOVED: dict[str, list[str]] = {}
+
+
 def _sql_cosmetic_lines(diff_text: str) -> dict[str, set[int]]:
     """New-side lines of `.sql` files whose change is only punctuation or
     spacing (`email TEXT NOT NULL` → `email TEXT NOT NULL,` when a column is
@@ -345,6 +350,8 @@ def _sql_cosmetic_lines(diff_text: str) -> dict[str, set[int]]:
         return re.sub(r"\s+", " ", line).strip().rstrip(",;").strip()
 
     out: dict[str, set[int]] = {}
+    removed_by_file = _SQL_REMOVED
+    removed_by_file.clear()
     path: str | None = None
     removed: list[str] = []
     added: list[tuple[int, str]] = []
@@ -372,6 +379,8 @@ def _sql_cosmetic_lines(diff_text: str) -> dict[str, set[int]]:
                 new_left -= 1
             elif tag == "-":
                 removed.append(raw[1:])
+                if path:
+                    removed_by_file.setdefault(path, []).append(raw[1:])
                 old_left -= 1
             else:
                 flush()
@@ -484,7 +493,9 @@ def _schema_changes(
             if not ops and is_create:
                 cm = _SQL_COLUMN_DEF.match(text)
                 if cm is not None and cm.group(1).lower() not in _SQL_NOT_COLUMN:
-                    ops.append(("changed", cm.group(1), None))
+                    col_re = re.compile(rf'(?i)(?<![\w"]){re.escape(cm.group(1))}(?![\w"])')
+                    was_there = any(col_re.search(r) for r in _SQL_REMOVED.get(path, []))
+                    ops.append(("changed" if was_there else "added", cm.group(1), None))
             for op, col, new_name in ops:
                 key = (table, col.lower(), op)
                 if key in seen:
@@ -662,7 +673,12 @@ def _fold_pass_through(graph: Graph, functions: list[FunctionImpact]) -> dict[st
     def key(f: FunctionImpact) -> tuple:
         return (tuple(f.entrypoints), tuple(f.writes), tuple(f.reads))
 
+    own_data = {
+        e.from_id for e in graph.edges.values() if e.type in {"reads", "writes"} and e.from_id in by_id
+    }
     for caller in sorted(calls):
+        if caller in own_data:
+            continue  # it runs SQL itself: worth its own row even with the same reach
         same = sorted(c for c in calls[caller] if key(by_id[c]) == key(by_id[caller]) and c not in folded)
         if same and caller not in folded.values():
             folded[caller] = same[0]

@@ -553,9 +553,23 @@ def split_js_inline_handlers(graph: Graph, index: _OutIndex | None = None) -> No
         module = name[: name.index(" ")].rsplit(".", 1)[0]
         owner = f"function:{module}.module"
         moved = False
-        for out in [e for e in index.out(owner) if e.type in _MOVABLE]:
-            e_ev = out.evidence
-            if e_ev is None or e_ev.file != rel or not (start <= e_ev.line <= end):
+        inside = [
+            e for e in index.out(owner)
+            if e.type in _MOVABLE and e.evidence is not None and e.evidence.file == rel
+            and start <= e.evidence.line <= end
+        ]
+        # module-level code also gets table-level copies of its column edges;
+        # a named handler has only the column edges, so drop those copies
+        col_tables = {
+            (e.type, "table:" + e.to_id.removeprefix("column:").split(".", 1)[0])
+            for e in inside
+            if e.to_id.startswith("column:")
+        }
+        for out in inside:
+            if (out.type, out.to_id) in col_tables:
+                if out.id in graph.edges:
+                    del graph.edges[out.id]
+                    (index.by_from.get(out.from_id) or {}).pop(out.id, None)
                 continue
             index.move(out, handler.id)
             moved = True
