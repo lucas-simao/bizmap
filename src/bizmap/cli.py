@@ -309,7 +309,25 @@ def report_cmd(
 )
 @click.option("--json", "as_json", is_flag=True, help="Print the impact as JSON.")
 @click.option("--limit", type=int, default=40, show_default=True, help="Max nodes in the diagram.")
-def impact_cmd(graph_path: Path, diff_path: Path, prefix: str, as_json: bool, limit: int) -> None:
+@click.option("--max-rows", type=int, default=50, show_default=True, help="Max table rows (functions with impact).")
+@click.option(
+    "--max-chars",
+    type=int,
+    default=60000,
+    show_default=True,
+    help="Hard cap on the Markdown size (GitHub comments stop at 65,536).",
+)
+@click.option("--details-url", default=None, help="Link shown when rows are cut (e.g. the workflow run).")
+def impact_cmd(
+    graph_path: Path,
+    diff_path: Path,
+    prefix: str,
+    as_json: bool,
+    limit: int,
+    max_rows: int,
+    max_chars: int,
+    details_url: str | None,
+) -> None:
     """Map a diff onto the graph: changed functions → entrypoints and data.
 
     Prints Markdown with a Mermaid diagram (for a PR comment), or JSON.
@@ -323,7 +341,12 @@ def impact_cmd(graph_path: Path, diff_path: Path, prefix: str, as_json: bool, li
     if as_json:
         click.echo(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     else:
-        click.echo(render_markdown(graph, result, limit=limit), nl=False)
+        click.echo(
+            render_markdown(
+                graph, result, limit=limit, max_rows=max_rows, max_chars=max_chars, details_url=details_url
+            ),
+            nl=False,
+        )
 
 
 @main.group("registry")

@@ -313,34 +313,57 @@ def render_mermaid(graph: Graph, impact: Impact, *, limit: int = 40) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_markdown(graph: Graph, impact: Impact, *, limit: int = 40) -> str:
-    out = [MARKER, "### BizMap impact", ""]
+def _weight(fi: FunctionImpact) -> int:
+    return len(fi.entrypoints) + len(_tables_only(fi.writes)) + len(_tables_only(fi.reads))
+
+
+def render_markdown(
+    graph: Graph,
+    impact: Impact,
+    *,
+    limit: int = 40,
+    max_rows: int = 50,
+    max_chars: int = 60000,
+    details_url: str | None = None,
+) -> str:
+    """Markdown for a PR comment, always shorter than ``max_chars``.
+
+    Functions with no entrypoint and no data are summarized in one line; the
+    rest are ranked by how much they reach and capped at ``max_rows``.
+    """
+    head = [MARKER, "### BizMap impact", ""]
     if not impact.functions:
-        out.append("No mapped function changed in this diff.")
+        head.append("No mapped function changed in this diff.")
         if impact.unmapped_files:
-            out.append("")
-            out.append(f"{len(impact.unmapped_files)} changed file(s) have no mapped function.")
-        return "\n".join(out) + "\n"
-    out.append(
+            head.append("")
+            head.append(f"{len(impact.unmapped_files)} changed file(s) have no mapped function.")
+        return "\n".join(head) + "\n"
+    reaching = sorted(
+        (f for f in impact.functions if _weight(f)), key=lambda f: (-_weight(f), f.function)
+    )
+    quiet = len(impact.functions) - len(reaching)
+    head.append(
         f"**{len(impact.functions)}** changed function(s) · "
         f"**{len(impact.entrypoints)}** entrypoint(s) · "
         f"writes **{len(_tables_only(impact.writes))}** · reads **{len(_tables_only(impact.reads))}** table(s)"
     )
-    out += ["", "```mermaid", render_mermaid(graph, impact, limit=limit).rstrip(), "```", ""]
-    out += ["| Changed function | Entrypoints | Writes | Reads |", "|---|---|---|---|"]
 
     def data_labels(ids: list[str]) -> list[str]:
         """`invoices (id, status)`: columns grouped under their table."""
         cols: dict[str, list[str]] = {}
         for nid in ids:
-            head, sep, leaf = nid.rpartition("/")
+            pre, sep, leaf = nid.rpartition("/")
             if leaf.startswith("column:"):
                 table, _dot, col = leaf.removeprefix("column:").partition(".")
-                cols.setdefault(head + sep + "table:" + table, []).append(col)
+                cols.setdefault(pre + sep + "table:" + table, []).append(col)
         out: list[str] = []
         for tid in _tables_only(ids):
             label = _label(graph, tid)
-            out.append(f"{label} ({', '.join(sorted(cols[tid]))})" if tid in cols else label)
+            if tid in cols:
+                names = sorted(cols[tid])
+                shown = ", ".join(names[:6]) + (f", +{len(names) - 6}" if len(names) > 6 else "")
+                label = f"{label} ({shown})"
+            out.append(label)
         return out
 
     def cell(ids: list[str], *, data: bool = False) -> str:
@@ -352,13 +375,45 @@ def render_markdown(graph: Graph, impact: Impact, *, limit: int = 40) -> str:
             labels.append(f"+{len(names) - 8}")
         return "<br>".join(labels)
 
-    for fi in impact.functions:
-        out.append(
-            f"| `{_label(graph, fi.function)}` | {cell(fi.entrypoints)} | {cell(fi.writes, data=True)} | {cell(fi.reads, data=True)} |"
-        )
-    out.append("")
-    out.append(
+    rows = [
+        f"| `{_label(graph, fi.function)}` | {cell(fi.entrypoints)} | "
+        f"{cell(fi.writes, data=True)} | {cell(fi.reads, data=True)} |"
+        for fi in reaching
+    ]
+    footer = [
+        "",
         "<sub>Deterministic static analysis: entrypoints that reach each changed function and the data it "
-        "(or its callees) reads/writes. Edges marked `heuristic`/`unknown` in the graph are included.</sub>"
-    )
-    return "\n".join(out) + "\n"
+        "(or its callees) reads/writes. Edges marked `heuristic`/`unknown` in the graph are included.</sub>",
+    ]
+
+    def build(n_rows: int, with_diagram: bool) -> str:
+        shown = reaching[:n_rows]
+        body = list(head)
+        if with_diagram and shown:
+            sub = Impact(functions=shown, unmapped_files=[])
+            body += ["", "```mermaid", render_mermaid(graph, sub, limit=limit).rstrip(), "```"]
+        if shown:
+            body += ["", "| Changed function | Entrypoints | Writes | Reads |", "|---|---|---|---|"]
+            body += rows[:n_rows]
+        notes: list[str] = []
+        if len(reaching) > n_rows:
+            notes.append(f"+{len(reaching) - n_rows} more function(s) with impact not shown")
+        if quiet:
+            notes.append(f"+{quiet} changed function(s) reach no route or table")
+        if notes:
+            body += ["", " · ".join(notes) + "."]
+        if len(reaching) > n_rows and details_url:
+            body.append(f"Full list: [workflow run summary]({details_url}).")
+        return "\n".join(body + footer) + "\n"
+
+    n = min(max_rows, len(reaching))
+    text = build(n, True)
+    while len(text) > max_chars and n > 0:
+        n = max(0, n - max(1, n // 4))
+        text = build(n, True)
+    if len(text) > max_chars:
+        text = build(0, False)
+    if len(text) > max_chars:  # pathological labels: hard cut on a line boundary
+        cut = text[: max_chars - 200].rsplit("\n", 1)[0]
+        text = cut + "\n\n…truncated.\n"
+    return text
