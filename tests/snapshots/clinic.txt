@@ -104,17 +104,19 @@ table table:patients
 table table:pg_roles
 table table:photos
 table table:unknown
-# edges (137)
-calls function:cmd/server.main -> function:controllers/orders.New [inferred]
-calls function:cmd/server.main -> function:controllers/orders.Wrap [inferred]
-calls function:cmd/server.main -> function:controllers/users.New [inferred]
-calls function:cmd/server.main -> function:jobs.NewExpire [inferred]
-calls function:cmd/server.main -> function:profile.StaffPhoto [inferred]
-calls function:cmd/server.main -> function:repositories/orders.New [inferred]
+# edges (139)
+calls function:cmd/server.main -> function:controllers/orders.Handler.Version [inferred]
+calls function:cmd/server.main -> function:controllers/orders.New [exact]
+calls function:cmd/server.main -> function:controllers/orders.Wrap [exact]
+calls function:cmd/server.main -> function:controllers/users.New [exact]
+calls function:cmd/server.main -> function:jobs.NewExpire [exact]
+calls function:cmd/server.main -> function:notify.Send [inferred]
+calls function:cmd/server.main -> function:profile.StaffPhoto [exact]
+calls function:cmd/server.main -> function:repositories/orders.New [exact]
 calls function:cmd/server.main -> function:repositories/orders.Repo.Expire [inferred]
-calls function:cmd/server.main -> function:repositories/users.New [inferred]
-calls function:cmd/server.main -> function:services/orders.New [inferred]
-calls function:cmd/server.main -> function:services/users.New [inferred]
+calls function:cmd/server.main -> function:repositories/users.New [exact]
+calls function:cmd/server.main -> function:services/orders.New [exact]
+calls function:cmd/server.main -> function:services/users.New [exact]
 calls function:controllers/orders.Handler.Create -> function:controllers/orders.Handler.options [exact]
 calls function:controllers/orders.Handler.Create -> function:services/orders.Service.Create [exact]
 calls function:controllers/orders.Handler.Get -> function:services/orders.Service.Get [exact]
@@ -127,7 +129,7 @@ calls function:controllers/users.Handler.List -> function:services/users.Service
 calls function:controllers/users.Handler.Prefs -> function:services/users.Service.Prefs [exact]
 calls function:jobs.ExpireJob.Run -> function:repositories/orders.Repo.Expire [exact]
 calls function:jobs.Poller.Run -> function:repositories/orders.Repo.Expire [exact]
-calls function:services/orders.Service.Create -> function:notify.Send [inferred]
+calls function:services/orders.Service.Create -> function:notify.Send [exact]
 calls function:services/orders.Service.Create -> function:repositories/orders.Repo.BindTenant [exact]
 calls function:services/orders.Service.Create -> function:repositories/orders.Repo.Create [exact]
 calls function:services/orders.Service.Create -> function:repositories/orders.Repo.WriteAudit [exact]

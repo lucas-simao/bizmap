@@ -98,9 +98,52 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
             elif to.startswith(DATA_PREFIXES):
                 reach[e["from"]].add(to.split(".", 1)[0] if to.startswith("column:") else to)
 
+    # call graph, to say *why* an entrypoint reaches no data
+    handlers: dict[str, list[str]] = {}
+    forward: dict[str, list[str]] = {}
+    http_out: dict[str, list[str]] = {}
+    for e in edges:
+        t = e.get("type")
+        if t == "triggers" and e["from"] in reach:
+            handlers.setdefault(e["from"], []).append(e["to"])
+        elif t == "calls" and e.get("confidence") != "unknown":
+            forward.setdefault(e["from"], []).append(e["to"])
+        elif t == "calls_http":
+            http_out.setdefault(e["from"], []).append(e["to"])
+    unresolved_http_from = {str(u.get("from") or "") for u in data.get("unresolved_http") or []}
+
+    def reached_functions(ep_id: str) -> list[str]:
+        seen: list[str] = []
+        stack = list(handlers.get(ep_id, []))
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.append(cur)
+            stack.extend(forward.get(cur, []))
+        return seen
+
+    def why_no_data(n: dict[str, Any]) -> tuple[str, bool]:
+        """(reason, reaches data in another service through HTTP)."""
+        if not handlers.get(n["id"]):
+            return "handler_not_resolved", False
+        fns = reached_functions(n["id"])
+        via_http = False
+        for f in fns:
+            for target in http_out.get(f, []):
+                if reach.get(target):
+                    via_http = True
+        if any((nodes.get(f) or {}).get("unresolved_calls") for f in fns) or n.get("unresolved_calls"):
+            return "unresolved_call", via_http
+        if any(f in http_out or f in unresolved_http_from or _strip_repo(f)[1] in unresolved_http_from for f in fns):
+            return "only_http", via_http
+        return "no_data_access", via_http
+
     by_kind: Counter[str] = Counter()
     reaching: Counter[str] = Counter()
     no_data: list[dict[str, Any]] = []
+    no_data_reasons: Counter[str] = Counter()
+    reaching_via_http = 0
     for n in entrypoints:
         kind = str(n.get("kind") or "other")
         by_kind[kind] += 1
@@ -108,10 +151,15 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
             reaching[kind] += 1
         else:
             repo, _ = _strip_repo(n["id"])
+            reason, via_http = why_no_data(n)
+            no_data_reasons[reason] += 1
+            reaching_via_http += int(via_http)
             no_data.append(
                 {
                     "repo": r(repo or str(n.get("repo") or data.get("repo") or "")),
                     "entrypoint": r(_entry_label(n)),
+                    "reason": reason,
+                    "reaches_data_via_http": via_http,
                     "dynamic_table": bool(n.get("dynamic_table")),
                     "unresolved_calls": len(n.get("unresolved_calls") or []),
                 }
@@ -135,14 +183,26 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
                 keys[r(str(k))] += 1
 
     confidence: Counter[str] = Counter(str(e.get("confidence") or "") for e in edges)
+    # data links: what the code itself does, copies up the call graph, DB triggers
+    data_origin: dict[str, Any] = {"direct": Counter(), "derived_call": 0, "db_trigger": 0}
+    for e in edges:
+        if e.get("type") not in {"reads", "writes"}:
+            continue
+        if str(e.get("via") or "").startswith("db_trigger:"):
+            data_origin["db_trigger"] += 1
+        elif e.get("derived"):
+            data_origin["derived_call"] += 1
+        else:
+            data_origin["direct"][str(e.get("confidence") or "")] += 1
     data_via: Counter[str] = Counter(
         r.via(str(e.get("via")))
         for e in edges
         if e.get("type") in {"reads", "writes"} and e.get("via")
     )
-    unresolved_calls = sum(len(n.get("unresolved_calls") or []) for n in nodes.values())
+    functions = [n for n in nodes.values() if n.get("type") == "function"]  # entrypoints hold copies
+    unresolved_calls = sum(len(n.get("unresolved_calls") or []) for n in functions)
     call_reasons: Counter[str] = Counter()
-    for n in nodes.values():
+    for n in functions:
         names = n.get("unresolved_calls") or []
         why_not = n.get("unresolved_call_reasons") or {}
         for name in names:
@@ -165,6 +225,8 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
                 r.kind(k): {"total": by_kind[k], "reaching_data": reaching[k]} for k in sorted(by_kind)
             },
             "without_data": sorted(no_data, key=lambda x: (x["repo"], x["entrypoint"])),
+            "without_data_by_reason": dict(sorted(no_data_reasons.items())),
+            "reaching_data_via_http": reaching_via_http,
         },
         "http": {
             "calls_http": len(calls_http),
@@ -178,10 +240,22 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
         },
         "data_links_by_via": dict(sorted(data_via.items())),
         "edges_by_confidence": dict(sorted(confidence.items())),
+        "data_links": {
+            "direct": dict(sorted(data_origin["direct"].items())),
+            "derived_call": data_origin["derived_call"],
+            "db_trigger": data_origin["db_trigger"],
+        },
         "unresolved_calls": unresolved_calls,
         "unresolved_calls_by_reason": dict(sorted(call_reasons.items())),
     }
 
+
+_NO_DATA_LABELS = {
+    "handler_not_resolved": "handler not resolved",
+    "unresolved_call": "stops at an unresolved call",
+    "only_http": "only calls other services over HTTP",
+    "no_data_access": "no data access found",
+}
 
 _REASON_HINTS = {
     "target_not_scanned": "URL composed, but no scanned route matches — scan that service or ignore",
@@ -208,11 +282,19 @@ def format_report(rep: dict[str, Any], *, limit: int = 20) -> str:
     for kind, row in ep["by_kind"].items():
         out.append(f"  {kind:<14} {row['reaching_data']:>5} / {row['total']}")
     if ep["without_data"]:
-        out.append(f"  without data ({len(ep['without_data'])}):")
+        reasons = ep.get("without_data_by_reason") or {}
+        detail = ", ".join(f"{_NO_DATA_LABELS.get(k, k)} {v}" for k, v in reasons.items())
+        out.append(f"  without data ({len(ep['without_data'])}): {detail}")
+        if ep.get("reaching_data_via_http"):
+            out.append(f"    {ep['reaching_data_via_http']} of them reach data in another scanned service through HTTP")
         for row in ep["without_data"][:limit]:
             flags = []
             if row["dynamic_table"]:
                 flags.append("dynamic table")
+            if row.get("reason"):
+                flags.append(_NO_DATA_LABELS.get(row["reason"], row["reason"]))
+            if row.get("reaches_data_via_http"):
+                flags.append("data via HTTP")
             if row["unresolved_calls"]:
                 flags.append(f"{row['unresolved_calls']} unresolved calls")
             suffix = f"  ({', '.join(flags)})" if flags else ""
@@ -236,6 +318,13 @@ def format_report(rep: dict[str, Any], *, limit: int = 20) -> str:
         out.append("data links by derivation: " + ", ".join(f"{k} {v}" for k, v in rep["data_links_by_via"].items()))
     out.append("")
     out.append("edges by confidence: " + ", ".join(f"{k} {v}" for k, v in rep["edges_by_confidence"].items()))
+    links = rep.get("data_links") or {}
+    if links:
+        direct = ", ".join(f"{k} {v}" for k, v in (links.get("direct") or {}).items())
+        out.append(
+            f"data links: direct ({direct or 'none'}), copied to callers/entrypoints {links.get('derived_call', 0)}, "
+            f"via DB triggers {links.get('db_trigger', 0)}"
+        )
     by_reason = rep.get("unresolved_calls_by_reason") or {}
     detail = ", ".join(f"{k} {v}" for k, v in by_reason.items())
     out.append(f"unresolved calls: {rep['unresolved_calls']}" + (f"  ({detail})" if detail else ""))

@@ -140,6 +140,41 @@ class DbTrigger:
     function: str = ""
     for_each: str = "ROW"
     evidence: Evidence | None = None
+    # `UPDATE OF a, b`: the trigger fires only when one of these is written
+    update_columns: list[str] = field(default_factory=list)
+    # False when the events could not be read (then any write may fire it)
+    events_known: bool = False
+
+
+# `AFTER INSERT OR UPDATE OF status, total ON orders` → the event clause
+TRIGGER_EVENTS = re.compile(
+    r"\b(?:BEFORE|AFTER|INSTEAD\s+OF)\s+(.*?)\s+ON\s", re.IGNORECASE | re.DOTALL
+)
+
+
+def trigger_events(sql: str) -> tuple[list[str], list[str]]:
+    """(events, UPDATE OF columns) from a CREATE TRIGGER statement; ([], [])
+    when the clause cannot be found."""
+    m = TRIGGER_EVENTS.search(sql)
+    if not m:
+        return [], []
+    clause = m.group(1)
+    events: list[str] = []
+    columns: list[str] = []
+    for part in re.split(r"\s+OR\s+", clause, flags=re.IGNORECASE):
+        part = part.strip()
+        word = part.split(None, 1)[0].upper() if part else ""
+        if word not in {"INSERT", "UPDATE", "DELETE", "TRUNCATE"}:
+            continue
+        if word not in events:
+            events.append(word)
+        of = re.match(r"UPDATE\s+OF\s+(.+)$", part, re.IGNORECASE | re.DOTALL)
+        if of:
+            for col in of.group(1).split(","):
+                name = col.strip().strip('"').lower()
+                if name and name not in columns:
+                    columns.append(name)
+    return events, columns
 
 
 @dataclass
@@ -882,9 +917,13 @@ def _apply_trigger_regex(schema: Schema, sql: str, evidence: Evidence) -> None:
         return
     name = ident_leaf(m.group(1))
     timing_m = re.search(r"\b(BEFORE|AFTER|INSTEAD\s+OF)\b", sql, re.I)
+    clause_events, update_columns = trigger_events(sql)
     table_m = ON_TABLE.search(sql)
     fn_m = EXECUTE_FN.search(sql)
-    events = [e.upper() for e in re.findall(r"\b(INSERT|UPDATE|DELETE|TRUNCATE)\b", sql, re.I)]
+    events = clause_events or [
+        e.upper() for e in re.findall(r"\b(INSERT|UPDATE|DELETE|TRUNCATE)\b", sql, re.I)
+    ]
+    events = list(dict.fromkeys(events))
     table = ident_leaf(table_m.group(1)) if table_m else ""
     function = ident_leaf(fn_m.group(1)) if fn_m else ""
     existing = schema.triggers.get(name)
@@ -895,7 +934,11 @@ def _apply_trigger_regex(schema: Schema, sql: str, evidence: Evidence) -> None:
             existing.function = function
         if timing_m and (not existing.timing or existing.timing == "AFTER"):
             existing.timing = timing_m.group(1).upper()
-        if events and existing.events == ["INSERT"]:
+        if clause_events:
+            existing.events = clause_events
+            existing.update_columns = update_columns
+            existing.events_known = True
+        elif events and existing.events == ["INSERT"]:
             existing.events = events
         if evidence and existing.evidence is None:
             existing.evidence = evidence
@@ -907,6 +950,8 @@ def _apply_trigger_regex(schema: Schema, sql: str, evidence: Evidence) -> None:
         events=events or ["INSERT"],
         function=function,
         evidence=evidence,
+        update_columns=update_columns,
+        events_known=bool(clause_events),
     )
 
 

@@ -180,7 +180,12 @@ class Graph:
             existing.confidence = better_confidence(existing.confidence, conf)
             if evidence and not existing.evidence:
                 existing.evidence = evidence
+            if "derived" in existing.attrs and not attrs.get("derived"):
+                # a direct access to the same target: no longer only derived
+                existing.attrs.pop("derived", None)
             for key, value in attrs.items():
+                if key == "derived":
+                    continue  # never mark an existing edge as derived
                 if value not in (None, "", [], {}):
                     existing.attrs.setdefault(key, value)
             return existing

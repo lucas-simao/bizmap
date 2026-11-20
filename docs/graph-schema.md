@@ -109,8 +109,17 @@ Every edge has:
 ```
 
 Optional `via` records how an edge was derived: a write propagated through a
-database trigger, or `route_literal` on a `calls_http` edge that was matched
+database trigger (`db_trigger:NAME`), or `route_literal` on a `calls_http` edge that was matched
 from an API-looking string literal (see below) rather than a traced client.
+A read/write copied from the function that runs the SQL up to its callers and
+entrypoints carries `derived: "call"`; edges without `derived` are the
+function's own access. Direct writes carry `ops`, the SQL operations they
+come from (`["INSERT"]`, `["UPDATE"]`, `["DELETE"]`; an upsert gives both
+INSERT and UPDATE). A DB trigger fires only on a direct write whose `ops`
+match its events (and, for `UPDATE OF col`, that writes one of those
+columns); its effect is a table-level `writes` with
+`via: db_trigger:NAME` on the firing function, and also `derived: "call"` on
+its callers and entrypoints.
 Optional `situation` is a list of const/iota names observed at call sites
 (for example `audit.AppointmentCanceled`) so `bizmap why` can say *when* a
 column is written.

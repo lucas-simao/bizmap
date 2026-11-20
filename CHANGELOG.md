@@ -4,6 +4,52 @@
 
 ### Fixed
 
+- **Go phase is linear and much faster on large repos** (round 38). Calls to
+  packages that were not scanned (stdlib, third parties) no longer scan every
+  import path, `pkg.Const` lookups no longer scan every constant, package
+  constants are grouped once, an HTTP client whose base URL is unknown no
+  longer re-analyses its file on every helper call (800 methods: ~25 s →
+  0.3 s), imports are read from the top-level declarations only. Synthetic
+  4,000-file repo: 1.1 ms/file, flat from 500 to 4,000 files
+  (`scripts/bench_go.py`, `pytest -m perf`, both run in CI). A slow Go phase
+  prints `go: N/total files analysed`.
+- **Go tests, fixtures, mocks and generated code are skipped by default**
+  (`skip_generated`): `*_test.go`, `testdata/`, `mocks/`, `*.pb.go`,
+  `*.pb.gw.go`, `*_mock.go`, `mock_*.go` and files headed
+  `// Code generated … DO NOT EDIT.` — except sqlc output and any generated
+  file that runs `.Exec(` / `.Query…(`, which is data-access code and is
+  kept. Counted as `go_tests`, `go_test_dirs`, `generated_files`;
+  `scan: include: ["*_test.go"]` brings them back.
+- **sqlc queries are SQL**: a statement may start with `--` or `/* */`
+  comments (sqlc's `-- name: GetOrder :one`); they used to give no links.
+- **DB triggers fire only where they really do**: only a function's *own*
+  write fires a trigger (not the copies propagated to its callers), the SQL
+  operation must match the trigger's events (`INSERT` / `UPDATE` / `DELETE`;
+  SQLAlchemy `insert()`, `update()`, `delete()`, `session.add/delete` too),
+  and `UPDATE OF col` needs a write to one of those columns. The effect is
+  table-level (`via: db_trigger:NAME`) on the firing function, its callers
+  and entrypoints; triggers whose function writes another table with
+  triggers are followed (up to 4 levels). The round-38 repro went from 432
+  links to the expected 24.
+- **Data links say where they come from**: copies of a read/write up the call
+  graph carry `derived: "call"`, direct writes carry `ops` (the SQL
+  operations). `bizmap report` shows `data links: direct (exact …, inferred
+  …), copied to callers/entrypoints N, via DB triggers N`.
+- **Go call resolution**: a call by exact name in the same package, or
+  `pkg.Func()`, is `exact` (was `inferred`); a method passed as a value to a
+  scanned function (`c.observe(ctx, c.svc.SubmitMarks)`) is an inferred
+  call; `e.GET(path, listCarts(newCartRepo(db)))` routes to the factory
+  `listCarts`, not to its argument; a decorator that implements the interface
+  it wraps no longer resolves `s.repo.X()` to itself (reported as
+  `no_scanned_implementer` when nothing else implements it); a call on a type
+  from a package of the same project that was not scanned is reported as
+  unresolved with reason `type_not_scanned`.
+- **Entrypoints show the unresolved calls of everything they reach**, not
+  only of the handler, and `bizmap report` splits "without data" by reason:
+  handler not resolved, stops at an unresolved call, only calls other
+  services over HTTP, no data access found — and counts those that reach
+  data in another scanned service through HTTP. Unresolved-call totals count
+  functions only (entrypoints hold copies).
 - **`out/` and `coverage/` are only skipped as build output next to a project
   manifest** (package.json, go.mod, pyproject.toml, setup.py, requirements.txt,
   tsconfig.json…). Inside source code (`internal/coverage/`, `adapters/out/`)
