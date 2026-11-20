@@ -909,6 +909,7 @@ class JsAnalysis:
     helper_calls: list[JsHelperCall] = field(default_factory=list)
     rpc_calls: list[JsRpcCall] = field(default_factory=list)
     functions: dict[str, tuple[str, int]] = field(default_factory=dict)
+    function_ends: dict[str, int] = field(default_factory=dict)
     accesses: list[JsAccess] = field(default_factory=list)
     table_accesses: list[JsTableAccess] = field(default_factory=list)
     sql_sites: list[JsSqlSite] = field(default_factory=list)
@@ -988,6 +989,7 @@ class JsAnalyzer:
                     if name:
                         qual = f"{module}.{name}"
                         analysis.functions[qual] = (rel_file, line_of(node))
+                        analysis.function_ends[qual] = node.end_point[0] + 1
                         fn_nodes[qual] = node
                 if node.type == "variable_declarator":
                     # const save = () => { ... } / const save = function () {}
@@ -999,6 +1001,7 @@ class JsAnalyzer:
                     }:
                         qual = f"{module}.{name}"
                         analysis.functions[qual] = (rel_file, line_of(node))
+                        analysis.function_ends[qual] = node.end_point[0] + 1
                         fn_nodes[qual] = value
             wrappers_by_mod[module] = _collect_wrappers(tree, consts, clients)
 

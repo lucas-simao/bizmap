@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`bizmap impact`** (`--graph`, `--diff`, `--prefix`, `--json`): maps a unified
+  diff onto the graph — changed functions → entrypoints that reach them and the
+  tables/columns they (or their callees, across `calls_http`) read or write —
+  as Markdown with a Mermaid diagram, or JSON.
+- **GitHub Action** (`action.yml`, `uses: lucas-simao/bizmap@<tag>`): scans the
+  PR, runs `impact` on `git diff base...HEAD`, writes the step summary and keeps
+  one PR comment up to date.
+- **Graph**: function nodes carry `end_line`; the graph records `repo_roots`
+  (repo name → directory relative to the scan path) so diff paths map to
+  functions in joint scans.
+
 ## 0.3.0 — 2026-11-19
 
 ### Upgrading — ids and confidence that changed

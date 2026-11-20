@@ -1,0 +1,364 @@
+"""Change impact: map a unified diff onto the lineage graph.
+
+A changed line inside a function marks that function as changed. For each
+changed function the impact is:
+
+- **entrypoints** that reach it (reverse ``calls`` / ``calls_http`` /
+  ``triggers`` / ``enqueues``), across services when the graph is joint;
+- **data** it or anything it calls reads or writes (tables, columns,
+  collections, views).
+
+Everything is read from the graph; nothing is re-scanned here.
+"""
+
+from __future__ import annotations
+
+import re
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import PurePosixPath
+from typing import Any
+
+from bizmap.graph import Graph, Node
+
+MARKER = "<!-- bizmap-impact -->"
+
+_CALL_EDGES = {"calls", "calls_http", "triggers", "enqueues"}
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def parse_unified_diff(text: str) -> dict[str, set[int]]:
+    """Return ``{new_path: changed new-side line numbers}``.
+
+    Added lines count as changed. A deletion marks the new-side line where the
+    removed block was (and the one before it), so a function that only lost
+    lines is still caught. Deleted files are ignored (nothing to map onto).
+    """
+    out: dict[str, set[int]] = {}
+    path: str | None = None
+    line = 0
+    for raw in text.splitlines():
+        if raw.startswith("+++ "):
+            target = raw[4:].strip().split("\t", 1)[0]
+            if target == "/dev/null":
+                path = None
+            else:
+                path = target[2:] if target.startswith("b/") else target
+                out.setdefault(path, set())
+            continue
+        if raw.startswith("--- ") or raw.startswith("diff --git"):
+            continue
+        m = _HUNK.match(raw)
+        if m:
+            line = int(m.group(1))
+            continue
+        if path is None or not raw:
+            if path is not None and not raw:
+                line += 1
+            continue
+        tag = raw[0]
+        if tag == "+":
+            out[path].add(line)
+            line += 1
+        elif tag == "-":
+            out[path].add(max(line, 1))
+            if line > 1:
+                out[path].add(line - 1)
+        elif tag == " ":
+            line += 1
+    return {p: lines for p, lines in out.items() if lines}
+
+
+@dataclass
+class FunctionImpact:
+    function: str
+    file: str
+    lines: list[int]
+    entrypoints: list[str] = field(default_factory=list)
+    writes: list[str] = field(default_factory=list)
+    reads: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "function": self.function,
+            "file": self.file,
+            "lines": self.lines,
+            "entrypoints": self.entrypoints,
+            "writes": self.writes,
+            "reads": self.reads,
+        }
+
+
+@dataclass
+class Impact:
+    functions: list[FunctionImpact]
+    unmapped_files: list[str]
+
+    @property
+    def entrypoints(self) -> list[str]:
+        return sorted({e for f in self.functions for e in f.entrypoints})
+
+    @property
+    def writes(self) -> list[str]:
+        return sorted({t for f in self.functions for t in f.writes})
+
+    @property
+    def reads(self) -> list[str]:
+        return sorted({t for f in self.functions for t in f.reads})
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "functions": [f.to_dict() for f in self.functions],
+            "entrypoints": self.entrypoints,
+            "writes": self.writes,
+            "reads": self.reads,
+            "unmapped_files": self.unmapped_files,
+        }
+
+
+def _norm(path: str) -> str:
+    p = PurePosixPath(path.replace("\\", "/")).as_posix()
+    return "" if p == "." else p.removeprefix("./")
+
+
+def _join(*parts: str) -> str:
+    bits = [_norm(p) for p in parts if _norm(p)]
+    return "/".join(bits)
+
+
+def _repo_of(node: Node, graph: Graph) -> str:
+    return str(node.attrs.get("repo") or graph.repo or graph.attrs.get("repo") or "")
+
+
+def _function_file(node: Node, graph: Graph, prefix: str) -> str | None:
+    ev = node.attrs.get("evidence") or {}
+    file = ev.get("file")
+    if not file:
+        return None
+    roots = graph.attrs.get("repo_roots") or {}
+    root = roots.get(_repo_of(node, graph), ".") if roots else "."
+    return _join(prefix, root, str(file))
+
+
+def _changed_functions(graph: Graph, changes: dict[str, set[int]], prefix: str) -> tuple[dict[str, list[int]], list[str]]:
+    by_file: dict[str, list[tuple[int, int, str]]] = {}
+    for nid, node in graph.nodes.items():
+        if node.type != "function":
+            continue
+        start = (node.attrs.get("evidence") or {}).get("line")
+        end = node.attrs.get("end_line")
+        if not isinstance(start, int) or not isinstance(end, int) or end < start:
+            continue
+        path = _function_file(node, graph, prefix)
+        if path:
+            by_file.setdefault(path, []).append((start, end, nid))
+    hits: dict[str, set[int]] = {}
+    unmapped: list[str] = []
+    for path, lines in sorted(changes.items()):
+        spans = by_file.get(_norm(path))
+        if not spans:
+            unmapped.append(path)
+            continue
+        for ln in lines:
+            inside = [s for s in spans if s[0] <= ln <= s[1]]
+            if not inside:
+                continue
+            # innermost span: a nested function owns its own lines
+            _start, _end, nid = min(inside, key=lambda s: (s[1] - s[0], -s[0]))
+            hits.setdefault(nid, set()).add(ln)
+    return {k: sorted(v) for k, v in hits.items()}, unmapped
+
+
+def _entrypoints_reaching(graph: Graph, node_id: str) -> set[str]:
+    found: set[str] = set()
+    seen: set[str] = set()
+    q = deque([node_id])
+    while q:
+        cur = q.popleft()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        node = graph.get(cur)
+        if node is not None and node.type == "entrypoint":
+            found.add(cur)
+        for edge in graph.incoming(cur):
+            if edge.type in _CALL_EDGES:
+                q.append(edge.from_id)
+    return found
+
+
+def _data_reached(graph: Graph, node_id: str) -> tuple[set[str], set[str]]:
+    writes: set[str] = set()
+    reads: set[str] = set()
+    seen: set[str] = set()
+    q = deque([node_id])
+    while q:
+        cur = q.popleft()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        for edge in graph.outgoing(cur):
+            if edge.type == "writes":
+                writes.add(edge.to_id)
+            elif edge.type == "reads":
+                reads.add(edge.to_id)
+            elif edge.type in _CALL_EDGES:
+                q.append(edge.to_id)
+    return writes, reads
+
+
+def compute_impact(graph: Graph, diff_text: str, *, prefix: str = ".") -> Impact:
+    """Impact of ``diff_text`` (paths relative to the git root) on ``graph``.
+
+    ``prefix`` is the scanned directory relative to the git root (the path
+    given to ``bizmap scan``).
+    """
+    changes = parse_unified_diff(diff_text)
+    hits, unmapped = _changed_functions(graph, changes, prefix)
+    out: list[FunctionImpact] = []
+    for nid, lines in sorted(hits.items()):
+        node = graph.nodes[nid]
+        writes, reads = _data_reached(graph, nid)
+        reads -= writes
+        out.append(
+            FunctionImpact(
+                function=nid,
+                file=_function_file(node, graph, prefix) or "",
+                lines=lines,
+                entrypoints=sorted(_entrypoints_reaching(graph, nid)),
+                writes=sorted(writes),
+                reads=sorted(reads),
+            )
+        )
+    return Impact(functions=out, unmapped_files=unmapped)
+
+
+# ── rendering ────────────────────────────────────────────────────────────────
+
+
+def _label(graph: Graph, node_id: str) -> str:
+    node = graph.get(node_id)
+    leaf = node_id.split("/", 1)[1] if "/" in node_id.split(":", 1)[0] else node_id
+    if node is None:
+        return leaf
+    a = node.attrs
+    repo = a.get("repo")
+    multi = len(graph.attrs.get("repo_roots") or {}) > 1
+    pre = f"{repo}: " if multi and repo else ""
+    if node.type == "entrypoint":
+        if a.get("kind") == "http":
+            return f"{pre}{a.get('method')} {a.get('path')}"
+        return f"{pre}{a.get('kind')} {a.get('symbol') or a.get('handler') or a.get('path') or ''}".strip()
+    if node.type == "function":
+        return f"{pre}{a.get('name') or leaf.removeprefix('function:')}"
+    for kind in ("column:", "table:", "collection:", "view:"):
+        if leaf.startswith(kind):
+            return f"{pre}{leaf.removeprefix(kind)}"
+    return f"{pre}{leaf}"
+
+
+def _mid(node_id: str) -> str:
+    return "n" + re.sub(r"[^A-Za-z0-9_]", "_", node_id)
+
+
+def _esc(text: str) -> str:
+    return text.replace('"', "'")
+
+
+def _tables_only(ids: list[str]) -> list[str]:
+    """Collapse columns into their table for the diagram."""
+    out: set[str] = set()
+    for nid in ids:
+        head, sep, leaf = nid.rpartition("/")
+        prefix = head + sep
+        if leaf.startswith("column:"):
+            out.add(prefix + "table:" + leaf.removeprefix("column:").split(".", 1)[0])
+        else:
+            out.add(nid)
+    return sorted(out)
+
+
+def render_mermaid(graph: Graph, impact: Impact, *, limit: int = 40) -> str:
+    lines = ["flowchart LR"]
+    shown: set[str] = set()
+
+    def node(nid: str, shape: str) -> str:
+        mid = _mid(nid)
+        if nid not in shown:
+            shown.add(nid)
+            label = _esc(_label(graph, nid))
+            if shape == "ep":
+                lines.append(f'  {mid}(["{label}"])')
+            elif shape == "fn":
+                lines.append(f'  {mid}["{label}"]:::changed')
+            else:
+                lines.append(f'  {mid}[("{label}")]')
+        return mid
+
+    edges: list[str] = []
+    for fi in impact.functions:
+        if len(shown) >= limit:
+            break
+        fn = node(fi.function, "fn")
+        for ep in fi.entrypoints[:limit]:
+            edges.append(f"  {node(ep, 'ep')} --> {fn}")
+        for t in _tables_only(fi.writes):
+            edges.append(f"  {fn} -- writes --> {node(t, 'data')}")
+        for t in _tables_only(fi.reads):
+            if t in _tables_only(fi.writes):
+                continue
+            edges.append(f"  {fn} -. reads .-> {node(t, 'data')}")
+    lines.extend(dict.fromkeys(edges))
+    lines.append("  classDef changed fill:#fff3bf,stroke:#f08c00")
+    return "\n".join(lines) + "\n"
+
+
+def render_markdown(graph: Graph, impact: Impact, *, limit: int = 40) -> str:
+    out = [MARKER, "### BizMap impact", ""]
+    if not impact.functions:
+        out.append("No mapped function changed in this diff.")
+        if impact.unmapped_files:
+            out.append("")
+            out.append(f"{len(impact.unmapped_files)} changed file(s) have no mapped function.")
+        return "\n".join(out) + "\n"
+    out.append(
+        f"**{len(impact.functions)}** changed function(s) · "
+        f"**{len(impact.entrypoints)}** entrypoint(s) · "
+        f"writes **{len(_tables_only(impact.writes))}** · reads **{len(_tables_only(impact.reads))}** table(s)"
+    )
+    out += ["", "```mermaid", render_mermaid(graph, impact, limit=limit).rstrip(), "```", ""]
+    out += ["| Changed function | Entrypoints | Writes | Reads |", "|---|---|---|---|"]
+
+    def data_labels(ids: list[str]) -> list[str]:
+        """`invoices (id, status)`: columns grouped under their table."""
+        cols: dict[str, list[str]] = {}
+        for nid in ids:
+            head, sep, leaf = nid.rpartition("/")
+            if leaf.startswith("column:"):
+                table, _dot, col = leaf.removeprefix("column:").partition(".")
+                cols.setdefault(head + sep + "table:" + table, []).append(col)
+        out: list[str] = []
+        for tid in _tables_only(ids):
+            label = _label(graph, tid)
+            out.append(f"{label} ({', '.join(sorted(cols[tid]))})" if tid in cols else label)
+        return out
+
+    def cell(ids: list[str], *, data: bool = False) -> str:
+        if not ids:
+            return "—"
+        names = data_labels(ids) if data else [_label(graph, i) for i in ids]
+        labels = [f"`{n}`" for n in names[:8]]
+        if len(names) > 8:
+            labels.append(f"+{len(names) - 8}")
+        return "<br>".join(labels)
+
+    for fi in impact.functions:
+        out.append(
+            f"| `{_label(graph, fi.function)}` | {cell(fi.entrypoints)} | {cell(fi.writes, data=True)} | {cell(fi.reads, data=True)} |"
+        )
+    out.append("")
+    out.append(
+        "<sub>Deterministic static analysis: entrypoints that reach each changed function and the data it "
+        "(or its callees) reads/writes. Edges marked `heuristic`/`unknown` in the graph are included.</sub>"
+    )
+    return "\n".join(out) + "\n"

@@ -23,6 +23,9 @@ WORKSPACES = ["checkout", "pyplatform"]
 def _load(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
     data.pop("generated_at", None)
+    # where each repo sat on disk during the scan (for `bizmap impact`), not
+    # lineage: separately scanned graphs can't know their workspace layout
+    data.pop("repo_roots", None)
     return data
 
 
