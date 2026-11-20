@@ -42,6 +42,16 @@
   `truncated`, results stay under 20,000 characters, and order is documented.
   No new dependency: the JSON-RPC/MCP layer is built in (no `bizmap[mcp]` extra
   is needed). Setup for Claude Code, Cursor and Claude Desktop: `docs/mcp.md`.
+  Hardened: the stdio loop survives any input (lone surrogates, invalid UTF-8,
+  non-UTF-8 stdout; a failing message gets `-32603`), a file that is not a graph
+  is rejected with a clear message, arguments are validated against each tool's
+  schema, `impact` never reads `.sql` files outside `--repo-root` (and warns when
+  it has none), `METHOD /path` names the route rather than its inline handler,
+  results are trimmed item by item close to the size cap (least important list
+  first, nested lists capped too), and the text content is compact JSON.
+- **`bizmap why` / `why_column`**: a table name lists the readers and writers of
+  its columns, and a column that exists in several repos is an error listing the
+  repo-qualified ids (one of which can be passed) instead of a silent pick.
 
 ## 0.3.10 — 2026-11-20
 

@@ -88,8 +88,53 @@ def _entrypoints_for(graph: Graph, node_id: str) -> list[str]:
     return found
 
 
+def _heading_for(graph: Graph, nid: str, table: str = "", column: str = "") -> tuple[str, str] | None:
+    node = graph.get(nid)
+    if node is None:
+        return None
+    if node.type == "column":
+        dtype = node.attrs.get("data_type") or ""
+        extra = f" ({dtype})" if dtype else ""
+        return f"column: {node.attrs.get('table')}.{node.attrs.get('name')}{extra}", "column"
+    if node.type == "table":
+        heading = f"table: {node.attrs.get('name') or table}"
+        if column:
+            heading += f"  (no column node for {column}; showing table-level lineage)"
+        return heading, "table"
+    if node.type == "collection":
+        return f"collection: {node.attrs.get('name') or table}", "collection"
+    if node.type == "view":
+        heading = f"view: {node.attrs.get('name') or table}"
+        if node.attrs.get("materialized"):
+            heading = f"materialized {heading}"
+        return heading, "view"
+    return None
+
+
+def ambiguous_targets(graph: Graph, spec: str) -> list[str]:
+    """Node ids in *different repos* that `table.column` (or `table`) names in
+    a multi-repo graph; empty when it is unique or an exact id."""
+    spec = spec.strip()
+    if spec in graph.nodes:
+        return []
+    table, _, column = spec.partition(".")
+    low_t, low_c = table.lower(), column.lower()
+    if column:
+        leafs = {f"column:{low_t}.{low_c}"}
+    else:
+        leafs = {f"table:{low_t}", f"collection:{low_t}", f"view:{low_t}"}
+    hits = sorted(
+        nid for nid in graph.nodes if nid in leafs or any(nid.endswith("/" + leaf) for leaf in leafs)
+    )
+    return hits if len(hits) > 1 else []
+
+
 def _resolve_target(graph: Graph, spec: str) -> tuple[str, str, str]:
     """Return (node_id, heading, lookup_kind)."""
+    if spec in graph.nodes:
+        found = _heading_for(graph, spec)
+        if found:
+            return spec, found[0], found[1]
     table, _, column = spec.partition(".")
     candidates: list[str] = []
     if column:
@@ -148,6 +193,11 @@ def _resolve_target(graph: Graph, spec: str) -> tuple[str, str, str]:
 
 def format_why(graph: Graph, table_dot_column: str) -> str:
     spec = table_dot_column.strip()
+    clash = ambiguous_targets(graph, spec)
+    if clash:
+        raise ValueError(
+            f"{spec!r} exists in {len(clash)} repos: {', '.join(clash)}. Pass one of these ids."
+        )
     cid, heading, kind = _resolve_target(graph, spec)
     if not cid:
         if "." not in spec:
@@ -192,6 +242,30 @@ def format_why(graph: Graph, table_dot_column: str) -> str:
                     if coln.type == "column" and str(coln.attrs.get("table") or "") == vname:
                         readers.extend(graph.incoming(coln.id, "reads"))
                         writers.extend(graph.incoming(coln.id, "writes"))
+    if kind == "table" and node is not None:
+        # a table's lineage is mostly on its columns: who reads/writes any of them
+        tname = str(node.attrs.get("name") or "").lower()
+        repo_prefix = cid.split("table:", 1)[0]
+        for coln in graph.nodes.values():
+            if (
+                coln.type == "column"
+                and str(coln.attrs.get("table") or "").lower() == tname
+                and coln.id.startswith(repo_prefix + "column:")
+            ):
+                readers.extend(graph.incoming(coln.id, "reads"))
+                writers.extend(graph.incoming(coln.id, "writes"))
+        rank = {"exact": 3, "inferred": 2, "heuristic": 1, "unknown": 0}
+
+        def best_per_source(edges):  # one line per function, strongest edge
+            best: dict[str, object] = {}
+            for edge in edges:
+                prev = best.get(edge.from_id)
+                if prev is None or rank[edge.confidence.value] > rank[prev.confidence.value]:
+                    best[edge.from_id] = edge
+            return list(best.values())
+
+        writers = best_per_source(writers)
+        readers = best_per_source(readers)
     if kind == "column":
         table = node.attrs.get("table") if node else spec.split(".", 1)[0]
         tid = table_id(str(table))

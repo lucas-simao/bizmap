@@ -431,6 +431,7 @@ def _schema_changes(
     inc: dict[str, list[Any]],
     cosmetic: dict[str, set[int]] | None = None,
     missing: list[str] | None = None,
+    outside: list[str] | None = None,
 ) -> list[SchemaChange]:
     """Changed lines of `.sql` files inside `CREATE TABLE` / `ALTER TABLE`:
     each column change with its operation (added / altered / dropped /
@@ -447,11 +448,18 @@ def _schema_changes(
     out: list[SchemaChange] = []
     seen: set[tuple[str, str, str]] = set()
     new_tables: set[str] = set()
+    root_resolved = repo_root.resolve()
     for path in unmapped:
         if not path.lower().endswith(".sql"):
             continue
+        full = (repo_root / path).resolve()
+        if not full.is_relative_to(root_resolved):
+            # `../x.sql` or an absolute path in the diff: never read outside the root
+            if outside is not None:
+                outside.append(path)
+            continue
         try:
-            lines = (repo_root / path).read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = full.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             if missing is not None:
                 missing.append(path)
@@ -560,16 +568,26 @@ def compute_impact(
         ).strip()
     schema: list[SchemaChange] = []
     warnings: list[str] = []
+    sql_changed = [p for p in unmapped if p.lower().endswith(".sql")]
     if repo_root is not None:
         missing: list[str] = []
+        outside: list[str] = []
         schema = _schema_changes(
-            graph, changes, unmapped, repo_root, in_idx, _sql_cosmetic_lines(diff_text), missing
+            graph, changes, unmapped, repo_root, in_idx, _sql_cosmetic_lines(diff_text), missing, outside
         )
         if missing:
             shown = ", ".join(missing[:3]) + (f", +{len(missing) - 3}" if len(missing) > 3 else "")
             warnings.append(
                 f"{len(missing)} changed .sql file(s) not found under --repo-root {str(repo_root)!r}: {shown}"
             )
+        if outside:
+            shown = ", ".join(outside[:3]) + (f", +{len(outside) - 3}" if len(outside) > 3 else "")
+            warnings.append(f"{len(outside)} changed .sql path(s) outside --repo-root ignored: {shown}")
+    elif sql_changed:
+        warnings.append(
+            f"{len(sql_changed)} changed .sql file(s) not read for schema changes "
+            "(start `bizmap mcp` with --repo-root, or run `bizmap impact --repo-root`)"
+        )
     return Impact(
         functions=out, unmapped_files=unmapped, hint=hint, schema_changes=schema, warnings=warnings
     )
