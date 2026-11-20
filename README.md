@@ -142,6 +142,37 @@ Only counts, edge types, entrypoint kinds and reasons stay readable. Without a
 salt each run uses a random one (hashes differ between runs); `--salt-file`
 creates a private salt once and reuses it so runs can be compared.
 
+## PR impact comment
+
+`bizmap impact` maps a diff onto the graph: each changed function → the entrypoints
+that reach it (across services in a joint scan) and the tables/columns it, or
+anything it calls, reads or writes. It prints Markdown with a Mermaid diagram.
+
+```bash
+bizmap scan examples/checkout --out /tmp/g.json
+git diff --unified=0 origin/main... | bizmap impact --graph /tmp/g.json --prefix examples/checkout
+```
+
+As a GitHub Action (one comment per PR, updated on each push):
+
+```yaml
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  bizmap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lucas-simao/bizmap@v0.3.1
+        with:
+          path: .            # or the workspace dir holding bizmap.yaml with `repos:`
+```
+
+Lines outside any function (imports, migrations, docs) are listed as unmapped and
+don't produce impact.
+
 ## What it understands
 
 | | Routes / triggers | Data access | Outbound HTTP |
@@ -184,8 +215,8 @@ and marks those links `inferred`. Details: [docs/how-it-works.md](docs/how-it-wo
 
 ## Roadmap
 
-- **v0.3** — GitHub Action that comments on each PR with the routes, functions, tables
-  and columns it impacts (and a Mermaid diagram).
+- **v0.3.1** — `bizmap impact` + GitHub Action that comments on each PR with the
+  routes, functions, tables and columns it impacts (and a Mermaid diagram).
 - **v0.4** — MCP server so coding agents can ask `why orders.status` instead of grepping.
 - Static graph page (GitHub Pages).
 

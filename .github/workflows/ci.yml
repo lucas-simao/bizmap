@@ -45,3 +45,10 @@ jobs:
           cat /tmp/checkout*.mmd
           bizmap why orders.status --graph /tmp/checkout.json
           bizmap report examples/checkout
+      - name: Impact of a synthetic diff (PR-comment Action)
+        run: |
+          printf '%s\n' 'diff --git a/examples/checkout/api/billing.go b/examples/checkout/api/billing.go' \
+            '--- a/examples/checkout/api/billing.go' '+++ b/examples/checkout/api/billing.go' \
+            '@@ -27,1 +27,1 @@' '-old' '+new' > /tmp/pr.diff
+          bizmap impact --graph /tmp/checkout.json --diff /tmp/pr.diff --prefix examples/checkout | tee /tmp/impact.md
+          grep -q "CreateInvoice" /tmp/impact.md

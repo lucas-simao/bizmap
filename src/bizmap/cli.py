@@ -8,6 +8,7 @@ import click
 
 from bizmap import __version__
 from bizmap.graph import Graph
+from bizmap.impact import compute_impact, render_markdown
 from bizmap.mermaid import DEFAULT_LIMIT, render_mermaid
 from bizmap.registry import graph_from_json, merge_graphs
 from bizmap.report import build_report, format_report
@@ -281,6 +282,48 @@ def report_cmd(
         click.echo(json.dumps(rep, indent=2, sort_keys=True))
     else:
         click.echo(format_report(rep, limit=limit), nl=False)
+
+
+@main.command("impact")
+@click.option(
+    "--graph",
+    "graph_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=Path("bizmap.graph.json"),
+    show_default=True,
+    help="Graph JSON of the changed code (scan of the PR head).",
+)
+@click.option(
+    "--diff",
+    "diff_path",
+    type=click.Path(dir_okay=False, allow_dash=True, path_type=Path),
+    default="-",
+    show_default=True,
+    help="Unified diff (`git diff base...head`); `-` reads stdin.",
+)
+@click.option(
+    "--prefix",
+    default=".",
+    show_default=True,
+    help="Scanned directory relative to the git root (the path given to `bizmap scan`).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the impact as JSON.")
+@click.option("--limit", type=int, default=40, show_default=True, help="Max nodes in the diagram.")
+def impact_cmd(graph_path: Path, diff_path: Path, prefix: str, as_json: bool, limit: int) -> None:
+    """Map a diff onto the graph: changed functions → entrypoints and data.
+
+    Prints Markdown with a Mermaid diagram (for a PR comment), or JSON.
+    """
+    try:
+        graph = graph_from_json(json.loads(graph_path.read_text(encoding="utf-8")))
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"invalid graph JSON: {exc}") from exc
+    diff_text = sys.stdin.read() if str(diff_path) == "-" else diff_path.read_text(encoding="utf-8")
+    result = compute_impact(graph, diff_text, prefix=prefix)
+    if as_json:
+        click.echo(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    else:
+        click.echo(render_markdown(graph, result, limit=limit), nl=False)
 
 
 @main.group("registry")

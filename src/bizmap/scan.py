@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import time
 from collections import defaultdict, deque
@@ -246,6 +247,17 @@ def _kind_edge(kind: str) -> str:
     return "writes" if kind.startswith("write") else "reads"
 
 
+def _end_line(node: object) -> int | None:
+    """Last line (1-based) of a tree-sitter node, for diff → function mapping."""
+    point = getattr(node, "end_point", None)
+    if point is None:
+        return None
+    try:
+        return int(point[0]) + 1
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def _add_function_node_go(graph: Graph, fn: GoFunction) -> str:
     nid = function_id(fn.qualname)
     graph.add_node(
@@ -256,6 +268,7 @@ def _add_function_node_go(graph: Graph, fn: GoFunction) -> str:
         import_path=fn.import_path,
         language="go",
         why=fn.why,
+        end_line=None if fn.synthetic else _end_line(fn.node),
         evidence={"file": fn.file, "line": fn.line, "symbol": fn.qualname},
     )
     return nid
@@ -589,6 +602,7 @@ def _apply_python(
             name=fn.qualname,
             language="python",
             why=fn.why,
+            end_line=_end_line(fn.node),
             evidence={"file": fn.file, "line": fn.line, "symbol": fn.qualname},
             **extra,
         )
@@ -1060,12 +1074,14 @@ def _copy_unresolved_to_entrypoints(
 
 
 def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
+    ends = getattr(analysis, "function_ends", None) or {}
     for qual, (file, line) in (analysis.functions or {}).items():
         graph.add_node(
             function_id(qual),
             "function",
             name=qual,
             language="javascript",
+            end_line=ends.get(qual),
             evidence={"file": file, "line": line, "symbol": qual},
         )
     for route in analysis.routes:
@@ -1743,6 +1759,7 @@ def scan_path(
                 exclude=exclude,
                 config=config or cfg.path,
                 profile=profile,
+                base=root,
             )
     return _scan_one(
         root,
@@ -1763,9 +1780,14 @@ def scan_paths(
     exclude: list[str] | None = None,
     config: Path | None = None,
     profile: bool = False,
+    base: Path | None = None,
 ) -> Graph:
+    """Scan several repos jointly. ``base`` is the directory ``repo_roots`` are
+    relative to (the workspace root for `repos:` in bizmap.yaml, else cwd)."""
     graphs: list[Graph] = []
     services: dict[str, str] = {}
+    roots_by_repo: dict[str, str] = {}
+    base_dir = (base or Path.cwd()).resolve()
     for root in roots:
         root = root.resolve()
         cfg = _config_for_root(root, config=config, shared_name=False)
@@ -1781,7 +1803,9 @@ def scan_paths(
                 cfg=cfg,
             )
         )
+        roots_by_repo[str(graphs[-1].repo)] = Path(os.path.relpath(root, base_dir)).as_posix()
     merged = merge_graphs(graphs)
+    merged.attrs["repo_roots"] = roots_by_repo
     parent_cfg = load_scan_config(roots[0].parent if roots else Path("."), config=config)
     services.update(parent_cfg.services)
     merged.attrs["services"] = services
@@ -1996,6 +2020,7 @@ def _scan_one(
     graph.database = cfg.database
     graph.attrs["repo"] = graph.repo
     graph.attrs["database"] = graph.database
+    graph.attrs["repo_roots"] = {graph.repo: "."}
     graph.attrs["services"] = cfg.services
     graph.attrs["queues"] = (cfg.raw or {}).get("queues") or {}
     graph.version = GRAPH_VERSION
