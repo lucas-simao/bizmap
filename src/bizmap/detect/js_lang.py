@@ -987,7 +987,7 @@ class JsAnalyzer:
                     name_n = node.child_by_field_name("name")
                     name = text(name_n) if name_n else ""
                     if name:
-                        qual = f"{module}.{name}"
+                        qual = _fn_qual(node, module) or f"{module}.{name}"
                         analysis.functions[qual] = (rel_file, line_of(node))
                         analysis.function_ends[qual] = node.end_point[0] + 1
                         fn_nodes[qual] = node
@@ -999,10 +999,36 @@ class JsAnalyzer:
                         "arrow_function",
                         "function",
                     }:
-                        qual = f"{module}.{name}"
+                        qual = _fn_qual(value, module) or f"{module}.{name}"
                         analysis.functions[qual] = (rel_file, line_of(node))
                         analysis.function_ends[qual] = node.end_point[0] + 1
                         fn_nodes[qual] = value
+                if node.type == "pair":
+                    value = node.child_by_field_name("value")
+                    if value is not None and value.type in {"arrow_function", "function", "function_expression"}:
+                        qual = _fn_qual(value, module)
+                        parent_qual = qual.rsplit(".", 1)[0] if qual else None
+                        if qual and parent_qual and parent_qual != module and _returned_member_key(value):
+                            analysis.functions[qual] = (rel_file, line_of(value))
+                            analysis.function_ends[qual] = value.end_point[0] + 1
+                            fn_nodes[qual] = value
+                            # the factory reaches what its members call
+                            analysis.calls.append(
+                                JsCall(caller=parent_qual, callee=qual, file=rel_file, line=line_of(value))
+                            )
+            # calls to helpers declared in an enclosing function's scope
+            for node in walk(tree):
+                if node.type != "call_expression":
+                    continue
+                fn_n = node.child_by_field_name("function")
+                if fn_n is None or fn_n.type != "identifier":
+                    continue
+                caller = _enclosing_symbol(node, module)
+                callee = _scoped_callee(caller, text(fn_n), module, fn_nodes)
+                if callee:
+                    analysis.calls.append(
+                        JsCall(caller=caller, callee=callee, file=rel_file, line=line_of(node))
+                    )
             wrappers_by_mod[module] = _collect_wrappers(tree, consts, clients)
 
         _import_path_helpers(consts_by_mod, import_specs_by_mod)
@@ -1580,22 +1606,92 @@ def _unwrap_hof_handler(node: Node | None) -> Node | None:
     return cur
 
 
+_NAMED_FN_TYPES = {
+    "function_declaration",
+    "generator_function_declaration",
+    "method_definition",
+    "function",
+    "function_expression",
+}
+
+
+def _fn_own_name(cur: Node) -> str | None:
+    """Name a function-like node is known by, or None when anonymous."""
+    if cur.type in _NAMED_FN_TYPES:
+        name_n = cur.child_by_field_name("name")
+        if name_n is not None and text(name_n):
+            return text(name_n)
+    if cur.type in {"arrow_function", "function", "function_expression"}:
+        parent = cur.parent
+        if parent is not None and parent.type == "variable_declarator":
+            return _declarator_name(parent) or None
+        key = _returned_member_key(cur)
+        if key:
+            return key
+    return None
+
+
+def _returned_member_key(fn: Node) -> str | None:
+    """`one` for the function in `return { one: (id) => ... }` (or an arrow
+    body `=> ({ one: ... })`) of a named function: a factory member."""
+    pair = fn.parent
+    if pair is None or pair.type != "pair" or pair.child_by_field_name("value") != fn:
+        return None
+    obj = pair.parent
+    if obj is None or obj.type != "object":
+        return None
+    up = obj.parent
+    while up is not None and up.type == "parenthesized_expression":
+        up = up.parent
+    if up is None:
+        return None
+    if up.type == "return_statement" or (up.type == "arrow_function" and up.child_by_field_name("body") is not None):
+        key = pair.child_by_field_name("key")
+        name = _unquote(text(key)) if key is not None else ""
+        return name if name.isidentifier() else None
+    return None
+
+
+def _fn_qual(fn: Node, module: str) -> str | None:
+    """`<module>.<outer>.<inner>`: a declaration nested in functions is
+    qualified by every named function around it, so two factories can each
+    have their own `build` helper. Top-level ones stay `<module>.<name>`."""
+    own = _fn_own_name(fn)
+    if not own:
+        return None
+    chain = [own]
+    cur = fn.parent
+    while cur is not None:
+        if cur.type in _NAMED_FN_TYPES or cur.type == "arrow_function":
+            name = _fn_own_name(cur)
+            if name and cur.type != "method_definition":
+                chain.append(name)
+        cur = cur.parent
+    return ".".join([module, *reversed(chain)])
+
+
 def _enclosing_symbol(node: Node, module: str) -> str:
     cur = node.parent
     while cur is not None:
-        if cur.type in {"function_declaration", "method_definition", "function", "function_expression"}:
-            name_n = cur.child_by_field_name("name")
-            name = text(name_n) if name_n else ""
-            if name:
-                return f"{module}.{name}"
-        if cur.type == "arrow_function":
-            parent = cur.parent
-            if parent is not None and parent.type == "variable_declarator":
-                name = _declarator_name(parent)
-                if name:
-                    return f"{module}.{name}"
+        if cur.type in _NAMED_FN_TYPES or cur.type == "arrow_function":
+            qual = _fn_qual(cur, module)
+            if qual:
+                return qual
         cur = cur.parent
     return f"{module}.module"
+
+
+def _scoped_callee(caller: str, callee: str, module: str, fn_nodes: dict[str, Node]) -> str | None:
+    """`build(id)` inside `<module>.createA.one`: the nearest enclosing scope
+    that declares `build` (`<module>.createA.build`), nested scopes only."""
+    if not caller.startswith(module + ".") or caller.endswith(".module"):
+        return None
+    parts = caller[len(module) + 1 :].split(".")
+    for depth in range(len(parts), 0, -1):
+        cand = ".".join([module, *parts[:depth], callee])
+        if cand in fn_nodes and cand != caller:
+            return cand
+    return None
 
 
 _ENV_OBJECTS = {"import.meta.env", "process.env", "Bun.env", "Deno.env"}
