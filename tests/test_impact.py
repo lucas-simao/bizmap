@@ -746,3 +746,84 @@ def test_table_hits_with_cycles() -> None:
     assert _table_hits(g, idx, "function:a", memo) == want
     assert _table_hits(g, idx, "function:c", memo) == want
     assert _table_hits(g, idx, "function:d", memo) == {("writes", "table:t2")}
+
+
+def test_local_helper_in_anonymous_callback(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/v.ts": (
+                "declare const schema: { refine(cb: (p: any, ctx: any) => void): void };\n"
+                "schema.refine((p, ctx) => {\n"
+                "  const report = (m: string) => ctx.add(m);\n"
+                "  const checkFields = (who: string) => { if (p.a) report(who); };\n"
+                "  checkFields('x');\n"
+                "});\n"
+            ),
+        },
+    )
+    calls = {(e.from_id.rsplit(".", 1)[-1], e.to_id.rsplit(".", 1)[-1]) for e in graph.edges.values() if e.type == "calls"}
+    assert ("checkFields", "report") in calls, calls
+
+
+def test_local_helper_in_object_literal_method_with_try_catch(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/s.ts": (
+                "declare function serveHttp(h: any): void;\n"
+                "declare function makeStream(o: any): void;\n"
+                "serveHttp(async (req: any) => {\n"
+                "  makeStream({ async start(c: any) {\n"
+                "    const push = (f: string) => { try { c.enqueue(f) } catch {} };\n"
+                "    try { push('a') } catch (e) { push('err') }\n"
+                "  } });\n"
+                "});\n"
+            ),
+        },
+    )
+    calls = {(e.from_id.rsplit(".", 1)[-1], e.to_id.rsplit(".", 1)[-1]) for e in graph.edges.values() if e.type == "calls"}
+    assert ("start", "push") in calls, calls
+
+
+def test_local_non_function_binding_still_shadows(tmp_path: Path) -> None:
+    body = "export function render(list) { const formatLabel = list[0]; return formatLabel(1) }\n"
+    assert _shadow_calls(tmp_path, body) == set()
+
+
+def test_ambiguous_export_star_is_not_linked(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/amb1.ts": "export function dup() { return 1 }\nexport function one() { return 1 }\n",
+            "svc/amb2.ts": "export function dup() { return 2 }\n",
+            "svc/index.ts": "export * from './amb1';\nexport * from './amb2';\n",
+            "svc/app.ts": "import { dup, one } from './index';\nexport function use() { dup(); one(); }\n",
+        },
+    )
+    got = {t for f, t in _calls_from(graph, "function:svc.app.use")}
+    assert got == {"function:svc.amb1.one"}, got
+
+
+def test_tsconfig_paths_relative_to_config_and_scoped(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "apps/web/tsconfig.json": '{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}',
+            "apps/web/src/lib/fmt.ts": "export function fmt() { return 1 }\n",
+            "apps/web/src/page.ts": "import { fmt } from '@/lib/fmt';\nexport function page() { return fmt() }\n",
+            "apps/admin/tsconfig.json": '{"extends": "./tsconfig.base.json"}',
+            "apps/admin/tsconfig.base.json": '{"compilerOptions": {"paths": {"@/*": ["./app/*"]}}}',
+            "apps/admin/app/lib/fmt.ts": "export function fmt() { return 2 }\n",
+            "apps/admin/app/page.ts": "import { fmt } from '@/lib/fmt';\nexport function page() { return fmt() }\n",
+            "apps/shop/vite.config.ts": (
+                "import path from 'path';\nexport default { resolve: { alias: { '@': path.resolve(__dirname, './src') } } };\n"
+            ),
+            "apps/shop/src/util/fmt.ts": "export function fmt() { return 3 }\n",
+            "apps/shop/src/page.ts": "import { fmt } from '@/util/fmt';\nexport function page() { return fmt() }\n",
+        },
+    )
+    calls = {(e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls"}
+    assert ("function:apps.web.src.page.page", "function:apps.web.src.lib.fmt.fmt") in calls, calls
+    assert ("function:apps.admin.app.page.page", "function:apps.admin.app.lib.fmt.fmt") in calls, calls
+    assert ("function:apps.shop.src.page.page", "function:apps.shop.src.util.fmt.fmt") in calls, calls
