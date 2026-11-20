@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.4.3 — 2026-11-20
+
+### Fixed
+
+- **Reach across services**: `bizmap report` follows resolved `calls_http`
+  from everything an entrypoint reaches, across services, without cycles and
+  up to 5 hops. An entrypoint that reaches data only through other scanned
+  services is counted in `reaching_data_via_http` (with `http_hops`), and
+  with `--cross-service` in "reaching a table" too. "Only calls other
+  services over HTTP" rows say where the chain stops: no resolved target,
+  the services it calls reach no data either, or the hop limit.
+- **`bizmap why` shows the whole HTTP chain**: `invoked via HTTP from
+  gateway/… ← via HTTP from edge/… ← …`.
+- **Front-end calls link to the API scanned with them**:
+  - an env key no `services:` entry maps (`VITE_API_URL`) is linked to a repo
+    when every call through it that already matched goes to that repo; its
+    other calls (`/me`, `` `/carts/${id}` ``) are then matched against that
+    repo only (`via: env_inferred`, listed in the scan summary and as
+    `inferred_services` in the graph);
+  - `services:` entries take `prefix:` (`api: {env: VITE_API_URL, prefix:
+    /api/v1}`), and inside the repo a declared service points at, a unique
+    route whose tail matches the call also links (the env value carries
+    `/api/v1`);
+  - env keys whose calls still do not link get a ready-to-paste
+    `services:` hint in the scan output (`service_hints` in the graph);
+  - an HTTP wrapper imported from another module
+    (`import { getJSON } from '../lib/http'`) is followed at the caller.
+  - README: the `services:` short form, `repo:`, `prefix:`, and that the key
+    is the scanned repo's name.
+- **JS/TS phase is linear and ~45% faster**: a per-file function index
+  replaced a scan of every function seen so far (quadratic in the number of
+  files); the collectors share one walk per file for the node types they
+  need; exports are read from statements only. Synthetic React/TS repo
+  (`scripts/bench_js.py`, in `pytest -m perf`): 4k files 18.8 s → 10.4 s on
+  the same CI runner, 4k/1k = 4.0×.
+- **Progress**: counters inside each long pass (`go: parsing 1200/3721`,
+  `go: route prefixes …`, `go: field bindings …`, `go: analysing …`,
+  `js/ts: parsing …`, `js/ts: analysing …`, `graph: propagating …`), a
+  `[repo 3/14]` prefix in joint scans, and an immediate `bizmap X: scanning …`
+  line.
+- **`bizmap scan --discover`** without a value scans the current directory.
+- **JS/TS calls resolved by name are `exact`** (a function in scope, or
+  imported by name / through barrels), like Go's; members, factories and
+  callbacks stay `inferred`.
+- `pytest -m perf`: the thresholds are relative within one run and loose in
+  absolute terms; the docstrings say a failure under heavy machine load is
+  worth a re-run first.
+
 ## 0.4.2 — 2026-11-20
 
 ### Fixed

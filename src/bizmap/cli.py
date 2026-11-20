@@ -205,7 +205,10 @@ def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
     "discover_dir",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     default=None,
-    help="Find the git repos under DIR (clones and worktrees of the same repo count once) and scan them jointly.",
+    is_flag=False,
+    flag_value=".",
+    help="Find the git repos under DIR (default: the current directory; clones and worktrees "
+    "of the same repo count once) and scan them jointly.",
 )
 @click.option("--list", "list_flag", is_flag=True, help="With --discover: show what would be scanned and why, then stop.")
 @click.option("--json", "json_flag", is_flag=True, help="With --discover --list: print the discovery as JSON.")
@@ -295,6 +298,8 @@ def scan_cmd(
         names = None
     if not quiet:
         progress.start()
+        what = f"{len(roots)} repos" if len(roots) > 1 else str(roots[0])
+        click.echo(f"bizmap {__version__}: scanning {what}…", err=True)
     if discover_dir is not None:
         graph = scan_paths(
             roots,

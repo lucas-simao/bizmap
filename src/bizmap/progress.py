@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from typing import IO
 
 _current: Progress | None = None
+_prefix = ""  # "[repo 3/14] " during a joint scan
 
 
 def phase_kind(label: str) -> str:
@@ -58,7 +59,7 @@ class Progress:
 
     def emit(self, message: str) -> None:
         with self._lock:
-            line = f"[bizmap {self.elapsed():6.1f}s] {message}"
+            line = f"[bizmap {self.elapsed():6.1f}s] {_prefix}{message}"
             if self.live:
                 self._print(line)
                 return
@@ -89,7 +90,7 @@ class Progress:
                 self._go_live()
             if self.current and now - self.last_line >= self.heartbeat:
                 label, t0 = self.current
-                self._print(f"[bizmap {now - self.start:6.1f}s] still in {label} ({now - t0:.0f}s)")
+                self._print(f"[bizmap {now - self.start:6.1f}s] {_prefix}still in {label} ({now - t0:.0f}s)")
 
     def run_heartbeat(self, interval: float = 0.5) -> None:
         def loop() -> None:
@@ -147,6 +148,18 @@ def stop() -> None:
     _current = None
 
 
+def set_prefix(prefix: str) -> None:
+    """Put ``prefix`` (e.g. ``[repo 3/14] ``) before every line until reset."""
+    global _prefix
+    _prefix = prefix
+
+
+def counter(label: str, done: int, total: int, every: float = 2.0) -> None:
+    """``label: done/total`` from inside a long loop (see `status`)."""
+    if _current is not None and _current.live:
+        status(f"{label} {done}/{total}", every)
+
+
 def note(message: str) -> None:
     if _current is not None:
         _current.emit(message)
@@ -162,7 +175,7 @@ def status(message: str, every: float = 2.0) -> None:
         now = time.perf_counter()
         if now - cur.last_line < every:
             return
-        cur._print(f"[bizmap {now - cur.start:6.1f}s] {message}")
+        cur._print(f"[bizmap {now - cur.start:6.1f}s] {_prefix}{message}")
 
 
 def begin(label: str, files: int | None = None) -> None:

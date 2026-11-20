@@ -545,7 +545,8 @@ def _apply_go(
     sql_s = time.perf_counter() - t_sql
     t_prop = time.perf_counter()
     origin_unknown: dict[str, int] = defaultdict(int)
-    for origin_fn, accesses, _ev in origin_accesses:
+    for prop_n, (origin_fn, accesses, _ev) in enumerate(origin_accesses):
+        progress.counter("graph: propagating Go data accesses", prop_n, len(origin_accesses))
         unknown_n = sum(
             1 for a in accesses if a.unknown_table or (a.table or "").lower() == "unknown"
         )
@@ -813,7 +814,8 @@ def _apply_python(
     sql_s = time.perf_counter() - t_sql
     t_prop = time.perf_counter()
     origin_unknown: dict[str, int] = defaultdict(int)
-    for origin_fn, accesses in origin_accesses:
+    for prop_n, (origin_fn, accesses) in enumerate(origin_accesses):
+        progress.counter("graph: propagating Python data accesses", prop_n, len(origin_accesses))
         unknown_n = sum(
             1 for a in accesses if a.unknown_table or (a.table or "").lower() == "unknown"
         )
@@ -1243,7 +1245,7 @@ def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
             "calls",
             function_id(call.caller),
             function_id(call.callee),
-            confidence=Confidence.INFERRED,
+            confidence=Confidence.EXACT if getattr(call, "exact", False) else Confidence.INFERRED,
             evidence=Evidence(file=call.file, line=call.line, symbol=call.caller),
         )
         reverse[call.callee].add(call.caller)
@@ -2029,8 +2031,10 @@ def scan_paths(
     services: dict[str, str] = {}
     roots_by_repo: dict[str, str] = {}
     base_dir = (base or Path.cwd()).resolve()
-    for root in roots:
+    for repo_n, root in enumerate(roots, 1):
         root = root.resolve()
+        if len(roots) > 1:
+            progress.set_prefix(f"[repo {repo_n}/{len(roots)}] ")
         default_name = (names or {}).get(root)
         cfg = _config_for_root(root, config=config, shared_name=False, default_name=default_name)
         services.update(cfg.services)
@@ -2046,6 +2050,7 @@ def scan_paths(
             )
         )
         roots_by_repo[str(graphs[-1].repo)] = Path(os.path.relpath(root, base_dir)).as_posix()
+    progress.set_prefix("")
     t_merge = time.perf_counter()
     merged = merge_graphs(graphs)
     if merged.attrs.get("repo_roots_base") != "git":

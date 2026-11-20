@@ -132,3 +132,23 @@ def test_status_lines_only_when_live_and_throttled() -> None:
     progress.stop()
     text = out.getvalue()
     assert "go: 1/10 files analysed" in text and "2/10" not in text
+
+
+def test_prefix_and_counters() -> None:
+    out = io.StringIO()
+    progress.start(threshold=0, stream=out, live=False)
+    progress.set_prefix("[repo 2/3] ")
+    progress.note("go: 10 files…")
+    progress.counter("go: parsing", 4, 10, every=0)
+    progress.set_prefix("")
+    progress.stop()
+    text = out.getvalue()
+    assert "[repo 2/3] go: 10 files…" in text
+    assert "[repo 2/3] go: parsing 4/10" in text
+
+
+def test_scan_says_it_started(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    res = CliRunner().invoke(main, ["scan", str(tmp_path), "--out", str(tmp_path / "g.json")])
+    assert res.exit_code == 0, res.output
+    assert "bizmap " in res.output and "scanning" in res.output

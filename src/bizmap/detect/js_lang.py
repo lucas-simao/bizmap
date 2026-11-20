@@ -11,6 +11,7 @@ from pathlib import Path
 
 from tree_sitter import Language, Node, Parser
 
+from bizmap import progress
 from bizmap.detect.tsutil import (
     JS_TYPED_WALK_TYPES as JS_TYPES,
 )
@@ -889,6 +890,9 @@ class JsCall:
     callee: str
     file: str
     line: int
+    # resolved by name: a function in scope or imported by name (`exact`);
+    # members, factories and callbacks stay inferred
+    exact: bool = False
 
 
 @dataclass
@@ -1012,7 +1016,8 @@ class JsAnalyzer:
         yaml_constants = constants or {}
         path_aliases = _ts_path_aliases(root)
         parsed: list[tuple[Path, str, str, Node, bytes]] = []
-        for path in files:
+        for parsed_n, path in enumerate(files):
+            progress.counter("js/ts: parsing", parsed_n, len(files))
             parser = _parser_for(path)
             if parser is None:
                 continue
@@ -1163,7 +1168,7 @@ class JsAnalyzer:
                     callee = f"{module}.{name}"  # module-level function
                 if callee:
                     analysis.calls.append(
-                        JsCall(caller=caller, callee=callee, file=rel_file, line=line_of(node))
+                        JsCall(caller=caller, callee=callee, file=rel_file, line=line_of(node), exact=True)
                     )
                 elif name in specs:
                     # resolved once every file is indexed (target may come later)
@@ -1176,7 +1181,9 @@ class JsAnalyzer:
         for caller, (src_mod, orig), call_file, call_line in pending_import_calls:
             target = _imported_function(src_mod, orig, exports_by_mod, known_mods, fn_nodes)
             if target and target != caller:
-                analysis.calls.append(JsCall(caller=caller, callee=target, file=call_file, line=call_line))
+                analysis.calls.append(
+                    JsCall(caller=caller, callee=target, file=call_file, line=call_line, exact=True)
+                )
 
         _import_path_helpers(consts_by_mod, import_specs_by_mod)
         # Helpers built from imported helpers (`site = (id) => `${base()}/sites/${id}``)
@@ -1217,7 +1224,8 @@ class JsAnalyzer:
             )
         _import_wrappers(wrappers_by_mod, import_specs_by_mod, exports_by_mod, set(trees_by_mod))
 
-        for _path, rel_file, module, tree, _src in parsed:
+        for scan_n, (_path, rel_file, module, tree, _src) in enumerate(parsed):
+            progress.counter("js/ts: analysing", scan_n, len(parsed))
             consts = consts_by_mod.get(module) or {}
             routers = routers_by_mod.get(module) or {}
             clients = clients_by_mod.get(module) or {}
