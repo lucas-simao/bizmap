@@ -21,6 +21,7 @@
       more: "more", hiddenRoutes: "Routes not drawn", hiddenFuncs: "Functions not drawn",
       clickToShow: "click one to draw it",
       filterBanner: "Table {t}: {e} routes/jobs and {f} functions; {s} services read or write it.",
+      filterBanner1: "Table {t}: {e} routes/jobs and {f} functions; 1 service reads or writes it.",
       filterBannerHttp: "Called from {n} more services over HTTP.",
       filterBannerHttp1: "Called from 1 more service over HTTP.",
       noUsers: "Nothing reads or writes this table.",
@@ -47,6 +48,7 @@
       more: "a mais", hiddenRoutes: "Rotas não desenhadas", hiddenFuncs: "Funções não desenhadas",
       clickToShow: "clique numa para desenhá-la",
       filterBanner: "Tabela {t}: {e} rotas/jobs e {f} funções; {s} serviços leem ou escrevem nela.",
+      filterBanner1: "Tabela {t}: {e} rotas/jobs e {f} funções; 1 serviço lê ou escreve nela.",
       filterBannerHttp: "Chamada por mais {n} serviços via HTTP.",
       filterBannerHttp1: "Chamada por mais 1 serviço via HTTP.",
       noUsers: "Nada lê nem escreve nesta tabela.",
@@ -492,7 +494,7 @@
     });
     var banner = $("banner");
     banner.style.display = "block";
-    banner.innerHTML = esc(fmt(L.filterBanner, { t: N[t][2], e: R.entrypoints.size, f: R.functions.size, s: dataSvcs.size }) +
+    banner.innerHTML = esc(fmt(dataSvcs.size === 1 ? L.filterBanner1 : L.filterBanner, { t: N[t][2], e: R.entrypoints.size, f: R.functions.size, s: dataSvcs.size }) +
       (httpSvcs.size ? " " + fmt(httpSvcs.size === 1 ? L.filterBannerHttp1 : L.filterBannerHttp, { n: httpSvcs.size }) : "")) +
       (hidden ? " <span class=muted>(+" + hidden + " " + L.more + ")</span>" : "") +
       ' <button class="link" id="clear-filter">' + esc(L.clearFilter) + "</button>";

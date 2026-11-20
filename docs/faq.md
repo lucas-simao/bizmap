@@ -72,7 +72,8 @@ It is versioned (`version` in the JSON) and documented in
 minor versions; breaking changes are called out in the
 [changelog](https://github.com/lucas-simao/bizmap/blob/main/CHANGELOG.md).
 
-## Is an HTML view coming?
+## Is there an HTML view?
 
-Yes: `bizmap export --format html` is planned for 0.5.0 —
-see [export (coming soon)](commands/export.md).
+Yes, since 0.5.0: `bizmap export --format html` writes one self-contained,
+offline page (services first, click to expand, search, filter by table) —
+see [export](commands/export.md).
