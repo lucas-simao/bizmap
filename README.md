@@ -167,6 +167,8 @@ and marks those links `inferred`. Details: [docs/how-it-works.md](docs/how-it-wo
   (`target_not_scanned`, `base_unknown`, `path_dynamic`, `client_unknown`).
 - **Deterministic.** Byte-identical output for identical input, checked in CI across
   hash seeds; every bundled example has a golden snapshot.
+- **Static means static.** SQL rewritten at runtime (`sql.replace(...)`,
+  `.format()` with runtime values) is read as written in the source.
 - **No AI in the core, ever.** Models are welcome as *clients* of the graph (MCP is on
   the roadmap), not as its authors.
 

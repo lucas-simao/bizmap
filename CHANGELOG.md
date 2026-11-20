@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **Go client base from config structs and constructor parameters**: a
+  struct base field (`baseURL`) assigned `cfg.ReportAPIURL`, where the config
+  struct field has an `env:"X"` / `envconfig:"X"` tag (or is populated with
+  `os.Getenv("X")` in some literal), resolves to `{X}`; a base assigned from a
+  constructor parameter takes the value every call site passes when they
+  agree. `{X}` then selects the service in `services:` (`inferred`), instead
+  of a generic `{base}`.
+
 - **Python package re-exports**: names re-exported by a package's
   `__init__.py` (`from .crop import f`, `from .resize import *`, chained
   barrels) resolve to the defining module, for `from pkg import f` and
@@ -227,6 +235,10 @@
   dispatch pass resolved imports with the last module's import map.)
 
 ### Known issues
+
+- SQL rewritten at runtime (`sql.replace("old", "new")`, `str.format` with
+  runtime values) is analyzed as written in the source; static analysis does
+  not follow the rewrite.
 
 - The older object-dispatch resolver links `obj.query()` to every function
   stored in a `query` field even when `obj` is annotated with an unrelated

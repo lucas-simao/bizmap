@@ -2525,11 +2525,85 @@ class GoAnalyzer:
                 return found
         return ""
 
+    def _config_field_envs(self, infos: list[_FileInfo]) -> dict[tuple[str, str, str], str]:
+        """(import path, struct, field) → env var: struct tags (`env:"X"`,
+        `envconfig:"X"`) and composite literals assigning `os.Getenv("X")`."""
+        out: dict[tuple[str, str, str], str] = {}
+        tag_re = re.compile(r'(?:env|envconfig)\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)')
+        for info in infos:
+            for spec in walk(info.tree):
+                if spec.type != "type_spec":
+                    continue
+                sname = text(spec.child_by_field_name("name"))
+                typ = spec.child_by_field_name("type")
+                if not sname or typ is None or typ.type != "struct_type":
+                    continue
+                for fd in walk(typ):
+                    if fd.type != "field_declaration":
+                        continue
+                    tag = fd.child_by_field_name("tag")
+                    m = tag_re.search(text(tag)) if tag is not None else None
+                    if not m:
+                        continue
+                    for ident in fd.named_children:
+                        if ident.type in {"field_identifier", "identifier"}:
+                            out[(info.import_path, sname, text(ident))] = m.group(1)
+            for node in walk(info.tree):
+                if node.type != "composite_literal":
+                    continue
+                gtype = _parse_type(
+                    node.child_by_field_name("type"), info.package, info.import_path, info.import_aliases
+                )
+                body = next((c for c in node.named_children if c.type == "literal_value"), None)
+                if gtype is None or body is None:
+                    continue
+                for elem in body.named_children:
+                    key_n = elem.child_by_field_name("key")
+                    val_n = elem.child_by_field_name("value")
+                    if key_n is None or val_n is None:
+                        continue
+                    res = _resolve_expr(
+                        _unwrap_literal(val_n) or val_n,
+                        info.consts,
+                        info.consts,
+                        info.import_aliases,
+                    )
+                    ph = res.placeholder or ""
+                    if ph.startswith("{") and ph.endswith("}") and ph[1:-1].isupper():
+                        out.setdefault(
+                            (gtype.import_path or info.import_path, gtype.name, text(_unwrap_literal(key_n) or key_n)),
+                            ph[1:-1],
+                        )
+        return out
+
     def _struct_http_bases(
         self, infos: list[_FileInfo], idx: _Indexes
     ) -> dict[tuple[str, str, str], ResolvedString]:
-        """Resolve Client.baseURL from composite literals / env / const."""
+        """Resolve Client.baseURL from composite literals / env / const /
+        config structs (`cfg.ReportAPIURL` with an env tag) / constructor
+        parameters bound at every call site."""
         out: dict[tuple[str, str, str], ResolvedString] = {}
+        config_envs = self._config_field_envs(infos)
+        # (ctor import path, ctor name, param) → base keys fed by that param
+        pending: dict[tuple[str, str, str], list[tuple[str, str, str]]] = {}
+
+        def resolve_value(val: Node, fn: GoFunction | None, info: _FileInfo) -> ResolvedString:
+            val = _unwrap_literal(val) or val
+            if val.type == "selector_expression" and fn is not None:
+                operand = val.child_by_field_name("operand")
+                field_n = val.child_by_field_name("field")
+                if operand is not None and field_n is not None and operand.type == "identifier":
+                    gtype = fn.params.get(text(operand))
+                    if gtype is None:
+                        gtype = self._local_types(fn, info, idx).get(text(operand))
+                    if gtype is not None:
+                        env_name = config_envs.get(
+                            (gtype.import_path or fn.import_path, gtype.name, text(field_n))
+                        )
+                        if env_name:
+                            return ResolvedString(None, False, True, placeholder="{" + env_name + "}")
+            return _resolve_expr(val, info.consts, info.consts, info.import_aliases, idx.consts_by_import)
+
         for info in infos:
             dummy = self._synthetic_func(info, info.tree, "_http_base")
             for node in walk(info.tree):
@@ -2558,12 +2632,44 @@ class GoAnalyzer:
                     field = text(key_n)
                     if field.lower() not in HTTP_BASE_FIELD_NAMES:
                         continue
-                    resolved = _resolve_expr(
-                        val_n, info.consts, info.consts, info.import_aliases, idx.consts_by_import
-                    )
+                    fn = self._enclosing(info, node)
+                    key = (gtype.import_path or info.import_path, gtype.name, field)
+                    val_u = _unwrap_literal(val_n) or val_n
+                    if val_u.type == "identifier" and fn is not None and text(val_u) in fn.params:
+                        # &ReportClient{baseURL: baseURL} inside NewReportClient(baseURL string)
+                        pending.setdefault((fn.import_path, fn.name, text(val_u)), []).append(key)
+                        continue
+                    resolved = resolve_value(val_n, fn, info)
                     if resolved.usable:
-                        out[(gtype.import_path or info.import_path, gtype.name, field)] = resolved
+                        out[key] = resolved
             _ = dummy
+        if pending:
+            seen: dict[tuple[str, str, str], set[str]] = {}
+            values: dict[tuple[str, str, str], ResolvedString] = {}
+            for info in infos:
+                for fn in info.functions:
+                    for node in walk(fn.node):
+                        if node.type != "call_expression":
+                            continue
+                        callee = self._resolve_callee(node, fn, info, idx)
+                        if callee is None:
+                            continue
+                        order = [p for p in callee.params if p != callee.receiver_var]
+                        args = call_args(node)
+                        for i, pname in enumerate(order):
+                            pkey = (callee.import_path, callee.name, pname)
+                            if pkey not in pending or i >= len(args):
+                                continue
+                            res = resolve_value(args[i], fn, info)
+                            label = res.path_text if res.usable else ""
+                            seen.setdefault(pkey, set()).add(label)
+                            if res.usable:
+                                values[pkey] = res
+            for pkey, keys in pending.items():
+                labels = seen.get(pkey) or set()
+                if len(labels) == 1 and "" not in labels and pkey in values:
+                    for key in keys:
+                        out.setdefault(key, values[pkey])
         return out
 
     def _record_http_helper_call(
