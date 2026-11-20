@@ -62,9 +62,11 @@ def test_minified_heuristic() -> None:
         long_line = _write(root, "b.js", "x=" + "1+" * 1500 + "1;\n")
         mapped = _write(root, "c.js", "x = 1;\n//# sourceMappingURL=c.js.map\n")
         ts = _write(root, "d.ts", "x=" + "1+" * 1500 + "1;\n")
+        spaced = _write(root, "e.js", "const q = " + " + ".join(["'x'"] * 3000) + ";\n")
         assert not looks_generated(normal)
         assert looks_generated(long_line) and looks_generated(mapped)
         assert not looks_generated(ts)  # only JS bundles are checked
+        assert not looks_generated(spaced)  # long but not minified: it keeps its spaces
 
 
 def test_gitignore_rules(tmp_path: Path) -> None:

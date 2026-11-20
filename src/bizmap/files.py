@@ -70,11 +70,15 @@ def looks_generated(path: Path) -> bool:
     if b"sourceMappingURL=" in tail:
         return True
     lines = head.split(b"\n")
-    if not lines:
+    if not lines or len(head) < 2000:
         return False
     longest = max(len(line) for line in lines)
     average = len(head) / len(lines)
-    return longest >= 2000 or (average >= 300 and len(head) >= 2000)
+    # minifiers drop whitespace; a long hand-written/generated source line
+    # (`'a' + 'b' + …`) keeps its spaces
+    blanks = sum(head.count(c) for c in (b" ", b"\t", b"\n", b"\r"))
+    sparse = blanks / len(head) < 0.06
+    return sparse and (longest >= 2000 or average >= 300)
 
 
 def _glob_regex(pattern: str) -> re.Pattern[str]:
@@ -177,8 +181,13 @@ class WalkOptions:
     gitignore: bool = True
     skip_generated: bool = True
     stats: dict[str, int] = field(default_factory=dict)
+    _seen: set[tuple[str, str]] = field(default_factory=set, repr=False)
 
-    def bump(self, key: str) -> None:
+    def bump(self, key: str, rel_posix: str) -> None:
+        """Count a skipped path once, however many walks (one per language) see it."""
+        if (key, rel_posix) in self._seen:
+            return
+        self._seen.add((key, rel_posix))
         self.stats[key] = self.stats.get(key, 0) + 1
 
     def included(self, name: str, rel_posix: str) -> bool:
@@ -298,10 +307,10 @@ def iter_files(
             if d in SKIP_DIR_NAMES:
                 continue
             if opts.skip_generated and d in GENERATED_DIR_NAMES:
-                opts.bump("generated_dirs")
+                opts.bump("generated_dirs", d_rel)
                 continue
             if opts.gitignore and ignore.ignored((prefix + "/" + d_rel).strip("/") if prefix else d_rel, True):
-                opts.bump("gitignored")
+                opts.bump("gitignored", d_rel)
                 continue
             kept.append(d)
         dirnames[:] = kept
@@ -316,12 +325,12 @@ def iter_files(
                 out.append(path)
                 continue
             if opts.gitignore and ignore.ignored((prefix + "/" + rel_posix).strip("/") if prefix else rel_posix, False):
-                opts.bump("gitignored")
+                opts.bump("gitignored", rel_posix)
                 continue
             if opts.skip_generated and (
                 any(fnmatch.fnmatch(name, g) for g in GENERATED_FILE_GLOBS) or looks_generated(path)
             ):
-                opts.bump("generated_files")
+                opts.bump("generated_files", rel_posix)
                 continue
             out.append(path)
     return sorted(out)
