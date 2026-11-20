@@ -3887,7 +3887,9 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                         return field_targets[name_]
                 return set()
 
-            def _roster_classes(expr: Node | None) -> set[str]:
+            def _roster_classes(
+                expr: Node | None, module: str = module, imap: ImportMap = imap
+            ) -> set[str]:
                 """Classes of a roster expression: `SECTIONS`, `cfg.SECTIONS`,
                 `SECTIONS[i]`, `SECTIONS.values()`."""
                 if expr is None:
