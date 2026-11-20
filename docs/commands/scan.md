@@ -34,7 +34,7 @@ bizmap scan --discover ~/work --list         # what would be scanned, and why
 | `-v`, `--verbose` | List every unresolved HTTP call and warning (default: counts and the top 10). |
 | `-q`, `--quiet` | No progress lines on stderr (they only appear for scans longer than a few seconds). |
 | `--profile` | Print phase timings (parse, resolve, sql, propagate) to stderr. |
-| `--discover DIR` | Find the git repos under `DIR` and scan them jointly. With it: `--list`, `--json`, `--depth N`, `--include GLOB`, `--prefer PATH`. See [scan --discover](../discover.md). |
+| `--discover [DIR]` | Find the git repos under `DIR` (default: the current folder) and scan them jointly. With it: `--list`, `--json`, `--depth N`, `--include GLOB`, `--prefer PATH`. See [scan --discover](../discover.md). |
 
 ## What it prints
 
