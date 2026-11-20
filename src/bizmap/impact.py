@@ -353,10 +353,15 @@ def _schema_changes(
                 continue
             table = found[-1].group(1).replace('"', "").split(".")[-1].lower()
             text = lines[ln - 1]
-            cm = _SQL_ADD_COLUMN.search(text) or _SQL_COLUMN_DEF.match(text)
-            if cm is None or cm.group(1).lower() in _SQL_NOT_COLUMN:
+            # `ALTER TABLE orders ADD COLUMN note`: skip the `ALTER TABLE` match
+            names = [m.group(1) for m in _SQL_ADD_COLUMN.finditer(text)]
+            cm = _SQL_COLUMN_DEF.match(text)
+            if cm is not None:
+                names.append(cm.group(1))
+            col = next((n for n in names if n.lower() not in _SQL_NOT_COLUMN), None)
+            if col is None:
                 continue
-            for cid in by_name.get((table, cm.group(1).lower()), []):
+            for cid in by_name.get((table, col.lower()), []):
                 if cid in seen:
                     continue
                 seen.add(cid)
