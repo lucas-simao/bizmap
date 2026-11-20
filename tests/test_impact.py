@@ -116,3 +116,98 @@ def test_markdown_and_cli(tmp_path: Path) -> None:
     assert res.exit_code == 0, res.output
     data = json.loads(res.output)
     assert len(data["functions"]) == 1 and data["writes"]
+
+
+EXAMPLES = ["checkout", "clinic", "pyplatform", "shop"]
+
+
+def _spanless(graph) -> list[str]:
+    out = []
+    for node in graph.nodes.values():
+        if node.type != "function":
+            continue
+        ev = node.attrs.get("evidence") or {}
+        if not ev.get("file"):
+            continue
+        start = node.attrs.get("start_line") or ev.get("line")
+        end = node.attrs.get("end_line")
+        if not (isinstance(end, int) and isinstance(start, int) and start <= end):
+            out.append(f"{node.id} ({ev.get('file')}:{ev.get('line')})")
+    return sorted(out)
+
+
+def test_every_function_with_evidence_has_a_span() -> None:
+    """Inline handlers, closures, module pseudo-functions and SQL functions
+    included: a diff inside any of them must map to a node."""
+    missing = {}
+    for name in EXAMPLES:
+        bad = _spanless(scan_path(ROOT / "examples" / name))
+        if bad:
+            missing[name] = bad
+    assert missing == {}, missing
+
+
+def _scan(tmp_path: Path, files: dict[str, str]):
+    for rel, body in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+    return scan_path(tmp_path)
+
+
+def test_inline_handlers_and_closures_map(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "web/server.ts": (
+                "import express from 'express';\n"          # 1
+                "import { db } from './db';\n"               # 2
+                "const router = express.Router();\n"         # 3
+                "router.get('/v1/progress', async (req, res) => {\n"  # 4
+                "  const rows = await db.query('SELECT id FROM progress');\n"  # 5
+                "  res.json(rows);\n"                        # 6
+                "});\n"                                      # 7
+                "router.post(\n"                             # 8
+                "  '/v1/progress',\n"                        # 9
+                "  async (req, res) => {\n"                  # 10
+                "    res.json({});\n"                        # 11
+                "  },\n"                                     # 12
+                ");\n"                                       # 13
+                "export default router;\n"                   # 14
+            ),
+            "web/db.ts": "export const db = { query: async (q: string) => [] };\n",
+            "svc/main.go": (
+                "package main\n"                             # 1
+                "\n"                                         # 2
+                'import "github.com/labstack/echo/v4"\n'     # 3
+                "\n"                                         # 4
+                "func main() {\n"                            # 5
+                "\te := echo.New()\n"                        # 6
+                '\te.GET("/x", func(c echo.Context) error {\n'  # 7
+                '\t\treturn c.String(200, "ok")\n'           # 8
+                "\t})\n"                                     # 9
+                '\te.Start(":8080")\n'                       # 10
+                "}\n"                                        # 11
+            ),
+            "svc/go.mod": "module svc\n",
+            "db/migrations/0001.sql": (
+                "CREATE TABLE progress (id int primary key, n int);\n"  # 1
+                "CREATE FUNCTION bump() RETURNS trigger AS $$\n"         # 2
+                "BEGIN\n"                                                # 3
+                "  UPDATE progress SET n = n + 1;\n"                     # 4
+                "  RETURN NEW;\n"                                        # 5
+                "END;\n"                                                 # 6
+                "$$ LANGUAGE plpgsql;\n"                                 # 7
+            ),
+        },
+    )
+    assert _spanless(graph) == []
+
+    def hit(path: str, line: int) -> list[str]:
+        return [f.function for f in compute_impact(graph, _diff(path, line)).functions]
+
+    assert any("GET /v1/progress" in f for f in hit("web/server.ts", 6)), hit("web/server.ts", 6)
+    assert any("POST /v1/progress" in f for f in hit("web/server.ts", 11)), hit("web/server.ts", 11)
+    go = hit("svc/main.go", 8)
+    assert go and all("main" in f for f in go), go
+    assert hit("db/migrations/0001.sql", 4) == ["function:sql.bump"], hit("db/migrations/0001.sql", 4)

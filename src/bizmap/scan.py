@@ -44,6 +44,7 @@ from bizmap.http_match import (
 from bizmap.overrides import ScanConfig, apply_overrides, load_scan_config
 from bizmap.registry import merge_graphs
 from bizmap.schema_replay import Schema, replay_files
+from bizmap.spans import fill_spans
 from bizmap.sql_analyze import (
     SqlAccess,
     analyze_sql,
@@ -2163,6 +2164,7 @@ def _scan_one(
     _link_firestore_triggers(graph)
     if cfg.path:
         apply_overrides(graph, cfg.path)
+    fill_spans(graph, root)
     timings.propagate += go_prop + py_prop + (time.perf_counter() - t_prop)
 
     if profile:
