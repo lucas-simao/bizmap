@@ -32,7 +32,7 @@ def test_summary_is_counts_plus_top_10() -> None:
     calls = [line for line in lines if line.startswith("  GET ")]
     assert len(calls) == 10
     assert all(len(line) <= 112 for line in calls), calls  # long/minified fragments are shortened
-    assert "27 more distinct calls (use --verbose" in text
+    assert "28 more distinct calls (use --verbose" in text
     assert sum(1 for line in lines if line.startswith("warning: ")) == 10 and "4 more warnings" in text
     assert text.startswith("skipped: 3 generated dirs, 12 generated/minified files")
     assert len(lines) < 30
@@ -40,7 +40,7 @@ def test_summary_is_counts_plus_top_10() -> None:
 
 def test_verbose_lists_everything() -> None:
     lines = scan_summary(_graph_with_unresolved(1300), verbose=True)
-    assert sum(1 for line in lines if line.startswith("  GET ")) == 37
+    assert sum(1 for line in lines if line.startswith("  GET ")) == 38
     assert sum(1 for line in lines if line.startswith("warning: ")) == 14
     assert any(len(line) > 300 for line in lines)  # not shortened
 
