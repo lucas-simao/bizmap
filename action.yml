@@ -23,7 +23,7 @@ inputs:
     description: Python used to run BizMap.
     default: "3.12"
   github-token:
-    description: Token for the comment (needs `pull-requests: write`).
+    description: "Token for the comment (needs `pull-requests: write`)."
     default: ${{ github.token }}
 outputs:
   markdown:
