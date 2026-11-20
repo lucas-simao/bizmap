@@ -33,7 +33,9 @@ def index_deep_tree(root: Node, threshold: int = DEEP_TREE) -> bool:
         if depth > threshold:
             deep = True
             break
-        stack.extend((c, depth + 1) for c in cur.children)
+        named = cur.named_children  # tokens never make a tree deeper by more than one
+        if named:
+            stack.extend((c, depth + 1) for c in named)
     if not deep:
         return False
     _PARENT[_key(root)] = None

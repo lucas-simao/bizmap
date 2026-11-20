@@ -1057,6 +1057,7 @@ class JsAnalyzer:
             factories_by_mod[module] = _collect_client_factories(tree, consts)
             class_ctors_by_mod[module] = _collect_class_ctors(tree)
             trees_by_mod[module] = tree
+            file_quals: list[str] = []  # functions this file declares (fn_nodes keeps growing)
             for node in typed_walk(tree, _DECL_TYPES, JS_TYPES):
                 # declarations only: a named function *expression* is registered
                 # through its binding below (its own name is not in scope here)
@@ -1068,6 +1069,7 @@ class JsAnalyzer:
                         analysis.functions[qual] = (rel_file, line_of(node))
                         analysis.function_ends[qual] = node.end_point[0] + 1
                         fn_nodes[qual] = node
+                        file_quals.append(qual)
                         why = _js_why(node)
                         if why:
                             analysis.function_why[qual] = why
@@ -1092,6 +1094,7 @@ class JsAnalyzer:
                         analysis.functions[qual] = (rel_file, line_of(node))
                         analysis.function_ends[qual] = node.end_point[0] + 1
                         fn_nodes[qual] = value
+                        file_quals.append(qual)
                         why = _js_why(value)
                         if why:
                             analysis.function_why[qual] = why
@@ -1109,6 +1112,7 @@ class JsAnalyzer:
                             analysis.functions[qual] = (rel_file, line_of(value))
                             analysis.function_ends[qual] = value.end_point[0] + 1
                             fn_nodes[qual] = value
+                            file_quals.append(qual)
                             why = _js_why(value)
                             if why:
                                 analysis.function_why[qual] = why
@@ -1118,8 +1122,8 @@ class JsAnalyzer:
                             )
             # calls to helpers declared in an enclosing function's scope
             fn_by_span = {
-                (n.start_byte, n.end_byte): q
-                for q, n in fn_nodes.items()
+                (fn_nodes[q].start_byte, fn_nodes[q].end_byte): q
+                for q in file_quals
                 if q.startswith(module + ".") and analysis.functions.get(q, ("",))[0] == rel_file
             }
             for node in typed_walk(tree, frozenset({"call_expression"}), JS_TYPES):
