@@ -248,3 +248,84 @@ func (s *Service) Sync(id string) error {
     assert [(e.to_id, e.confidence.value) for e in edges] == [
         ("api/entrypoint:http:GET:/api/v1/client/org/settings/users/:id/history", "inferred")
     ], ([e.id for e in edges], graph.attrs.get("unresolved_http"))
+
+
+def test_go_struct_field_base_from_config_env_tag_and_ctor_param(tmp_path: Path) -> None:
+    worker, reports, other = tmp_path / "worker", tmp_path / "reports", tmp_path / "other"
+    _write(tmp_path, "bizmap.yaml", "services:\n  reports:\n    env: REPORT_API_URL\n")
+    route = """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.get('/v1/reports/:id', h);
+app.get('/v1/exports/:id', h);
+"""
+    _write(reports, "server.ts", route)
+    _write(other, "server.ts", route)  # same paths elsewhere: only the env can disambiguate
+    _write(worker, "go.mod", "module worker\n\ngo 1.22\n")
+    _write(
+        worker,
+        "config/config.go",
+        """
+package config
+
+type Config struct {
+    ReportAPIURL string `env:"REPORT_API_URL,required"`
+    Port         int    `env:"PORT"`
+}
+""",
+    )
+    _write(
+        worker,
+        "clients/report.go",
+        """
+package clients
+
+import (
+    "net/http"
+    "os"
+
+    "worker/config"
+)
+
+type ReportClient struct {
+    baseURL string
+    http    *http.Client
+}
+
+func NewReportClient(cfg config.Config) *ReportClient {
+    return &ReportClient{baseURL: cfg.ReportAPIURL, http: http.DefaultClient}
+}
+
+func (c *ReportClient) Get(id string) (*http.Response, error) {
+    return c.http.Get(c.baseURL + "/v1/reports/" + id)
+}
+
+type ExportClient struct {
+    baseURL string
+}
+
+func NewExportClient(baseURL string) *ExportClient {
+    return &ExportClient{baseURL: baseURL}
+}
+
+func (c *ExportClient) Get(id string) (*http.Response, error) {
+    return http.Get(c.baseURL + "/v1/exports/" + id)
+}
+
+func Wire(cfg config.Config) (*ExportClient, *ExportClient) {
+    return NewExportClient(os.Getenv("REPORT_API_URL")), NewExportClient(cfg.ReportAPIURL)
+}
+""",
+    )
+    graph = scan_paths([worker, reports, other], config=tmp_path / "bizmap.yaml")
+    for fn, ep in (
+        ("clients.ReportClient.Get", "reports/entrypoint:http:GET:/v1/reports/:id"),
+        ("clients.ExportClient.Get", "reports/entrypoint:http:GET:/v1/exports/:id"),
+    ):
+        edges = _calls_http(graph, fn)
+        assert [(e.to_id, e.confidence.value) for e in edges] == [(ep, "inferred")], (
+            fn,
+            [e.id for e in edges],
+            [u for u in graph.attrs.get("unresolved_http") or [] if fn.split(".")[-2] in str(u.get("from"))],
+        )
