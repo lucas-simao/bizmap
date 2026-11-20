@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Inline Express handlers that touch the same column**: each handler gets its
+  own edges. SQL inside an inline handler is now attributed to it when the
+  handler is detected (every site), instead of moving the module's single
+  merged edge afterwards, which left the second handler without it.
+
 ## 0.3.6 — 2026-11-20
 
 First version published to PyPI by `.github/workflows/release.yml` (Trusted

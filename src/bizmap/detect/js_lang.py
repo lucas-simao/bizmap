@@ -793,6 +793,8 @@ class JsRoute:
     # every file is indexed (default exports, namespaces, barrels)
     handler_ref: tuple[str, ...] | None = None
     module: str | None = None
+    # lines of an inline (anonymous) handler, to give it the SQL inside
+    span: tuple[int, int] | None = None
 
 
 @dataclass
@@ -1169,6 +1171,7 @@ class JsAnalyzer:
                 analysis, tree, rel_file, module, consts, routers, imports_by_mod.get(module) or {}
             )
         _resolve_route_handlers(analysis, import_specs_by_mod, exports_by_mod, set(trees_by_mod), fn_nodes)
+        _attribute_inline_handler_sites(analysis)
         _bind_param_bases(analysis, fn_nodes)
         return analysis
 
@@ -1245,6 +1248,12 @@ class JsAnalyzer:
                         handler_qual=handler_qual,
                         handler_ref=handler_ref,
                         module=module,
+                        span=(
+                            (handler_node.start_point[0] + 1, handler_node.end_point[0] + 1)
+                            if handler_node is not None
+                            and handler_node.type in {"arrow_function", "function", "function_expression"}
+                            else None
+                        ),
                     )
                     analysis.routes.append(route)
                     self._scan_handler(
@@ -2633,6 +2642,27 @@ def _export_sources(
             found |= _export_sources(star, name, exports_by_mod, known, depth + 1)
         return found
     return set()
+
+
+def _attribute_inline_handler_sites(analysis: JsAnalysis) -> None:
+    """SQL / table / collection accesses inside an inline route handler
+    (`app.post('/x', async (req, res) => {...})`) belong to that handler, not
+    to `<module>.module`: every site, so two handlers touching the same column
+    each get their edge."""
+    spans: dict[str, list[tuple[int, int, str]]] = {}
+    for route in analysis.routes:
+        if route.span and route.method != "USE":
+            spans.setdefault(route.file, []).append((route.span[0], route.span[1], route.handler))
+    if not spans:
+        return
+    for items in (analysis.sql_sites, analysis.table_accesses, analysis.accesses, analysis.rpc_calls):
+        for item in items:
+            symbol = getattr(item, "symbol", "")
+            if not isinstance(symbol, str) or not symbol.endswith(".module"):
+                continue
+            inside = [sp for sp in spans.get(getattr(item, "file", ""), []) if sp[0] <= getattr(item, "line", 0) <= sp[1]]
+            if inside:
+                item.symbol = min(inside, key=lambda sp: sp[1] - sp[0])[2]
 
 
 def _resolve_route_handlers(

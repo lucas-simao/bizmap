@@ -1401,3 +1401,34 @@ def test_inline_handler_has_column_edges_without_table_copies(tmp_path: Path) ->
     targets = {(e.type, e.to_id) for e in graph.edges.values() if e.from_id == handler and e.type in {"reads", "writes"}}
     assert ("writes", "column:customers.email") in targets, targets
     assert not [t for t in targets if t[1] == "table:customers"], targets
+
+
+def test_inline_handlers_sharing_a_column_each_get_their_edges(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/schema.sql": "CREATE TABLE orders (id int primary key, status text, note text);\n",
+            "svc/server.ts": (
+                "import express from 'express';\nimport { Pool } from 'pg';\n"
+                "const app = express();\nconst pool = new Pool();\n"
+                "app.post('/b/:id', async (req, res) => { await pool.query(\"UPDATE orders SET status = 'y' WHERE id = $1\", [1]); res.end(); });\n"
+                "app.post('/c/:id', async (req, res) => { await pool.query(\"UPDATE orders SET status = 'z' WHERE id = $1\", [1]); res.end(); });\n"
+                "app.post('/d/:id', async (req, res) => { await pool.query('SELECT status FROM orders WHERE id = $1', [1]); res.end(); });\n"
+            ),
+        },
+    )
+
+    def data(path: str) -> set[tuple[str, str]]:
+        ep = f"entrypoint:http:POST:{path}"
+        h = next(e.to_id for e in graph.edges.values() if e.type == "triggers" and e.from_id == ep)
+        return {(e.type, e.to_id) for e in graph.edges.values() if e.from_id == h and e.type in {"reads", "writes"}}
+
+    for path in ("/b/:id", "/c/:id"):
+        got = data(path)
+        assert ("writes", "column:orders.status") in got and ("reads", "column:orders.id") in got, (path, got)
+    got = data("/d/:id")
+    assert ("reads", "column:orders.status") in got and ("reads", "column:orders.id") in got, got
+    for path in ("/b/:id", "/c/:id", "/d/:id"):
+        ep = f"entrypoint:http:POST:{path}"
+        assert any(e.from_id == ep and e.to_id == "table:orders" for e in graph.edges.values()), path
+    assert not [e for e in graph.edges.values() if e.from_id == "function:svc.server.module" and e.type in {"reads", "writes"}]
