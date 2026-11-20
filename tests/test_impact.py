@@ -1321,9 +1321,9 @@ def test_schema_ops_multi_alter_drop_rename_and_new_table(tmp_path: Path) -> Non
 
 def test_rename_column_applies_to_schema(tmp_path: Path) -> None:
     graph = _scan(tmp_path, SCHEMA_APP)
-    cols = {(n.attrs.get("table"), n.attrs.get("name")) for n in graph.nodes.values()
-            if n.type == "column" and not n.attrs.get("external")}
-    assert ("customers", "full_name") in cols and ("customers", "name") not in cols, sorted(cols)
+    cols = graph.schema["tables"]["customers"]["columns"]
+    names = set(cols) if isinstance(cols, dict) else {c["name"] for c in cols}
+    assert "full_name" in names and "name" not in names and "updated_at" not in names, sorted(names)
 
 
 def test_punctuation_only_line_is_not_a_change(tmp_path: Path) -> None:
