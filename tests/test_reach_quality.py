@@ -364,3 +364,19 @@ def test_factory_arguments_bring_their_data(tmp_path: Path) -> None:
     assert handlers == {"function:api.streamEvents", "function:api.visibleTo"}, handlers
     reads = {e.to_id for e in graph.edges.values() if e.type == "reads" and e.from_id == route}
     assert any("events" in t for t in reads), reads
+
+
+def test_js_calls_resolved_by_name_are_exact(tmp_path: Path) -> None:
+    _w(tmp_path, "package.json", "{}\n")
+    _w(tmp_path, "src/util.ts", "export function fmt(x: number) { return String(x); }\n")
+    _w(
+        tmp_path,
+        "src/page.ts",
+        "import { fmt } from './util';\n"
+        "function local(x: number) { return x + 1; }\n"
+        "export function show(x: number) { return fmt(local(x)); }\n",
+    )
+    graph = scan_path(tmp_path)
+    calls = {(e.from_id, e.to_id): e.confidence.value for e in graph.edges.values() if e.type == "calls"}
+    assert calls[("function:src.page.show", "function:src.util.fmt")] == "exact", calls
+    assert calls[("function:src.page.show", "function:src.page.local")] == "exact", calls

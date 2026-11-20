@@ -1269,7 +1269,8 @@ class GoAnalyzer:
         self._yaml_constants = constants or {}
         infos: list[_FileInfo] = []
         t_parse = time.perf_counter()
-        for path in files:
+        for parsed_n, path in enumerate(files):
+            progress.counter("go: parsing", parsed_n, len(files))
             source = path.read_bytes()
             tree = self._parser.parse(source).root_node
             pkg_node = next((c for c in tree.named_children if c.type == "package_clause"), None)
@@ -1355,7 +1356,8 @@ class GoAnalyzer:
         consts_by_package: dict[str, dict[str, ResolvedString]] = {}
         for info in infos:  # file order, as before: later files win on duplicates
             consts_by_package.setdefault(info.import_path, {}).update(info.consts)
-        for info in infos:
+        for prefix_n, info in enumerate(infos):
+            progress.counter("go: route prefixes", prefix_n, len(infos))
             package_consts = dict(consts_by_package[info.import_path])
             consts_by_info[info.rel] = package_consts
             for fn in info.functions:
@@ -1366,7 +1368,7 @@ class GoAnalyzer:
 
         for done_files, info in enumerate(infos):
             package_consts = consts_by_info[info.rel]
-            progress.status(f"go: {done_files}/{len(infos)} files analysed")
+            progress.counter("go: analysing", done_files, len(infos))
 
             for fn in info.functions:
                 env = dict(package_consts)
@@ -3127,7 +3129,8 @@ class GoAnalyzer:
         return None
 
     def _collect_func_field_bindings(self, infos: list[_FileInfo], idx: _Indexes) -> None:
-        for info in infos:
+        for bind_n, info in enumerate(infos):
+            progress.counter("go: field bindings", bind_n, len(infos))
             for fn in info.functions:
                 for node in typed_walk(fn.node, _LITERALS):
                     lit = node

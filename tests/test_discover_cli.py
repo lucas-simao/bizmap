@@ -107,3 +107,10 @@ def test_prefer_warning_goes_to_stderr(work: Path, tmp_path: Path) -> None:
     )
     assert res.exit_code == 0
     assert "warning: --prefer 'nope' matches none" in res.output
+
+
+def test_discover_without_a_value_uses_the_current_directory(work: Path, monkeypatch) -> None:
+    monkeypatch.chdir(work)
+    res = CliRunner().invoke(main, ["scan", "--discover", "--list"])
+    assert res.exit_code == 0, res.output
+    assert "2 project(s) to scan: orders, shop" in res.output

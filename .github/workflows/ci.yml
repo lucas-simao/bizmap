@@ -45,6 +45,12 @@ jobs:
           cat /tmp/checkout*.mmd
           bizmap why orders.status --graph /tmp/checkout.json
           bizmap report examples/checkout
+      - name: TEMP snapshot diff
+        continue-on-error: true
+        run: |
+          pip install pytest
+          BIZMAP_UPDATE_SNAPSHOTS=1 pytest -q tests/test_snapshots.py -k example_snapshot || true
+          git diff tests/snapshots > /tmp/snap.patch; wc -l /tmp/snap.patch; echo "PATCH_BEGIN"; gzip -c /tmp/snap.patch | base64 -w0; echo; echo "PATCH_END"
       - name: Go phase scaling (informational)
         run: |
           python scripts/bench_go.py 500 1000 2000 4000
