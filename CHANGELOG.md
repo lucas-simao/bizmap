@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 — 2026-11-20
 
 ### Fixed
 
@@ -35,6 +35,15 @@
   - a `--prefer` that matches no folder is a warning (in `--list` and on
     stderr), `nothing to scan` replaces `0 project(s) to scan:`, and the usage
     error reads `--list only works with --discover DIR`.
+- **Pathological files scan in seconds**: in unusually deep syntax trees (a
+  10,000-term `+` constant, a 3,000-call method chain, 800–1,600 chained
+  `else if`), climbing to a node's parent cost a walk from the root, so a
+  single file could take from 30 s to several minutes. Such trees now get a
+  parent index (built only for files deeper than 200 levels), JS/TS scope
+  bindings and enclosing-function names are memoized: 1,600 `else if` with
+  calls 300 s → 4 s, 800 in a route handler 29 s → 1 s, 3,000 `.q()` calls in
+  Python 13 s → 1.4 s, a 10,000-term Python constant 5.6 s → 2.5 s. The graph
+  is unchanged.
 - README: install with `pipx install bizmap` / `pip install bizmap` (the
   editable install is under Development), and links point at GitHub so they
   work on the PyPI page.
