@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.1 — 2026-11-20
+
+### Fixed
+
+- **Python phase is linear on large repos** (it was quadratic: a large
+  FastAPI monorepo ran for 20+ minutes). The HTTP and SQL-dict helper
+  collectors ran once per file over every function of the repo: they run once
+  per scan. Looking up a class's methods for each `obj.field()` call, the
+  candidates of each `from X import Y`, and the routers/blueprints an import
+  refers to no longer scan every function or module (name indexes and a
+  module-suffix index). During propagation the schema's table names are
+  computed once per schema, the callers of an origin function once per
+  origin, and each access's target once per access. Synthetic monorepo
+  (`scripts/bench_py.py`, 300 tables, 12 imports per module): 120 modules
+  40.1 s → 8.8 s on the same CI runner, 150 → 300 modules 2.06×; the graph is
+  byte-identical (checked against 0.5.0 at 30, 40 and 120 modules, and a
+  golden summary in the test suite).
+- **One bad SQL string no longer stops the scan**: a statement sqlglot
+  cannot take apart (e.g. `"UPDATE orders ..."` in a test, which crashed in
+  `_table_name`) yields no accesses; the scan summary reports how many were
+  skipped and the first one.
+- **`services:` hints**: only suggested when the env key's calls match routes
+  in that repo; with no match they are listed as `probably external` (e.g.
+  `SUPABASE_URL`). When the calls only match with a route prefix, the hint
+  includes it (`api: { env: VITE_API_URL, prefix: /api/v1 }`).
+- `pytest -m perf` has a Python scaling check (150 vs 300 modules).
+
 ## 0.5.0 — 2026-11-20
 
 ### Added

@@ -95,10 +95,16 @@ def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
         lines.append("hint: these env keys point at a scanned repo; add to bizmap.yaml so their calls link:")
         lines.append("  services:")
         for h in hints:
+            prefix = f", prefix: {h['prefix']}" if h.get("prefix") else ""
             lines.append(
-                f"    {h['repo']}: {{ env: {h['env']} }}   # {h['calls']} unmatched call(s), "
-                f"{h['matching']} match routes in {h['repo']} (add prefix: /api/... if the env holds one)"
+                f"    {h['repo']}: {{ env: {h['env']}{prefix} }}   # {h['calls']} unmatched call(s), "
+                f"{h['matching']} match routes in {h['repo']}"
             )
+    external = graph.attrs.get("external_envs") or []
+    if external:
+        shown = ", ".join(f"{e['env']} ({e['calls']})" for e in external[:8])
+        more = f" +{len(external) - 8} more" if len(external) > 8 else ""
+        lines.append(f"probably external (no scanned route matches their calls): {shown}{more}")
     if not unresolved:
         return lines
     reason_counts: dict[str, int] = {}

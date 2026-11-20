@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -346,22 +347,74 @@ def _lookup_app_factory(
     return None
 
 
+class _ModuleMatcher:
+    """Modules ``m`` with ``m == mod``, ``m`` ending in ``.mod`` or ``mod``
+    ending in ``.m``, in the order of ``modules`` — found through a suffix
+    index instead of comparing each import with every module."""
+
+    def __init__(self, modules: list[str]) -> None:
+        self.order = {m: i for i, m in enumerate(modules)}
+        self.by_suffix: dict[str, list[str]] = defaultdict(list)
+        for m in modules:
+            parts = m.split(".")
+            for i in range(len(parts)):
+                self.by_suffix[".".join(parts[i:])].append(m)
+        self._cache: dict[str, list[str]] = {}
+
+    def matches(self, mod: str) -> list[str]:
+        hit = self._cache.get(mod)
+        if hit is None:
+            found = set(self.by_suffix.get(mod, ()))  # m == mod or m ends with ".mod"
+            parts = mod.split(".")
+            for i in range(1, len(parts)):  # mod ends with ".m"
+                tail = ".".join(parts[i:])
+                if tail in self.order:
+                    found.add(tail)
+            hit = sorted(found, key=self.order.__getitem__)
+            self._cache[mod] = hit
+        return hit
+
+
 def _merge_imported_apps(
     imap: ImportMap,
     routers: dict[str, str],
     blueprints: dict[str, str],
     routers_by_mod: dict[str, dict[str, str]],
     blueprints_by_mod: dict[str, dict[str, str]],
+    matcher: _ModuleMatcher | None = None,
 ) -> None:
     for local, (mod, orig) in imap.from_names.items():
-        for m, rmap in routers_by_mod.items():
-            if m == mod or m.endswith("." + mod) or mod.endswith("." + m):
-                if orig in rmap:
-                    routers.setdefault(local, rmap[orig])
-        for m, bmap in blueprints_by_mod.items():
-            if m == mod or m.endswith("." + mod) or mod.endswith("." + m):
-                if orig in bmap:
-                    blueprints.setdefault(local, bmap[orig])
+        if matcher is None:
+            r_mods = [m for m in routers_by_mod if m == mod or m.endswith("." + mod) or mod.endswith("." + m)]
+            b_mods = [m for m in blueprints_by_mod if m == mod or m.endswith("." + mod) or mod.endswith("." + m)]
+        else:
+            r_mods = b_mods = matcher.matches(mod)
+        for m in r_mods:
+            rmap = routers_by_mod.get(m)
+            if rmap and orig in rmap:
+                routers.setdefault(local, rmap[orig])
+        for m in b_mods:
+            bmap = blueprints_by_mod.get(m)
+            if bmap and orig in bmap:
+                blueprints.setdefault(local, bmap[orig])
+
+
+# id(analysis) → (analysis, number of functions when built, name → functions
+# in analysis.functions order). Rebuilt when functions are added.
+_FN_NAME_INDEX: dict[int, tuple[object, int, dict[str, list[PyFunction]]]] = {}
+
+
+def _functions_by_name(analysis: PyAnalysis) -> dict[str, list[PyFunction]]:
+    cached = _FN_NAME_INDEX.get(id(analysis))
+    if cached is None or cached[0] is not analysis or cached[1] != len(analysis.functions):
+        index: dict[str, list[PyFunction]] = defaultdict(list)
+        for f in analysis.functions.values():
+            index[f.name].append(f)
+        if len(_FN_NAME_INDEX) > 8:
+            _FN_NAME_INDEX.clear()
+        cached = (analysis, len(analysis.functions), index)
+        _FN_NAME_INDEX[id(analysis)] = cached
+    return cached[2]
 
 
 def _ctor_prefix(call: Node) -> tuple[str, str] | None:
@@ -1062,9 +1115,15 @@ class PythonAnalyzer:
         for _rf, _tree, module, _imap, _fns, _res, routers, _inc, blueprints, _names, _ld in prepared:
             routers_by_mod[module] = routers
             blueprints_by_mod[module] = blueprints
+        matcher = _ModuleMatcher(list(routers_by_mod))
         for _rf, _tree, _module, imap, _fns, _res, routers, _inc, blueprints, _names, _ld in prepared:
-            _merge_imported_apps(imap, routers, blueprints, routers_by_mod, blueprints_by_mod)
+            _merge_imported_apps(imap, routers, blueprints, routers_by_mod, blueprints_by_mod, matcher)
 
+        # Invariant over the loop below (it only adds parameterless `__main__`
+        # pseudo-functions, which neither collector keeps): built once, not per
+        # file (that walked every function of the repo for every file).
+        http_helpers = _collect_py_http_helpers(analysis)
+        sql_helpers = _collect_py_sql_dict_helpers(analysis, dicts_by_module, imaps)
         for (
             rel_file,
             tree,
@@ -1092,8 +1151,6 @@ class PythonAnalyzer:
                 blueprints,
                 module_names,
             )
-            http_helpers = _collect_py_http_helpers(analysis)
-            sql_helpers = _collect_py_sql_dict_helpers(analysis, dicts_by_module, imaps)
             self._detect_calls_and_usage(
                 analysis,
                 tree,
@@ -1130,6 +1187,7 @@ class PythonAnalyzer:
         trees = [(mod, rf, tree) for _p, rf, _s, tree, mod, _i, _f in parsed]
         _resolve_callable_injection(analysis, trees)
         _resolve_object_dispatch(analysis, trees)
+        _FN_NAME_INDEX.clear()
         _ = forest
         return analysis
 
@@ -1681,11 +1739,10 @@ class PythonAnalyzer:
 
     def _imported_functions(self, imap: ImportMap, analysis: PyAnalysis) -> dict[str, PyFunction]:
         out: dict[str, PyFunction] = {}
+        by_name = _functions_by_name(analysis)
         for local, (mod, orig) in imap.from_names.items():
             matches = [
-                f
-                for f in analysis.functions.values()
-                if f.name == orig and (f.module == mod or f.module.endswith("." + mod))
+                f for f in by_name.get(orig, ()) if f.module == mod or f.module.endswith("." + mod)
             ]
             if len(matches) == 1:
                 out[local] = matches[0]
@@ -2672,6 +2729,11 @@ def _resolve_callable_injection(
     """Link calls through injected callables (args, dataclass fields, aliases)."""
     by_name = _fn_by_name(analysis)
     existing = {(c, d) for c, d, _e, _k in analysis.calls}
+    # class name → its method names, built once (was a scan of every function per call)
+    methods_by_class: dict[str, set[str]] = defaultdict(set)
+    for f in analysis.functions.values():
+        if f.class_name:
+            methods_by_class[f.class_name].add(f.name)
 
     param_of: dict[str, list[str]] = {fn.qualname: _param_names(fn.node) for fn in analysis.functions.values()}
     class_fields, class_nodes, callable_fields = _index_class_fields(trees, analysis)
@@ -2874,14 +2936,11 @@ def _resolve_callable_injection(
                         )
                     )
                 typ = anns.get(obj_name)
-                class_methods = {
-                    f.name for f in analysis.functions.values() if f.class_name == typ
-                }
                 if (
                     not targets
                     and typ
                     and typ in callable_fields
-                    and field not in class_methods
+                    and field not in methods_by_class.get(typ, frozenset())
                     and field not in {"__init__", "__new__", "__post_init__"}
                 ):
                     analysis.unresolved_calls.append(
