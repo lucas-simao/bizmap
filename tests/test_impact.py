@@ -670,3 +670,79 @@ def test_imports_through_barrels_namespace_default_and_require(tmp_path: Path) -
         "function:svc.handler.handler",
         "function:svc.cjs.a",
     }, got
+
+
+def test_go_closure_numbering_ignores_nested_literals(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/go.mod": "module svc\n\ngo 1.22\n",
+            "svc/main.go": (
+                "package main\n\n"
+                'import "github.com/labstack/echo/v4"\n\n'
+                "func main() {\n"
+                "\te := echo.New()\n"
+                '\te.GET("/a", func(c echo.Context) error { return nil })\n'
+                '\te.GET("/b", func(c echo.Context) error {\n'
+                "\t\tf := func() {}\n"
+                "\t\tf()\n"
+                "\t\treturn nil\n"
+                "\t})\n"
+                '\te.GET("/c", func(c echo.Context) error { return nil })\n'
+                "}\n"
+            ),
+        },
+    )
+
+    def handler(path: str) -> str:
+        ep = f"entrypoint:http:GET:{path}"
+        return next(e.to_id for e in graph.edges.values() if e.type == "triggers" and e.from_id == ep)
+
+    assert handler("/a").endswith("main.func1")
+    assert handler("/b").endswith("main.func2")
+    assert handler("/c").endswith("main.func3"), handler("/c")
+
+
+def test_spans_post_passes_scale_linearly() -> None:
+    """The graph post-passes index edges once (no per-node edge scans)."""
+    import time
+
+    from bizmap.graph import Evidence, Graph
+    from bizmap.spans import _OutIndex, _table_hits
+
+    graph = Graph()
+    n = 4000
+    for i in range(n):
+        graph.add_node(f"function:f{i}", "function", name=f"f{i}")
+    graph.add_node("table:orders", "table", name="orders")
+    for i in range(n - 1):
+        graph.add_edge("calls", f"function:f{i}", f"function:f{i + 1}", evidence=Evidence(file="a.go", line=i, symbol=f"f{i}"))
+    graph.add_edge("reads", f"function:f{n - 1}", "table:orders")
+    index = _OutIndex(graph)
+    memo: dict = {}
+    t0 = time.perf_counter()
+    for start in range(0, n, 10):
+        assert _table_hits(graph, index, f"function:f{start}", memo) == {("reads", "table:orders")}
+    assert time.perf_counter() - t0 < 20
+
+
+def test_table_hits_with_cycles() -> None:
+    from bizmap.graph import Graph
+    from bizmap.spans import _OutIndex, _table_hits
+
+    g = Graph()
+    for n in ("a", "b", "c", "d"):
+        g.add_node(f"function:{n}", "function", name=n)
+    g.add_node("table:t1", "table", name="t1")
+    g.add_node("table:t2", "table", name="t2")
+    g.add_edge("calls", "function:a", "function:b")
+    g.add_edge("calls", "function:b", "function:c")
+    g.add_edge("calls", "function:c", "function:a")  # cycle a→b→c→a
+    g.add_edge("calls", "function:c", "function:d")
+    g.add_edge("reads", "function:b", "table:t1")
+    g.add_edge("writes", "function:d", "table:t2")
+    idx, memo = _OutIndex(g), {}
+    want = {("reads", "table:t1"), ("writes", "table:t2")}
+    assert _table_hits(g, idx, "function:a", memo) == want
+    assert _table_hits(g, idx, "function:c", memo) == want
+    assert _table_hits(g, idx, "function:d", memo) == {("writes", "table:t2")}

@@ -2183,7 +2183,7 @@ def _scan_one(
     span_cache: dict = {}
     fill_spans(graph, root, span_cache)
     split_factory_members(graph, root, span_cache)
-    split_go_route_closures(graph, root, span_cache)
+    split_go_route_closures(graph, root, span_cache)  # its own edge index: after the JS moves
     timings.propagate += go_prop + py_prop + (time.perf_counter() - t_prop)
 
     if profile:
