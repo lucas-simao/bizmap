@@ -8,6 +8,15 @@
   literals, `<module>.module` pseudo-functions and SQL functions from
   migrations now have spans, so a diff inside them maps (`start_line` is set
   when the literal starts below the registration line).
+- **Factory members own their calls** (`createClient(http) { return { a: () =>
+  http.get(...), b() {...} } }`): each returned function becomes
+  `<factory>.<key>`, called by the factory (`via: returned_member`), and holds
+  the `calls_http`/`reads`/`writes` inside it. ID change: these edges no longer
+  leave the factory itself.
+- **`registry merge` keeps `repo_roots`**: roots are recorded relative to the
+  git root (`repo_roots_base: git`), so per-repo scans + merge map a diff like
+  the joint scan (merge == joint is byte-equal again). `impact` warns when no
+  changed path is under a scanned root (`--prefix` hint without git).
 - **PR comment size**: rows ranked by reach and capped (`--max-rows`), functions
   with no route/table summarized, hard cap `--max-chars 60000`, `--details-url`.
 - **Action robustness**: fork PRs write only the step summary; only the
