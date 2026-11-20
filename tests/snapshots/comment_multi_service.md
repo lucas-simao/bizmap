@@ -6,7 +6,7 @@
 
 **Why high:**
 - writes `orders`, used by 3 services (api, billing, worker)
-- writes `orders`, which has trigger `orders_audit`
+- writes `orders`, which fires trigger `orders_audit`
 - changes the handler of `api: POST /api/orders`, `api: POST /api/orders/:id/cancel`
 - crosses services (api → billing, web → api)
 - writes 3 tables reached from 2 entrypoints
@@ -60,7 +60,7 @@ flowchart LR
 
 | Table | Writes | Reads | Changed functions |
 |---|---|---|---|
-| **`orders`** <sub>⚠️ 3 services · ⚡ trigger</sub> | customer_id, status, total_cents | id | `api: Orders.Cancel`, `api: Orders.Create`, `api: Repo.InsertOrder` |
+| **`orders`** <sub>⚠️ 3 services · ⚡ fires trigger</sub> | customer_id, status, total_cents | id | `api: Orders.Cancel`, `api: Orders.Create`, `api: Repo.InsertOrder` |
 | **`audit_log`** | _table_ | — | `api: Orders.Create`, `api: Repo.InsertOrder` |
 | **`invoices`** | amount_cents | — | `api: Orders.Create` |
 
@@ -69,9 +69,9 @@ flowchart LR
 <details>
 <summary><b>Triggers</b> · 1</summary>
 
-| Trigger | On table | When | Where |
-|---|---|---|---|
-| ⚡ `orders_audit` · fires on this change | `orders` | AFTER INSERT OR UPDATE | [db/schema.sql:40](https://github.com/acme/shop/blob/0123456789abcdef0123456789abcdef01234567/db/schema.sql#L40) |
+| Trigger | On table | When | Fired by this change | Where |
+|---|---|---|---|---|
+| ⚡ `orders_audit` | `orders` | AFTER INSERT OR UPDATE | **yes** | [db/schema.sql:40](https://github.com/acme/shop/blob/0123456789abcdef0123456789abcdef01234567/db/schema.sql#L40) |
 
 </details>
 

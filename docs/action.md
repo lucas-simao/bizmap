@@ -53,7 +53,7 @@ out:
 
 **Why high:**
 - writes `orders`, used by 3 services (api, billing, worker)
-- writes `orders`, which has trigger `orders_audit`
+- writes `orders`, which fires trigger `orders_audit`
 - changes the handler of `api: POST /api/orders`, `api: POST /api/orders/:id/cancel`
 - crosses services (api → billing, web → api)
 
@@ -70,8 +70,10 @@ out:
   joint scan, triggers hanging off the table they fire on, at most 40 nodes.
 - **Collapsible sections** (`<details>`): entrypoints (with *handler changed*
   when the PR edits the route's own handler), data (columns written and read,
-  shared tables and triggers flagged), schema changes from `.sql` files
-  (opened when a column still in use is dropped or renamed), triggers,
+  shared tables and fired triggers flagged), schema changes from `.sql` files
+  (new or dropped columns, new tables, new or changed triggers with the code
+  that writes their table; opened when a column still in use is dropped or
+  renamed), triggers on written tables (and whether these writes fire them),
   calls between services (and how each was matched), every changed function,
   and what static analysis could not settle (unmatched HTTP calls, ambiguous
   handlers, dynamic table names, `heuristic`/`unknown` links, files outside any
@@ -83,14 +85,15 @@ out:
   `🟢 No data impact`.
 
 The comment always stays under GitHub's size limit: rows are capped by
-`max-rows`, then the diagram is dropped; the run summary has the full report.
+`max-rows`, then the diagram is dropped; the run summary has the full report
+(computed from the same impact, capped at 1,000,000 UTF-8 bytes).
 
 ### Risk levels
 
 | Level | When (any of) |
 |---|---|
-| 🔴 high | a `.sql` change drops or renames a column that code still reads or writes · the PR writes a table that `shared-services` (default 3) or more services read or write |
-| 🟠 medium | it writes a table that has a DB trigger · it changes the handler of an HTTP route · the reach crosses services over HTTP · it writes a table reached from an entrypoint |
+| 🔴 high | a `.sql` change drops or renames a column that code still reads or writes · the PR writes a table that `shared-services` (default 3) or more services read or write · a large change: 50+ entrypoints or 10+ tables written |
+| 🟠 medium | it writes a table in a way that fires a DB trigger (the event, and the `UPDATE OF` columns, match the write) · a `.sql` change adds or changes a `CREATE TRIGGER` · it changes the handler of an HTTP route · the reach crosses services over HTTP · it writes a table reached from an entrypoint |
 | 🟡 low | it writes data no entrypoint reaches · it only reads data · it reaches entrypoints but no table · other schema changes (a new column, a new table) |
 | 🟢 none | nothing above |
 
@@ -146,4 +149,5 @@ git diff --unified=0 origin/main... | bizmap impact --graph /tmp/g.json \
 ```
 
 `--no-mermaid`, `--shared-services N`, `--max-rows N` and `--max-chars N`
-match the Action inputs; `--json` prints the raw impact instead.
+match the Action inputs; `--full-out FILE` also writes the uncapped report
+(`--full-max-bytes`, default 1,000,000); `--json` prints the raw impact instead.

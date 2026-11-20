@@ -147,8 +147,10 @@ runs:
         common=(--graph "$out/graph.json" --diff "$out/pr.diff" --prefix "$SCAN_PATH" --repo-root .
           --blob-url "$REPO_URL/blob/$link_sha" --shared-services "$SHARED")
         if [ "$MERMAID" = false ]; then common+=(--no-mermaid); fi
-        if ! bizmap impact "${common[@]}" --max-rows 100000 --max-chars 900000 > "$out/full.md" \
-          || ! bizmap impact "${common[@]}" --max-rows "$MAX_ROWS" --details-url "$RUN_URL" > "$comment"; then
+        # one impact computation: the comment on stdout, the uncapped report for
+        # the run summary (kept under its 1 MiB limit, in bytes) in --full-out
+        if ! bizmap impact "${common[@]}" --max-rows "$MAX_ROWS" --details-url "$RUN_URL" \
+          --full-out "$out/full.md" --full-max-bytes 1000000 > "$comment"; then
           echo "::error::bizmap impact failed"
           finish failed "Failed: \`bizmap impact\` did not finish."
         fi

@@ -210,8 +210,8 @@ def test_shared_table_threshold() -> None:
     assert "used by 3 services (api, billing, worker)" in high
     medium = render_markdown(g, imp, shared_services=4)
     assert _risk(medium) == "medium" and "used by 3 services" not in medium
-    assert "writes `orders`, which has trigger `orders_audit`" in medium
-    assert "writes `audit_log`, which has" not in medium  # the trigger sits on orders, not on what it writes
+    assert "writes `orders`, which fires trigger `orders_audit`" in medium
+    assert "writes `audit_log`, which fires" not in medium  # the trigger sits on orders, not on what it writes
     assert "changes the handler of `api: POST /api/orders`, `api: POST /api/orders/:id/cancel`" in medium
 
 
@@ -302,3 +302,83 @@ def test_dynamic_table_is_a_note_not_data() -> None:
     assert _risk(md) == "none" and "**`unknown`**" not in md and "<summary>3 notes</summary>" in md, md
     assert "`pkg.purge` builds a table name at runtime (candidates: events, logs)" in md
     assert "`Store.save`" in md and "str.replace" not in md and "rstrip" not in md
+
+
+def test_trigger_that_does_not_fire_is_not_a_risk() -> None:
+    """`AFTER UPDATE OF status` on orders; the PR only INSERTs: no via-edge, no risk."""
+    g = checkout_graph()
+    g.add_node("db_trigger:orders_touch", "db_trigger", name="orders_touch", table="orders", timing="AFTER",
+               events=["UPDATE"], function="touch", evidence={"file": "db/schema.sql", "line": 60})
+    imp = compute_impact(g, _diff(("api/repository/orders.go", 15)))  # InsertOrder only
+    md = render_markdown(g, imp, shared_services=9)
+    assert "fires trigger `orders_audit`" in md and "orders_touch`" not in md.split("<details")[0]
+    row = next(ln for ln in md.splitlines() if ln.startswith("| ⚡ `orders_touch`"))
+    assert "no (the writes don't match its events)" in row
+    assert "orders_touch" not in render_mermaid(g, imp, triggers={"table:orders": ["db_trigger:orders_audit"]})
+    diagram = md.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert "orders_audit" in diagram and "orders_touch" not in diagram
+
+
+def test_large_change_is_high() -> None:
+    g = Graph()
+    g.attrs["repo_roots"] = {"x": "."}
+    f = _fn(g, "", "pkg.router", "a.py", 1, 9)
+    for i in range(60):
+        g.add_edge("triggers", _ep(g, "", "http", f"GET:/r{i}", "a.py", 1, method="GET", path=f"/r{i}"), f)
+    g.add_edge("reads", f, _col(g, "t", "c"))
+    md = render_markdown(g, compute_impact(g, _diff(("a.py", 2))))
+    assert _risk(md) == "high" and "large change: 60 entrypoints, 0 tables written" in md
+
+
+def test_new_trigger_in_schema_is_a_schema_change(tmp_path: Path) -> None:
+    g = checkout_graph()
+    g.add_node("db_trigger:orders_touch", "db_trigger", name="orders_touch", table="orders", timing="AFTER",
+               events=["UPDATE"], function="touch", evidence={"file": "db/schema.sql", "line": 3})
+    (tmp_path / "db").mkdir()
+    (tmp_path / "db" / "schema.sql").write_text(
+        "CREATE TABLE orders (id int, status text);\n\nCREATE TRIGGER orders_touch\n"
+        "  AFTER UPDATE OF status ON orders\n  FOR EACH ROW EXECUTE FUNCTION touch();\n", encoding="utf-8")
+    imp = compute_impact(g, _diff(("db/schema.sql", 4)), repo_root=tmp_path)
+    trig = [c for c in imp.schema_changes if c.op == "trigger"]
+    assert len(trig) == 1 and trig[0].name == "orders_touch" and trig[0].line == 4
+    assert "api/function:repository.Repo.SetStatus" in trig[0].functions
+    md = render_markdown(g, imp)
+    assert _risk(md) == "medium" and "adds or changes trigger `orders_touch` on `orders`" in md
+    assert "⚡ trigger `orders_touch` on `orders` new or changed (AFTER UPDATE)" in md
+    assert "outside any function" not in md
+    # a change elsewhere in the file is not the trigger
+    assert not [c for c in compute_impact(g, _diff(("db/schema.sql", 1)), repo_root=tmp_path).schema_changes
+                if c.op == "trigger"]
+
+
+def test_max_bytes_counts_utf8() -> None:
+    g = Graph()
+    fns = []
+    for i in range(400):
+        fid = _fn(g, "", f"pkg.função_ação_{i}_" + "é" * 30, "a.py", i * 10 + 1, i * 10 + 9)
+        g.add_edge("writes", fid, _col(g, f"tabela_ç_{i}", "coluna_ã"))
+        fns.append(FunctionImpact(function=fid, file="a.py", lines=[i * 10 + 2], writes=[f"column:tabela_ç_{i}.coluna_ã"]))
+    imp = Impact(functions=fns, unmapped_files=[])
+    for cap in (60000, 20000, 3000):
+        md = render_markdown(g, imp, max_chars=10**7, max_bytes=cap)
+        assert len(md.encode("utf-8")) <= cap and md.startswith(MARKER), cap
+
+
+def test_cli_full_out_from_one_impact(tmp_path: Path) -> None:
+    import json
+
+    from click.testing import CliRunner
+
+    from bizmap.cli import main
+
+    g = checkout_graph()
+    gpath, dpath, full = tmp_path / "g.json", tmp_path / "d.diff", tmp_path / "full.md"
+    gpath.write_text(json.dumps(g.to_dict()), encoding="utf-8")
+    dpath.write_text(_diff(("api/handlers/orders.go", 25), ("api/handlers/orders.go", 60)), encoding="utf-8")
+    res = CliRunner().invoke(main, ["impact", "--graph", str(gpath), "--diff", str(dpath), "--max-rows", "1",
+                                    "--full-out", str(full), "--blob-url", BLOB, "--no-mermaid"])
+    assert res.exit_code == 0, res.output
+    assert res.output.startswith(MARKER) and "+1 more function(s) with impact not shown" in res.output
+    text = full.read_text(encoding="utf-8")
+    assert "more function(s) with impact not shown" not in text and "Orders.Cancel" in text
+    assert "```mermaid" not in text and f"{BLOB}/api/handlers/orders.go#L25-L48" in text

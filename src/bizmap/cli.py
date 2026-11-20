@@ -554,6 +554,19 @@ def report_cmd(
     show_default=True,
     help="High risk when the PR writes a table read or written by this many services.",
 )
+@click.option(
+    "--full-out",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Also write the uncapped report here (the Action's run summary), from the same impact.",
+)
+@click.option(
+    "--full-max-bytes",
+    type=click.IntRange(min=1000),
+    default=1_000_000,
+    show_default=True,
+    help="UTF-8 size cap of --full-out (GitHub step summaries stop at 1 MiB).",
+)
 def impact_cmd(
     graph_path: Path,
     diff_path: Path,
@@ -567,6 +580,8 @@ def impact_cmd(
     blob_url: str | None,
     mermaid: bool,
     shared_services: int,
+    full_out: Path | None,
+    full_max_bytes: int,
 ) -> None:
     """Map a diff onto the graph: changed functions → entrypoints and data.
 
@@ -582,6 +597,22 @@ def impact_cmd(
         click.echo(f"warning: {result.hint}", err=True)
     for warning in result.warnings:
         click.echo(f"warning: {warning}", err=True)
+    if full_out is not None:
+        full_out.write_text(
+            render_markdown(
+                graph,
+                result,
+                limit=limit,
+                max_rows=100_000,
+                max_chars=full_max_bytes,
+                max_bytes=full_max_bytes,
+                details_url=details_url,
+                blob_url=blob_url,
+                mermaid=mermaid,
+                shared_services=shared_services,
+            ),
+            encoding="utf-8",
+        )
     if as_json:
         click.echo(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     else:

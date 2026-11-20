@@ -159,7 +159,7 @@ class SchemaChange:
     line: int
     entrypoints: list[str] = field(default_factory=list)
     functions: list[str] = field(default_factory=list)
-    op: str = "changed"  # added | altered | dropped | renamed | changed | new table
+    op: str = "changed"  # added | altered | dropped | renamed | changed | new table | trigger
     table: str = ""
     name: str = ""
     detail: str = ""  # new name for `renamed`, "N columns" for a new table
@@ -525,6 +525,49 @@ def _schema_changes(
     return out
 
 
+def _trigger_changes(
+    graph: Graph, changes: dict[str, set[int]], prefix: str, repo_root: Path, inc: dict[str, list[Any]]
+) -> list[SchemaChange]:
+    """A `CREATE TRIGGER` statement with a changed line: the trigger is new or
+    changed. Listed with the code that writes its table (what will fire it)."""
+    out: list[SchemaChange] = []
+    root = repo_root.resolve()
+    cache: dict[str, list[str]] = {}
+    for tid, node in sorted(graph.nodes.items()):
+        if node.type != "db_trigger":
+            continue
+        ev = node.attrs.get("evidence") or {}
+        start = ev.get("line")
+        path = _function_file(node, graph, prefix)
+        if not path or not isinstance(start, int) or not changes.get(path):
+            continue
+        if path not in cache:
+            full = (repo_root / path).resolve()
+            try:
+                cache[path] = full.read_text(encoding="utf-8", errors="replace").splitlines() if full.is_relative_to(root) else []
+            except OSError:
+                cache[path] = []
+        lines = cache[path]
+        end = start
+        while end <= len(lines) and ";" not in lines[end - 1]:
+            end += 1
+        hit = sorted(ln for ln in changes[path] if start <= ln <= end)
+        if not hit:
+            continue
+        table = str(node.attrs.get("table") or "").lower().split(".")[-1]
+        targets = [n for n, t in graph.nodes.items() if (t.type == "table" and n.rpartition("/")[2] == f"table:{table}")
+                   or (t.type == "column" and str(t.attrs.get("table") or "").lower().split(".")[-1] == table)]
+        writers = {e.from_id for t in targets for e in inc.get(t, []) if e.type == "writes"
+                   and (graph.get(e.from_id) or Node("", "")).type == "function"}
+        fns = sorted(writers)
+        eps = sorted({ep for f in fns for ep in _entrypoints_reaching(graph, f, inc)})
+        events = node.attrs.get("events") or []
+        detail = " ".join(x for x in [str(node.attrs.get("timing") or ""), " OR ".join(map(str, events))] if x)
+        out.append(SchemaChange(column=tid, file=path, line=hit[0], entrypoints=eps, functions=fns,
+                                op="trigger", table=table, name=str(node.attrs.get("name") or tid), detail=detail))
+    return out
+
+
 def compute_impact(
     graph: Graph, diff_text: str, *, prefix: str = ".", repo_root: Path | None = None
 ) -> Impact:
@@ -577,6 +620,7 @@ def compute_impact(
         schema = _schema_changes(
             graph, changes, unmapped, repo_root, in_idx, _sql_cosmetic_lines(diff_text), missing, outside
         )
+        schema += _trigger_changes(graph, changes, prefix, repo_root, in_idx)
         if missing:
             shown = ", ".join(missing[:3]) + (f", +{len(missing) - 3}" if len(missing) > 3 else "")
             warnings.append(
@@ -604,6 +648,9 @@ def compute_impact(
 # the Impact; nothing here changes what the impact *is*.
 
 RISK_LEVELS = ("none", "low", "medium", "high")
+# a PR this wide is high risk whatever it touches
+LARGE_ENTRYPOINTS = 50
+LARGE_WRITTEN_TABLES = 10
 RISK_MARKER = "<!-- bizmap-risk: {} -->"
 _RISK_TITLE = {
     "high": "🔴 High risk",
@@ -804,6 +851,7 @@ class _Facts:
     direct: set[str]  # entrypoints whose own handler changed
     fired: dict[str, set[str]]  # db_trigger id → tables (fired by a write in the reach)
     table_triggers: dict[str, list[str]]  # written table → db_trigger ids on it
+    fired_on: dict[str, list[str]]  # written table → triggers these writes actually fire
     http: list[Any]  # calls_http edges on the way to or from the change
     notes: list[str]
     low_conf: int
@@ -945,7 +993,9 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
     columns = len({w for f in impact.functions for w in _known(f.writes + f.reads) if _column_of(w)})
     facts = _Facts(
         tables=tables, services=services, ep_fns=ep_fns, direct=direct, fired=fired,
-        table_triggers=table_triggers, http=[http[k] for k in sorted(http)], notes=notes,
+        table_triggers=table_triggers,
+        fired_on={t: [x for x in ts if x in fired] for t, ts in table_triggers.items() if any(x in fired for x in ts)},
+        http=[http[k] for k in sorted(http)], notes=notes,
         low_conf=len(low), columns=columns, risk="none", reasons=[],
     )
     facts.risk, facts.reasons = _risk(graph, impact, facts, shared_services)
@@ -970,12 +1020,25 @@ def _risk(graph: Graph, impact: Impact, facts: _Facts, shared_services: int) -> 
                 ("high", f"writes {_code(_label(graph, t))}, used by {len(svc)} services ({', '.join(svc)})")
             )
     for t in written:
-        trig = facts.table_triggers.get(t, [])
+        # only triggers the scan saw fire: event (INSERT/UPDATE/DELETE) and
+        # `UPDATE OF` columns match a direct write in the reach
+        trig = facts.fired_on.get(t, [])
         if trig:
             names = [_label(graph, x) for x in trig]
             reasons.append(
-                ("medium", f"writes {_code(_label(graph, t))}, which has {_plural(len(names), 'trigger')} {_names(names, 3)}")
+                ("medium", f"writes {_code(_label(graph, t))}, which fires {_plural(len(names), 'trigger')} {_names(names, 3)}")
             )
+    n_eps_all = len(facts.ep_fns)
+    if n_eps_all >= LARGE_ENTRYPOINTS or len(written) >= LARGE_WRITTEN_TABLES:
+        reasons.append(
+            ("high", f"large change: {n_eps_all} {_plural(n_eps_all, 'entrypoint')}, "
+                     f"{len(written)} {_plural(len(written), 'table')} written")
+        )
+    for ch in impact.schema_changes:
+        if ch.op == "trigger":
+            n = len(ch.functions)
+            users = f", written by {n} {_plural(n, 'function')}" if n else ""
+            reasons.append(("medium", f"adds or changes trigger {_code(ch.name)} on {_code(ch.table)}{users}"))
     http_eps = sorted(
         (e for e in facts.direct if (graph.get(e) or Node("", "")).attrs.get("kind") in _HTTP_KINDS),
         key=lambda e: _label(graph, e),
@@ -1006,10 +1069,10 @@ def _risk(graph: Graph, impact: Impact, facts: _Facts, shared_services: int) -> 
         reasons.append(("low", f"only reads data ({n} {_plural(n, 'table')})"))
     elif n_eps:
         reasons.append(("low", f"reaches {n_eps} {_plural(n_eps, 'entrypoint')}, no table"))
-    other_schema = [c for c in impact.schema_changes if not c.risky]
+    other_schema = [c for c in impact.schema_changes if not c.risky and c.op != "trigger"]
     if other_schema:
         ops = ", ".join(sorted({c.op for c in other_schema}))
-        other = "other " if len(other_schema) < len(impact.schema_changes) else ""
+        other = "other " if any(c.risky for c in impact.schema_changes) else ""
         reasons.append(("low", f"{len(other_schema)} {other}schema {_plural(len(other_schema), 'change')} ({ops})"))
     rank = {lvl: i for i, lvl in enumerate(RISK_LEVELS)}
     reasons.sort(key=lambda r: -rank[r[0]])
@@ -1153,6 +1216,8 @@ def _schema_section(graph: Graph, impact: Impact, links: _Links | None = None, c
     for ch in ordered[:cap]:
         if ch.op == "new table":
             label = f"new table `{ch.table}` ({ch.detail})"
+        elif ch.op == "trigger":
+            label = f"⚡ trigger `{ch.name}` on `{ch.table}` new or changed" + (f" ({ch.detail})" if ch.detail else "")
         else:
             op = f"renamed → `{ch.detail}`" if ch.op == "renamed" and ch.detail else ch.op
             if ch.op in {"dropped", "renamed"}:
@@ -1160,7 +1225,7 @@ def _schema_section(graph: Graph, impact: Impact, links: _Links | None = None, c
             label = f"`{ch.table}.{ch.name}` {op}"
         if ch.risky:
             label = "⚠️ " + label + " — still used"
-        empty = "— (not used yet)" if ch.op in {"added", "new table", "changed"} else "—"
+        empty = "— (not used yet)" if ch.op in {"added", "new table", "changed"} else ("— (nothing writes the table yet)" if ch.op == "trigger" else "—")
         eps = "<br>".join(_code(_label(graph, e)) for e in ch.entrypoints[:6]) or empty
         if len(ch.entrypoints) > 6:
             eps += f"<br>+{len(ch.entrypoints) - 6}"
@@ -1203,6 +1268,7 @@ def render_markdown(
     blob_url: str | None = None,
     mermaid: bool = True,
     shared_services: int = 3,
+    max_bytes: int | None = None,
 ) -> str:
     """Markdown for a PR comment, always shorter than ``max_chars``.
 
@@ -1211,7 +1277,14 @@ def render_markdown(
     ``file:line`` into links. Functions with no entrypoint and no data are
     summarized in one line; the rest are ranked by how much they reach and
     capped at ``max_rows`` (every other table is capped the same way).
+    ``max_bytes`` also caps the UTF-8 size (step summaries are limited in bytes).
     """
+
+    def size(text: str) -> int:
+        return max(len(text), len(text.encode("utf-8")) if max_bytes is not None else 0)
+
+    if max_bytes is not None:
+        max_chars = min(max_chars, max_bytes)
     from bizmap import __version__
 
     facts = _gather(graph, impact, shared_services)
@@ -1259,7 +1332,7 @@ def render_markdown(
         if notes:
             body += _details(f"{len(notes)} {_plural(len(notes), 'note')}", notes_md(10))
         text = "\n".join(body + footer) + "\n"
-        return text if len(text) <= max_chars else _hard_cut(text, head, max_chars, details_url)
+        return text if size(text) <= max_chars else _hard_cut(text, head, max_chars, details_url, size)
 
     folded = _fold_pass_through(graph, impact.functions)
     reaching = sorted(
@@ -1359,7 +1432,7 @@ def render_markdown(
             return []
         order = sorted(
             facts.tables,
-            key=lambda t: (not facts.tables[t].write, t not in risky_tables, t not in facts.table_triggers, _label(graph, t)),
+            key=lambda t: (not facts.tables[t].write, t not in risky_tables, t not in facts.fired_on, _label(graph, t)),
         )
         rows = ["| Table | Writes | Reads | Changed functions |", "|---|---|---|---|"]
         for t in order[:cap]:
@@ -1370,8 +1443,8 @@ def render_markdown(
                 flags.append(f"⚠️ {len(svc)} services")
             elif len(svc) > 1:
                 flags.append(f"{len(svc)} services")
-            if t in facts.table_triggers:
-                flags.append("⚡ trigger")
+            if t in facts.fired_on:
+                flags.append("⚡ fires trigger")
             name = f"**{_code(_label(graph, t))}**" + (f" <sub>{' · '.join(flags)}</sub>" if flags else "")
             w = ", ".join(sorted(use.written)[:8]) if use.written else ("_table_" if use.write else "—")
             r_cols = sorted(use.read - use.written)
@@ -1392,17 +1465,17 @@ def render_markdown(
         trig = sorted({x for ts in facts.table_triggers.values() for x in ts})
         if not trig:
             return []
-        rows = ["| Trigger | On table | When | Where |", "|---|---|---|---|"]
+        rows = ["| Trigger | On table | When | Fired by this change | Where |", "|---|---|---|---|---|"]
         for tid in trig[:cap]:
             a = (graph.get(tid) or Node("", "")).attrs
             events = a.get("events") or []
             when = " ".join(
                 x for x in [str(a.get("timing") or ""), " OR ".join(str(e) for e in events) if isinstance(events, list) else str(events)] if x
             )
-            fires = " · fires on this change" if tid in facts.fired else ""
+            fires = "**yes**" if tid in facts.fired else "no (the writes don't match its events)"
             path, line, _e = _node_where(graph, tid, prefix)
             rows.append(
-                f"| ⚡ {_code(_label(graph, tid))}{fires} | {_code(str(a.get('table') or '?'))} | {when or '—'} | {links.where(path, line)} |"
+                f"| ⚡ {_code(_label(graph, tid))} | {_code(str(a.get('table') or '?'))} | {when or '—'} | {fires} | {links.where(path, line)} |"
             )
         if len(trig) > cap:
             rows.append(f"\n+{len(trig) - cap} more.")
@@ -1464,7 +1537,7 @@ def render_markdown(
             body += ["", f"**Why {facts.risk}:**", *top]
         if with_diagram and mermaid and reaching:
             sub = Impact(functions=reaching[: max(n_rows, 1)], unmapped_files=[])
-            diagram = render_mermaid(graph, sub, limit=limit, risky=risky_tables, triggers=facts.table_triggers)
+            diagram = render_mermaid(graph, sub, limit=limit, risky=risky_tables, triggers=facts.fired_on)
             body += _details(
                 "<b>Diagram</b> · entrypoint → changed function → table",
                 ["```mermaid", diagram.rstrip(), "```"],
@@ -1488,22 +1561,24 @@ def render_markdown(
 
     n = min(max_rows, len(reaching))
     text = build(n, True)
-    while len(text) > max_chars and n > 0:
+    while size(text) > max_chars and n > 0:
         n = max(0, n - max(1, n // 4))
         text = build(n, True)
-    if len(text) > max_chars:
+    if size(text) > max_chars:
         text = build(0, False)
-    if len(text) > max_chars:
-        text = _hard_cut(text, head, max_chars, details_url)
+    if size(text) > max_chars:
+        text = _hard_cut(text, head, max_chars, details_url, size)
     return text
 
 
-def _hard_cut(text: str, head: list[str], max_chars: int, details_url: str | None) -> str:
+def _hard_cut(text: str, head: list[str], max_chars: int, details_url: str | None, size=len) -> str:
     """Pathological labels: cut, keeping the marker and the header."""
     tail = "\n\n…truncated" + (f" — full report in the [run summary]({details_url})" if details_url else "") + ".\n"
     keep = "\n".join(head[:3]) + "\n"
-    room = max_chars - len(keep) - len(tail)
+    room = max_chars - size(keep) - size(tail)
     rest = text[len(keep):]
     cut = rest[:room].rsplit("\n", 1)[0] if room > 0 else ""
+    while cut and size(keep + cut + tail) > max_chars:  # multi-byte characters
+        cut = cut[: max(0, len(cut) - max(1, (size(keep + cut + tail) - max_chars)))].rsplit("\n", 1)[0]
     out = keep + cut + tail
-    return out if len(out) <= max_chars else (keep + tail)[:max_chars]
+    return out if size(out) <= max_chars else (keep + tail)[:max_chars]
