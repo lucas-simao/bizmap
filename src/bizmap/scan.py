@@ -7,11 +7,11 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from bizmap import progress
 from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
 from bizmap.detect.js_lang import JsAnalysis, JsAnalyzer
 from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer
 from bizmap.detect.rules import load_rules
-from bizmap import progress
 from bizmap.files import WalkOptions, discover_sql_files, iter_files, rel
 from bizmap.graph import (
     GRAPH_VERSION,
