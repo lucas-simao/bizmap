@@ -1485,3 +1485,41 @@ def test_hono_chain_handlers_have_their_own_spans(tmp_path: Path) -> None:
     assert eps == ["entrypoint:http:POST:/inventory/:sku/restock", "entrypoint:http:POST:/orders/:id/pay"], eps
     last = compute_impact(graph, _added("svc/src/routes.ts", 23))
     assert [e for f in last.functions for e in f.entrypoints] == ["entrypoint:http:POST:/inventory/:sku/restock"]
+
+
+def test_express_router_route_chain(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/schema.sql": (
+                "CREATE TABLE customers (id int primary key, email text);\n"
+                "CREATE TABLE inventory (sku text primary key, stock int);\n"
+            ),
+            "svc/routes.ts": (
+                "import express from 'express';\nimport { Pool } from 'pg';\n"                     # 1-2
+                "const pool = new Pool();\nconst router = express.Router();\n"                     # 3-4
+                "router\n"                                                                            # 5
+                "  .route('/x')\n"                                                                    # 6
+                "  .get(async (req, res) => {\n"                                                      # 7
+                "    const r = await pool.query('SELECT email FROM customers WHERE id = $1', [1]);\n"  # 8
+                "    res.json(r.rows);\n"                                                              # 9
+                "  })\n"                                                                               # 10
+                "  .post(async (req, res) => {\n"                                                     # 11
+                "    await pool.query(\"UPDATE inventory SET stock = 0 WHERE sku = $1\", ['a']);\n"  # 12
+                "    res.end();\n"                                                                     # 13
+                "  });\n"                                                                              # 14
+                "export default router;\n"
+            ),
+        },
+    )
+
+    def data(method: str) -> set[str]:
+        ep = f"entrypoint:http:{method}:/x"
+        assert ep in graph.nodes, sorted(n for n in graph.nodes if n.startswith("entrypoint"))
+        h = next(e.to_id for e in graph.edges.values() if e.type == "triggers" and e.from_id == ep)
+        return {e.to_id for e in graph.edges.values() if e.from_id == h and e.type in {"reads", "writes"}}
+
+    assert "column:customers.email" in data("GET")
+    assert "column:inventory.stock" in data("POST") and "column:customers.email" not in data("POST")
+    imp = compute_impact(graph, _added("svc/routes.ts", 13))
+    assert [e for f in imp.functions for e in f.entrypoints] == ["entrypoint:http:POST:/x"]
