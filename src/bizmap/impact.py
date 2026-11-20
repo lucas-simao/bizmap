@@ -1257,7 +1257,7 @@ def render_markdown(
             if impact.unmapped_files and not other:
                 body += ["", f"{len(impact.unmapped_files)} changed file(s) have no mapped function."]
         if notes:
-            body += ["", *notes_md(10)]
+            body += _details(f"{len(notes)} {_plural(len(notes), 'note')}", notes_md(10))
         text = "\n".join(body + footer) + "\n"
         return text if len(text) <= max_chars else _hard_cut(text, head, max_chars, details_url)
 

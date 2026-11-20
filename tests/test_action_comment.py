@@ -139,7 +139,7 @@ def test_snapshot_no_data_impact() -> None:
     imp = compute_impact(g, _diff(("src/util.ts", 3), ("docs/notes.md", 2)))
     md = render_markdown(g, imp, blob_url=BLOB, details_url=RUN)
     _snapshot("no_data_impact", md)
-    assert len(md.splitlines()) <= 10, md
+    assert len(md.splitlines()) <= 14 and "<details>\n<summary>1 note</summary>" in md, md
 
 
 def test_snapshot_nothing_mapped() -> None:
@@ -279,6 +279,7 @@ def test_no_impact_is_short() -> None:
     _fn(g, "", "pkg.helper", "a.py", 1, 5)
     md = render_markdown(g, compute_impact(g, _diff(("a.py", 2))))
     assert _risk(md) == "none" and "🟢 No data impact" in md and "<details" not in md
+    assert len(md.splitlines()) <= 7, md
     assert "**1** changed function, none reaching a route, job or table." in md
 
 
@@ -298,6 +299,6 @@ def test_dynamic_table_is_a_note_not_data() -> None:
     g.add_node("table:unknown", "table", name="unknown", candidates=["logs", "events"])
     g.add_edge("writes", f, "table:unknown", confidence="unknown")
     md = render_markdown(g, compute_impact(g, _diff(("a.py", 2))))
-    assert _risk(md) == "none" and "**`unknown`**" not in md and "<details" not in md
+    assert _risk(md) == "none" and "**`unknown`**" not in md and "<summary>3 notes</summary>" in md, md
     assert "`pkg.purge` builds a table name at runtime (candidates: events, logs)" in md
     assert "`Store.save`" in md and "str.replace" not in md and "rstrip" not in md
