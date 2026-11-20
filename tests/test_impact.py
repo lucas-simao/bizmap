@@ -274,3 +274,50 @@ def test_hint_when_nothing_maps(tmp_path: Path) -> None:
     assert miss.functions == [] and miss.hint and "--prefix" in miss.hint
     hit = compute_impact(graph, _diff("svc/app.py", 2), prefix="svc")
     assert len(hit.functions) == 1 and hit.hint is None
+
+
+def test_factory_members_get_their_own_routes(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "api/server.ts": (
+                "import express from 'express';\nconst app = express();\n"
+                "app.get('/orders/:id', (req, res) => res.json({}));\n"
+                "app.get('/inventory/:id', (req, res) => res.json({}));\n"
+                "app.post('/settings/users', (req, res) => res.json({}));\n"
+            ),
+            "web/src/clients/shop.ts": (
+                "import axios, { AxiosInstance } from 'axios';\n"            # 1
+                "export function createShopClient(http: AxiosInstance) {\n"  # 2
+                "  const unused = 1;\n"                                      # 3
+                "  return {\n"                                               # 4
+                "    order: (id: string) => http.get(`/orders/${id}`),\n"    # 5
+                "    stock(id: string) {\n"                                  # 6
+                "      return http.get(`/inventory/${id}`);\n"               # 7
+                "    },\n"                                                   # 8
+                "    addUser: () => http.post('/settings/users', {}),\n"     # 9
+                "  };\n"                                                     # 10
+                "}\n"                                                        # 11
+            ),
+        },
+    )
+
+    def routes(line: int) -> set[str]:
+        imp = compute_impact(graph, _diff("web/src/clients/shop.ts", line))
+        return {
+            t.rsplit(":", 1)[-1]
+            for f in imp.functions
+            for e in graph.edges.values()
+            if e.type == "calls_http" and e.from_id == f.function
+            for t in [e.to_id]
+        }, [f.function for f in imp.functions]
+
+    got7, fns7 = routes(7)
+    assert fns7 == ["function:src.clients.shop.createShopClient.stock"], fns7
+    assert got7 == {"/inventory/:id"}, got7
+    _got, fns3 = routes(3)
+    assert fns3 == ["function:src.clients.shop.createShopClient"], fns3
+    # the factory still reaches every member's route through `calls`
+    factory = "function:src.clients.shop.createShopClient"
+    members = {e.to_id for e in graph.edges.values() if e.type == "calls" and e.from_id == factory}
+    assert {m.rsplit(".", 1)[-1] for m in members} >= {"order", "stock", "addUser"}, members
