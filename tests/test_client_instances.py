@@ -19,8 +19,8 @@ SERVER = """
 import express from 'express';
 const app = express();
 export function h(req: any, res: any) { res.json({}); }
-app.get('/api/v1/client/org/settings/users/:id/history', h);
-app.get('/api/v1/client/org/settings/users/:id', h);
+app.get('/api/v1/shop/settings/users/:id/history', h);
+app.get('/api/v1/shop/settings/users/:id', h);
 """
 
 
@@ -34,23 +34,23 @@ def test_axios_instance_passed_to_function_factory_returning_object(tmp_path: Pa
     _write(api, "server.ts", SERVER)
     _write(
         web,
-        "src/http/portal.ts",
+        "src/http/shop.ts",
         """
 import axios from 'axios';
-export const portalApi = axios.create({ baseURL: `${import.meta.env.VITE_API_URL}/api/v1/client` });
+export const shopApi = axios.create({ baseURL: `${import.meta.env.VITE_API_URL}/api/v1/shop` });
 """,
     )
     _write(
         web,
-        "src/clients/org.ts",
+        "src/clients/shop.ts",
         """
 import type { AxiosInstance } from 'axios';
 
-export function createOrgClient(http: AxiosInstance) {
+export function createShopClient(http: AxiosInstance) {
   return {
-    history: (id: string) => http.get(`/org/settings/users/${id}/history`),
+    history: (id: string) => http.get(`/settings/users/${id}/history`),
     user(id: string) {
-      return http.get(`/org/settings/users/${id}`);
+      return http.get(`/settings/users/${id}`);
     },
   };
 }
@@ -60,10 +60,10 @@ export function createOrgClient(http: AxiosInstance) {
         web,
         "src/screens/settings.ts",
         """
-import { portalApi } from '../http/portal';
-import { createOrgClient } from '../clients/org';
+import { shopApi } from '../http/shop';
+import { createShopClient } from '../clients/shop';
 
-const client = createOrgClient(portalApi);
+const client = createShopClient(shopApi);
 
 export const loadHistory = (id: string) => client.history(id);
 """,
@@ -71,11 +71,11 @@ export const loadHistory = (id: string) => client.history(id);
     graph = scan_paths([web, api], config=tmp_path / "bizmap.yaml")
     edges = [e for e in graph.edges.values() if e.type == "calls_http" and e.from_id.startswith("web/")]
     got = sorted((e.to_id, e.confidence.value) for e in edges)
-    assert ("api/entrypoint:http:GET:/api/v1/client/org/settings/users/:id/history", "inferred") in got, (
+    assert ("api/entrypoint:http:GET:/api/v1/shop/settings/users/:id/history", "inferred") in got, (
         got,
         graph.attrs.get("unresolved_http"),
     )
-    assert ("api/entrypoint:http:GET:/api/v1/client/org/settings/users/:id", "inferred") in got, got
+    assert ("api/entrypoint:http:GET:/api/v1/shop/settings/users/:id", "inferred") in got, got
     assert not [u for u in graph.attrs.get("unresolved_http") or [] if u.get("reason") == "base_unknown"]
 
 
@@ -105,7 +105,7 @@ func New() *Client {
 }
 
 func (c *Client) History(id string) error {
-    req, err := http.NewRequest(http.MethodGet, c.baseURL+"/api/v1/client/org/settings/users/"+id+"/history", nil)
+    req, err := http.NewRequest(http.MethodGet, c.baseURL+"/api/v1/shop/settings/users/"+id+"/history", nil)
     if err != nil {
         return err
     }
@@ -117,20 +117,20 @@ func (c *Client) History(id string) error {
     graph = scan_paths([caller, api], config=tmp_path / "bizmap.yaml")
     edges = _calls_http(graph, "client.Client.History")
     assert [(e.to_id, e.confidence.value) for e in edges] == [
-        ("api/entrypoint:http:GET:/api/v1/client/org/settings/users/:id/history", "inferred")
+        ("api/entrypoint:http:GET:/api/v1/shop/settings/users/:id/history", "inferred")
     ], ([e.id for e in edges], graph.attrs.get("unresolved_http"))
 
 
-def _org_factory(web: Path) -> None:
+def _shop_factory(web: Path) -> None:
     _write(
         web,
-        "src/clients/org.ts",
+        "src/clients/shop.ts",
         """
 import type { AxiosInstance } from 'axios';
 
-export function createOrgClient(http: AxiosInstance) {
+export function createShopClient(http: AxiosInstance) {
   const api = {
-    history: (id: string) => http.get(`/org/settings/users/${id}/history`),
+    history: (id: string) => http.get(`/settings/users/${id}/history`),
   };
   return api;
 }
@@ -146,23 +146,23 @@ def test_axios_instance_variants(tmp_path: Path) -> None:
     _write(api, "server.ts", SERVER)
     _write(
         web,
-        "src/http/portal.ts",
+        "src/http/shop.ts",
         """
 import axios from 'axios';
-export const portalApi = axios.create({ baseURL: `${import.meta.env.VITE_API_URL}/api/v1/client` });
+export const shopApi = axios.create({ baseURL: `${import.meta.env.VITE_API_URL}/api/v1/shop` });
 """,
     )
-    _write(web, "src/http/index.ts", "export { portalApi } from './portal';\n")
-    _org_factory(web)
+    _write(web, "src/http/index.ts", "export { shopApi } from './shop';\n")
+    _shop_factory(web)
     _write(
         web,
         "src/screens/a.ts",
         """
-import { portalApi } from '../http';
-import { createOrgClient } from '../clients/org';
+import { shopApi } from '../http';
+import { createShopClient } from '../clients/shop';
 
 export function useOrg() {
-  const client = createOrgClient(portalApi);
+  const client = createShopClient(shopApi);
   return { load: (id: string) => client.history(id) };
 }
 """,
@@ -172,17 +172,17 @@ export function useOrg() {
         "src/screens/b.ts",
         """
 import axios from 'axios';
-import { createOrgClient } from '../clients/org';
+import { createShopClient } from '../clients/shop';
 
-export const orgB = createOrgClient(
-  axios.create({ baseURL: `${import.meta.env.VITE_API_URL}/api/v1/client` }),
+export const shopB = createShopClient(
+  axios.create({ baseURL: `${import.meta.env.VITE_API_URL}/api/v1/shop` }),
 );
 """,
     )
     graph = scan_paths([web, api], config=tmp_path / "bizmap.yaml")
     edges = [e for e in graph.edges.values() if e.type == "calls_http" and e.from_id.startswith("web/")]
     got = sorted({(e.to_id, e.confidence.value) for e in edges})
-    assert got == [("api/entrypoint:http:GET:/api/v1/client/org/settings/users/:id/history", "inferred")], (
+    assert got == [("api/entrypoint:http:GET:/api/v1/shop/settings/users/:id/history", "inferred")], (
         got,
         graph.attrs.get("unresolved_http"),
     )
@@ -198,9 +198,9 @@ def test_go_client_in_service_field_with_constructor_param(tmp_path: Path) -> No
     _write(caller, "go.mod", "module worker\n\ngo 1.22\n")
     _write(
         caller,
-        "orgclient/client.go",
+        "shopclient/client.go",
         """
-package orgclient
+package shopclient
 
 import "net/http"
 
@@ -213,7 +213,7 @@ func New(baseURL string) *Client {
 }
 
 func (c *Client) History(id string) (*http.Response, error) {
-    return http.Get(c.base + "/api/v1/client/org/settings/users/" + id + "/history")
+    return http.Get(c.base + "/api/v1/shop/settings/users/" + id + "/history")
 }
 """,
     )
@@ -226,27 +226,27 @@ package service
 import (
     "os"
 
-    "worker/orgclient"
+    "worker/shopclient"
 )
 
 type Service struct {
-    org *orgclient.Client
+    shop *shopclient.Client
 }
 
 func NewService() *Service {
-    return &Service{org: orgclient.New(os.Getenv("API_URL"))}
+    return &Service{shop: shopclient.New(os.Getenv("API_URL"))}
 }
 
 func (s *Service) Sync(id string) error {
-    _, err := s.org.History(id)
+    _, err := s.shop.History(id)
     return err
 }
 """,
     )
     graph = scan_paths([caller, api], config=tmp_path / "bizmap.yaml")
-    edges = _calls_http(graph, "orgclient.Client.History")
+    edges = _calls_http(graph, "shopclient.Client.History")
     assert [(e.to_id, e.confidence.value) for e in edges] == [
-        ("api/entrypoint:http:GET:/api/v1/client/org/settings/users/:id/history", "inferred")
+        ("api/entrypoint:http:GET:/api/v1/shop/settings/users/:id/history", "inferred")
     ], ([e.id for e in edges], graph.attrs.get("unresolved_http"))
 
 

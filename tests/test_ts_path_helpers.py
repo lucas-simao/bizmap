@@ -21,7 +21,7 @@ from fastapi import FastAPI
 app = FastAPI()
 
 
-@app.get("/api/v1/client/sites/{site_id}/orders")
+@app.get("/api/v1/shop/sites/{site_id}/orders")
 def site_orders(site_id: str):
     return []
 
@@ -76,7 +76,7 @@ function seg(id: string) {
 const weird = (id: string) => compute(id);
 
 export async function siteOrders(siteId: string) {
-  return api.get(`/api/v1/client${site(siteId)}/orders`);
+  return api.get(`/api/v1/shop${site(siteId)}/orders`);
 }
 
 export async function members(teamId: string) {
@@ -93,7 +93,7 @@ export async function opaque(id: string) {
 """,
     )
     graph = scan_paths([web, api], config=tmp_path / "bizmap.yaml")
-    assert _calls(graph, "src.client.siteOrders") == {"api/entrypoint:http:GET:/api/v1/client/sites/{site_id}/orders"}
+    assert _calls(graph, "src.client.siteOrders") == {"api/entrypoint:http:GET:/api/v1/shop/sites/{site_id}/orders"}
     assert _calls(graph, "src.client.members") == {"api/entrypoint:http:GET:/settings/teams/{team_id}/members"}
     assert _calls(graph, "src.client.projectTasks") == {"api/entrypoint:http:GET:/api/v1/projects/{project_id}/tasks"}
     for fn in ("src.client.siteOrders", "src.client.members", "src.client.projectTasks"):
@@ -103,7 +103,7 @@ export async function opaque(id: string) {
 
 
 def test_call_hole_is_path_dynamic_not_base_unknown() -> None:
-    assert classify_unresolved_http("{baseUrl}/api/v1/client{site(siteId)}/orders") == "path_dynamic"
+    assert classify_unresolved_http("{baseUrl}/api/v1/shop{site(siteId)}/orders") == "path_dynamic"
     assert classify_unresolved_http("{baseUrl}/settings/{seg(id)}/members") == "path_dynamic"
     assert classify_unresolved_http("{baseUrl}/api/v1/orders") == "base_unknown"
 
@@ -126,7 +126,7 @@ export function orgMembers(req: any, res: any) { res.json([]); }
 export function teamBoard(req: any, res: any) { res.json([]); }
 export function itemById(req: any, res: any) { res.json({}); }
 
-app.get('/api/v1/client/sites/:id/orders', siteOrders);
+app.get('/api/v1/shop/sites/:id/orders', siteOrders);
 app.get('/settings/:org/members', orgMembers);
 app.get('/api/v1/teams/:team/board', teamBoard);
 app.get('/api/v1/items/:id', itemById);
@@ -160,7 +160,7 @@ import { api } from '@/lib/http';
 import { site, seg, routes } from '@/lib/paths';
 
 export async function loadSiteOrders(siteId: string) {
-  return api.get(`/api/v1/client${site(siteId)}/orders`);
+  return api.get(`/api/v1/shop${site(siteId)}/orders`);
 }
 
 export async function loadMembers(orgId: string) {
@@ -178,7 +178,7 @@ export async function loadItem(item: { id: number }) {
     )
     graph = scan_paths([web, api], config=tmp_path / "bizmap.yaml")
     expected = {
-        "src.features.screens.loadSiteOrders": "api/entrypoint:http:GET:/api/v1/client/sites/:id/orders",
+        "src.features.screens.loadSiteOrders": "api/entrypoint:http:GET:/api/v1/shop/sites/:id/orders",
         "src.features.screens.loadMembers": "api/entrypoint:http:GET:/settings/:org/members",
         "src.features.screens.loadBoard": "api/entrypoint:http:GET:/api/v1/teams/:team/board",
         "src.features.screens.loadItem": "api/entrypoint:http:GET:/api/v1/items/:id",
@@ -189,7 +189,7 @@ export async function loadItem(item: { id: number }) {
 
 
 def test_base_helpers_namespace_imports_and_composed_helpers(tmp_path: Path) -> None:
-    """`${base()}/x` with base() in another file returning `${API_URL}/api/v1/client`,
+    """`${base()}/x` with base() in another file returning `${API_URL}/api/v1/shop`,
     `import * as P` + `P.site(id)`, object helpers, and helpers composed from
     imported helpers."""
     web, api = tmp_path / "web", tmp_path / "api"
@@ -201,10 +201,10 @@ def test_base_helpers_namespace_imports_and_composed_helpers(tmp_path: Path) -> 
 import express from 'express';
 const app = express();
 export function h(req: any, res: any) { res.json({}); }
-app.get('/api/v1/client/sites/:id/orders', h);
-app.get('/api/v1/client/sites/:id/summary', h);
-app.get('/api/v1/client/orders/:id', h);
-app.get('/api/v1/client/sites/:id/stock', h);
+app.get('/api/v1/shop/sites/:id/orders', h);
+app.get('/api/v1/shop/sites/:id/summary', h);
+app.get('/api/v1/shop/orders/:id', h);
+app.get('/api/v1/shop/sites/:id/stock', h);
 """,
     )
     _write(web, "tsconfig.json", '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }\n')
@@ -213,7 +213,7 @@ app.get('/api/v1/client/sites/:id/stock', h);
         "src/lib/base.ts",
         """
 const API_URL = import.meta.env.VITE_API_URL;
-export const base = () => `${API_URL}/api/v1/client`;
+export const base = () => `${API_URL}/api/v1/shop`;
 """,
     )
     _write(
@@ -246,10 +246,10 @@ export const getStock = (siteId: string) => http.get(siteStock(siteId));
     )
     graph = scan_paths([web, api], config=tmp_path / "bizmap.yaml")
     expected = {
-        "src.screens.listSiteOrders": "api/entrypoint:http:GET:/api/v1/client/sites/:id/orders",
-        "src.screens.siteSummary": "api/entrypoint:http:GET:/api/v1/client/sites/:id/summary",
-        "src.screens.getOrder": "api/entrypoint:http:GET:/api/v1/client/orders/:id",
-        "src.screens.getStock": "api/entrypoint:http:GET:/api/v1/client/sites/:id/stock",
+        "src.screens.listSiteOrders": "api/entrypoint:http:GET:/api/v1/shop/sites/:id/orders",
+        "src.screens.siteSummary": "api/entrypoint:http:GET:/api/v1/shop/sites/:id/summary",
+        "src.screens.getOrder": "api/entrypoint:http:GET:/api/v1/shop/orders/:id",
+        "src.screens.getStock": "api/entrypoint:http:GET:/api/v1/shop/sites/:id/stock",
     }
     for fn, ep in expected.items():
         assert _calls(graph, fn) == {ep}, (fn, _calls(graph, fn), _unresolved(graph, fn))

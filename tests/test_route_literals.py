@@ -572,7 +572,7 @@ def test_uncalled_helper_keeps_its_literal(tmp_path: Path) -> None:
 
 
 def test_unmapped_env_base_self_call_is_kept_cross_repo_is_not(tmp_path: Path) -> None:
-    """Regression (#31 c): a route in service A fetches `${otherApiUrl}/v1/report-video`
+    """Regression (#31 c): a route in service A fetches `${otherApiUrl}/v1/export-csv`
     which exists in A. The env base is not in `services:`: keep the self-call
     (heuristic), never link to another repo on that basis."""
     a = tmp_path / "svc_a"
@@ -586,7 +586,7 @@ const app = express();
 const otherApiUrl = process.env.OTHER_API_URL;
 
 export async function proxyReport(req: any, res: any) {
-  const r = await fetch(`${otherApiUrl}/v1/report-video?x=${req.query.x}`);
+  const r = await fetch(`${otherApiUrl}/v1/export-csv?x=${req.query.x}`);
   res.json(await r.json());
 }
 
@@ -598,7 +598,7 @@ export async function proxyInvoice(req: any, res: any) {
 }
 
 app.get('/proxy/report', proxyReport);
-app.get('/v1/report-video', reportVideo);
+app.get('/v1/export-csv', reportVideo);
 app.get('/proxy/invoice/:id', proxyInvoice);
 """,
     )
@@ -618,7 +618,7 @@ def invoice(invoice_id: str):
     )
     graph = scan_paths([a, b])
     report = _calls_http_from(graph, function_id("server.proxyReport"))
-    assert report == {"svc_a/entrypoint:http:GET:/v1/report-video"}, report
+    assert report == {"svc_a/entrypoint:http:GET:/v1/export-csv"}, report
     # The literal fallback never crosses repos on an unmapped env base. (The
     # traced matcher's own rule — 2+ literal segments may match across repos
     # when the base is not declared — is unchanged and not via route_literal.)
@@ -639,21 +639,21 @@ def _two_repos(tmp_path: Path, web_files: dict[str, str], server: str) -> tuple[
 
 
 def test_explicit_base_requires_whole_path(tmp_path: Path) -> None:
-    """(a) POST `${API_BASE_URL}/api/v2/items/${id}/pdf-report` must not link to
-    POST /api/v1/client/items/:id/pdf-report by its tail."""
+    """(a) POST `${API_BASE_URL}/api/next/items/${id}/summary` must not link to
+    POST /api/v1/shop/items/:id/summary by its tail."""
     web, api = _two_repos(
         tmp_path,
         {
-            "src/pdf.ts": """
+            "src/summary.ts": """
 const API_BASE_URL = window.__cfg.base;
-const itemPdf = (id: string) => `/items/${id}/pdf-report`;
+const itemSummary = (id: string) => `/items/${id}/summary`;
 
-export async function makePdf(id: string) {
-  return fetch(`${API_BASE_URL}/api/v2/items/${id}/pdf-report`, { method: 'POST' });
+export async function makeSummary(id: string) {
+  return fetch(`${API_BASE_URL}/api/next/items/${id}/summary`, { method: 'POST' });
 }
 
-export async function makePdf2(id: string) {
-  return fetch(`${API_BASE_URL}/api/v2${itemPdf(id)}`, { method: 'POST' });
+export async function makeSummary2(id: string) {
+  return fetch(`${API_BASE_URL}/api/next${itemSummary(id)}`, { method: 'POST' });
 }
 """,
         },
@@ -661,11 +661,11 @@ export async function makePdf2(id: string) {
 import express from 'express';
 const app = express();
 export function h(req: any, res: any) { res.json({}); }
-app.post('/api/v1/client/items/:id/pdf-report', h);
+app.post('/api/v1/shop/items/:id/summary', h);
 """,
     )
     graph = scan_paths([web, api])
-    for fn in ("src.pdf.makePdf", "src.pdf.makePdf2", "src.pdf.itemPdf"):
+    for fn in ("src.summary.makeSummary", "src.summary.makeSummary2", "src.summary.itemSummary"):
         assert _calls_http_from(graph, function_id(fn)) == set(), (fn, _calls_http_from(graph, function_id(fn)))
 
 
@@ -735,7 +735,7 @@ def test_module_const_literal_origin_is_the_function(tmp_path: Path) -> None:
         tmp_path,
         {
             "src/index.ts": """
-const REPORT = '/v1/report-video';
+const REPORT = '/v1/export-csv';
 const DIRECT = '/v1/reports/latest';
 
 import { container } from './c';
@@ -754,7 +754,7 @@ export async function latest(http: any) {
 import express from 'express';
 const app = express();
 export function h(req: any, res: any) { res.json({}); }
-app.get('/v1/report-video', h);
+app.get('/v1/export-csv', h);
 app.get('/v1/reports/latest', h);
 """,
     )
@@ -763,31 +763,31 @@ app.get('/v1/reports/latest', h);
         e.id for e in graph.edges.values() if e.type == "calls_http" and ".module" in e.from_id
     ]
     assert module_edges == [], module_edges
-    assert _calls_http_from(graph, function_id("src.index.handle")) == {"api/entrypoint:http:GET:/v1/report-video"}
+    assert _calls_http_from(graph, function_id("src.index.handle")) == {"api/entrypoint:http:GET:/v1/export-csv"}
     assert _calls_http_from(graph, function_id("src.index.latest")) == {"api/entrypoint:http:GET:/v1/reports/latest"}
 
 
 def test_object_member_helper_is_attributed_and_never_suffix_matched(tmp_path: Path) -> None:
-    """Problem 3: `paths.pdfReport(id)` is an object-member helper. Used inside
-    `${API_BASE_URL}/api/v2${...}` it must not link to /api/v1/client/...; an
+    """Problem 3: `paths.summary(id)` is an object-member helper. Used inside
+    `${API_BASE_URL}/api/next${...}` it must not link to /api/v1/shop/...; an
     uncalled member helper is kept but matched whole only."""
     web, api = _two_repos(
         tmp_path,
         {
             "src/paths.ts": """
 export const paths = {
-  pdfReport: (id: string) => `/items/${id}/pdf-report`,
-  nested: { orphan: (id: string) => `/items/${id}/pdf-report` },
+  summary: (id: string) => `/items/${id}/summary`,
+  nested: { orphan: (id: string) => `/items/${id}/summary` },
 };
 """,
-            "src/pdf.ts": """
+            "src/summary.ts": """
 import { paths } from './paths';
 import { container } from './c';
 
 const API_BASE_URL = window.__cfg.base;
 
-export const makePdf = (id: string) =>
-  fetch(`${API_BASE_URL}/api/v2${paths.pdfReport(id)}`, { method: 'POST' });
+export const makeSummary = (id: string) =>
+  fetch(`${API_BASE_URL}/api/next${paths.summary(id)}`, { method: 'POST' });
 
 export const exportZ = (id: string) => container.resolve('http').get(paths.zed(id));
 """,
@@ -797,7 +797,7 @@ export const exportZ = (id: string) => container.resolve('http').get(paths.zed(i
 import express from 'express';
 const app = express();
 export function h(req: any, res: any) { res.json({}); }
-app.post('/api/v1/client/items/:id/pdf-report', h);
+app.post('/api/v1/shop/items/:id/summary', h);
 """,
     )
     graph = scan_paths([web, api])
@@ -834,21 +834,21 @@ app.get('/v9/reports/:id', h);
 
 
 def test_ts_object_member_baseurl_override_false_link(tmp_path: Path) -> None:
-    """The per-call `{ baseURL }` overrides the instance's: `/api/v2/items/:id/pdf-report`
-    must not link to POST /api/v1/client/items/:id/pdf-report."""
+    """The per-call `{ baseURL }` overrides the instance's: `/api/next/items/:id/summary`
+    must not link to POST /api/v1/shop/items/:id/summary."""
     web, api = _two_repos(
         tmp_path,
         {
-            "src/pdf.ts": """
+            "src/summary.ts": """
 import axios from 'axios';
 
-const API_URL = `${import.meta.env.VITE_API_URL}/api/v1/client`;
-const V2_BASE_URL = window.__cfg.v2;
+const API_URL = `${import.meta.env.VITE_API_URL}/api/v1/shop`;
+const NEXT_BASE_URL = window.__cfg.next;
 const http = axios.create({ baseURL: API_URL });
-const paths = { report: (id: string) => `/items/${id}/pdf-report` };
+const paths = { report: (id: string) => `/items/${id}/summary` };
 
-export const makePdf = (id: string, body: unknown) =>
-  http.post(paths.report(id), body, { baseURL: V2_BASE_URL });
+export const makeSummary = (id: string, body: unknown) =>
+  http.post(paths.report(id), body, { baseURL: NEXT_BASE_URL });
 
 export const keepV1 = (id: string, body: unknown) => http.post(paths.report(id), body);
 """,
@@ -857,17 +857,17 @@ export const keepV1 = (id: string, body: unknown) => http.post(paths.report(id),
 import express from 'express';
 const app = express();
 export function h(req: any, res: any) { res.json({}); }
-app.post('/api/v1/client/items/:id/pdf-report', h);
+app.post('/api/v1/shop/items/:id/summary', h);
 """,
     )
     _write(tmp_path, "bizmap.yaml", "services:\n  api:\n    env: VITE_API_URL\n")
     graph = scan_paths([web, api], config=tmp_path / "bizmap.yaml")
-    assert _calls_http_from(graph, function_id("src.pdf.makePdf")) == set()
-    notes = [u for u in graph.attrs.get("unresolved_http") or [] if str(u.get("from", "")).endswith("makePdf")]
+    assert _calls_http_from(graph, function_id("src.summary.makeSummary")) == set()
+    notes = [u for u in graph.attrs.get("unresolved_http") or [] if str(u.get("from", "")).endswith("makeSummary")]
     assert notes, "the overridden call is reported, not dropped"
     # same helper without override keeps the instance base and links
-    assert _calls_http_from(graph, function_id("src.pdf.keepV1")) == {
-        "api/entrypoint:http:POST:/api/v1/client/items/:id/pdf-report"
+    assert _calls_http_from(graph, function_id("src.summary.keepV1")) == {
+        "api/entrypoint:http:POST:/api/v1/shop/items/:id/summary"
     }
 
 

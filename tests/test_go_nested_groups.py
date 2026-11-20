@@ -38,7 +38,7 @@ import (
 
 func main() {
     e := echo.New()
-    api := e.Group("/api/v1/client")
+    api := e.Group("/api/v1/shop")
     settings.RegisterRoutes(api)
     e.Start(":8080")
 }
@@ -64,7 +64,7 @@ func (h *H) History(c echo.Context) error { return nil }
 func RegisterRoutes(g *echo.Group) {
     h := &H{}
     g.GET("/me", h.Me)
-    s := g.Group("/org/settings")
+    s := g.Group("/settings")
     s.GET("/users/:id/history", h.History)
     adm := s.Group("/admin")
     admin.Register(adm)
@@ -91,10 +91,10 @@ func Register(g *echo.Group) {
 """,
     )
     routes = _routes(scan_path(tmp_path))
-    assert ("GET", "/api/v1/client/me") in routes, routes
-    assert ("GET", "/api/v1/client/org/settings/users/:id/history") in routes, routes
-    assert ("GET", "/api/v1/client/org/settings/admin/audit/:id") in routes, routes
-    assert not any(p.startswith("/org/") or p.startswith("/audit") for _m, p in routes), routes
+    assert ("GET", "/api/v1/shop/me") in routes, routes
+    assert ("GET", "/api/v1/shop/settings/users/:id/history") in routes, routes
+    assert ("GET", "/api/v1/shop/settings/admin/audit/:id") in routes, routes
+    assert not any(p.startswith("/settings/") or p.startswith("/audit") for _m, p in routes), routes
 
 
 def test_empty_path_route_is_the_group_root(tmp_path: Path) -> None:
