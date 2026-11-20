@@ -120,6 +120,6 @@ repository come from that repository's own `bizmap.yaml` (`exclude:`), as in a
 normal scan. Each repository keeps its own `bizmap.yaml` (name, database,
 overrides); a repository without a `name:` is named after its `origin`
 (`github.com/acme/shop` → `shop`), else its folder. `services:` from the
-folder's bizmap.yaml are shared, as with `repos:`. `repo_roots` in the graph
-are relative to the discovered folder, so `bizmap impact --repo-root` and the
-MCP server work from there.
+folder's bizmap.yaml are shared, as with `repos:`. As in any joint scan,
+`repo_roots` in the graph are relative to each repository's own git root, so
+`bizmap impact` on a diff from one of those repositories works unchanged.

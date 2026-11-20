@@ -65,8 +65,9 @@ def test_scan_discover_scans_one_copy_per_repo(work: Path, tmp_path: Path) -> No
     assert res.exit_code == 0, res.output
     assert "discovered 2 project(s): orders=orders, shop=shop" in res.output
     data = json.loads(out.read_text())
-    assert data["repo_roots"] == {"orders": "orders", "shop": "shop"}
-    assert data["repo_roots_base"] == "scan"
+    # each repo's root relative to its own git toplevel, as for `bizmap scan ./a ./b`
+    assert data["repo_roots"] == {"orders": ".", "shop": "."}
+    assert data["repo_roots_base"] == "git"
     files = {n.get("evidence", {}).get("file") for n in data["nodes"] if n.get("evidence")}
     assert any(f and f.endswith("orders.py") for f in files)
     assert "orders-2023" not in json.dumps(data["nodes"])
