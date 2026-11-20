@@ -307,7 +307,7 @@ def test_factory_members_get_their_own_routes(tmp_path: Path) -> None:
         added = f"diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -{line},0 +{line},1 @@\n+x\n"
         imp = compute_impact(graph, added)
         return {
-            t.rsplit(":", 1)[-1]
+            t.split(":", 3)[-1]
             for f in imp.functions
             for e in graph.edges.values()
             if e.type == "calls_http" and e.from_id == f.function
