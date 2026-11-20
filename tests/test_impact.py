@@ -303,7 +303,9 @@ def test_factory_members_get_their_own_routes(tmp_path: Path) -> None:
     )
 
     def routes(line: int) -> set[str]:
-        imp = compute_impact(graph, _diff("web/src/clients/shop.ts", line))
+        p = "web/src/clients/shop.ts"
+        added = f"diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -{line},0 +{line},1 @@\n+x\n"
+        imp = compute_impact(graph, added)
         return {
             t.rsplit(":", 1)[-1]
             for f in imp.functions
