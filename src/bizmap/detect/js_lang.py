@@ -1001,6 +1001,7 @@ class JsAnalyzer:
                 )
             )
         _propagate_router_mounts(routers_by_mod, base_routers_by_mod, mounts)
+        _resolve_specs_through_barrels(import_specs_by_mod, exports_by_mod, set(trees_by_mod))
         _propagate_client_bases(
             clients_by_mod,
             import_specs_by_mod,
@@ -2121,6 +2122,48 @@ def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, J
     return factories
 
 
+def _final_source(
+    mod: str,
+    name: str,
+    exports_by_mod: dict[str, dict[str, str]],
+    known: set[str],
+    depth: int = 0,
+) -> tuple[str, str] | None:
+    """Module that actually defines `name`, following `index` files and
+    `export { a as b } from` / `export * from` re-exports."""
+    if depth > 6:
+        return None
+    for cand in (mod, f"{mod}.index"):
+        if cand not in known:
+            continue
+        named, stars = _REEXPORTS.get(cand, ({}, []))
+        if name in named:
+            nmod, orig = named[name]
+            return _final_source(nmod, orig, exports_by_mod, known, depth + 1) or (nmod, orig)
+        if name in (exports_by_mod.get(cand) or {}) or not stars:
+            return cand, name
+        for star in stars:
+            hit = _final_source(star, name, exports_by_mod, known, depth + 1)
+            if hit and name in (exports_by_mod.get(hit[0]) or {}):
+                return hit
+        return cand, name
+    return None
+
+
+def _resolve_specs_through_barrels(
+    import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
+    exports_by_mod: dict[str, dict[str, str]],
+    known: set[str],
+) -> None:
+    for specs in import_specs_by_mod.values():
+        for local, (src_mod, orig) in list(specs.items()):
+            if orig == "*" or (src_mod in known and orig in (exports_by_mod.get(src_mod) or {})):
+                continue
+            hit = _final_source(src_mod, orig, exports_by_mod, known)
+            if hit and hit != (src_mod, orig):
+                specs[local] = hit
+
+
 def _propagate_client_bases(
     clients_by_mod: dict[str, dict[str, str]],
     import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
@@ -2189,14 +2232,22 @@ def _propagate_client_bases(
         args = call_args(node)
         changed = False
         for i, arg in enumerate(args):
-            if i >= len(params) or arg.type != "identifier":
+            if i >= len(params):
                 continue
-            src = text(arg)
-            base = clients.get(src)
-            if base is None:
-                base = dest_clients.get(src)
-            if base is None:
+            if arg.type == "call_expression" and call_callee_name(arg) == "create":
+                # createOrgClient(axios.create({ baseURL: ... }))
+                base = _create_call_base(arg, consts_by_mod.get(module) or {})
+                if base is None:
+                    continue
+            elif arg.type != "identifier":
                 continue
+            else:
+                src = text(arg)
+                base = clients.get(src)
+                if base is None:
+                    base = dest_clients.get(src)
+                if base is None:
+                    continue
             pname = params[i]
             for key in (pname, f"this.{pname}", f"self.{pname}"):
                 if dest_clients.get(key) != base:
