@@ -6,12 +6,6 @@ functions, tables and columns the change reaches, and a Mermaid diagram.
 
 ![The BizMap comment on bizmap-demo PR #1](assets/demo/pr-comment-small.png){ .shot width="760" }
 
-!!! info "Next release"
-
-    The comment is getting a risk badge, collapsible sections, commit links and
-    new inputs (`risk-threshold`, `mermaid`, `shared-services`). They are merged
-    on `main` but not in a release yet: see [Next release](action.md).
-
 ## Setup
 
 `.github/workflows/bizmap-impact.yml`:
@@ -30,13 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4   # the base commit is fetched if missing; fetch-depth: 0 also works
-      - uses: lucas-simao/bizmap@v0.4.3
+      - uses: lucas-simao/bizmap@v0.5.0
         with:
           path: .            # or the workspace dir holding bizmap.yaml with `repos:`
 ```
 
 Pin a release tag (or a commit SHA, for supply-chain hygiene:
-`lucas-simao/bizmap@<sha> # v0.4.3`). The Action installs BizMap from that
+`lucas-simao/bizmap@<sha> # v0.5.0`). The Action installs BizMap from that
 same ref, so the CLI and the Action always match.
 
 ## See it running

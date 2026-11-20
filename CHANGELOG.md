@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.5.0)
+## 0.5.0 — 2026-11-20
 
 ### Added
 
@@ -14,6 +14,16 @@
   Subgraphs are built on demand, so ~55k-node graphs stay usable.
   `bizmap.yaml` `export.services` splits a monorepo into services.
   `--format llm` is reserved for 0.5.1. See `docs/export.md`.
+  The table filter banner counts the services that read or write the table
+  apart from those that only call in over HTTP ("5 services read or write
+  it. Called from 3 more services over HTTP.").
+
+### Changed
+
+- Graph format version `0.5.0` (no field changed; it follows the release).
+- Docs: `bizmap export` documented on the site (Commands → export), no longer
+  "coming soon". GitHub Action examples pin `@v0.5.0` (`@v0.4.2` was never
+  tagged). The sdist no longer ships `docs/assets` and `docs/img`.
 
 ## 0.4.3 — 2026-11-20
 

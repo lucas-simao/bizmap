@@ -74,5 +74,6 @@ minor versions; breaking changes are called out in the
 
 ## Is there an HTML view?
 
-`bizmap export --format html` is coming in 0.5.0 —
-see [export](export.md) (merged on `main`, ships in 0.5.0).
+Yes, since 0.5.0: `bizmap export --format html` writes one self-contained,
+offline page (services first, click to expand, search, filter by table) —
+see [export](commands/export.md).

@@ -7,8 +7,8 @@ its columns, and every entrypoint that reaches one of those functions through
 in one repo reaches a table written by another repo's handler).
 
 The HTML page runs the same traversal in the browser (``reach.js``); a test
-keeps the two in step with ``tool_table_usage``. When 0.4.3 ships its own
-reach through ``calls_http``, swap the body of :func:`table_reach` (and
+keeps the two in step with ``tool_table_usage``. When report / why / impact
+share one reach module, swap the body of :func:`table_reach` (and
 ``reach.js``) for it: callers only rely on the returned shape.
 """
 

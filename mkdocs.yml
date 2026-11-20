@@ -46,6 +46,7 @@ theme:
 
 exclude_docs: |
   requirements.txt
+  /export.md
 
 plugins:
   - search
@@ -96,12 +97,10 @@ nav:
       - impact: commands/impact.md
       - registry: commands/registry.md
       - mcp: commands/mcp.md
-      - export (0.5.0, not released yet): export.md
+      - export: commands/export.md
   - Languages and detectors: languages.md
   - MCP server: mcp.md
-  - GitHub Action:
-      - github-action.md
-      - Next release (not released yet): action.md
+  - GitHub Action: github-action.md
   - Reference:
       - Graph format: graph-schema.md
       - How it works: how-it-works.md

@@ -20,7 +20,10 @@
       readsWrites: "Reads / writes", reachedBy: "Reached by", reaches: "Reaches",
       more: "more", hiddenRoutes: "Routes not drawn", hiddenFuncs: "Functions not drawn",
       clickToShow: "click one to draw it",
-      filterBanner: "Table {t}: {e} routes/jobs and {f} functions in {s} services read or write it.",
+      filterBanner: "Table {t}: {e} routes/jobs and {f} functions; {s} services read or write it.",
+      filterBanner1: "Table {t}: {e} routes/jobs and {f} functions; 1 service reads or writes it.",
+      filterBannerHttp: "Called from {n} more services over HTTP.",
+      filterBannerHttp1: "Called from 1 more service over HTTP.",
       noUsers: "Nothing reads or writes this table.",
       noResults: "No match.", evidence: "Defined at", why: "Why",
       tip: "Click a service to expand it, click its box again to collapse. Search centres and highlights a node.",
@@ -44,7 +47,10 @@
       readsWrites: "Lê / escreve", reachedBy: "Alcançada por", reaches: "Alcança",
       more: "a mais", hiddenRoutes: "Rotas não desenhadas", hiddenFuncs: "Funções não desenhadas",
       clickToShow: "clique numa para desenhá-la",
-      filterBanner: "Tabela {t}: {e} rotas/jobs e {f} funções em {s} serviços leem ou escrevem nela.",
+      filterBanner: "Tabela {t}: {e} rotas/jobs e {f} funções; {s} serviços leem ou escrevem nela.",
+      filterBanner1: "Tabela {t}: {e} rotas/jobs e {f} funções; 1 serviço lê ou escreve nela.",
+      filterBannerHttp: "Chamada por mais {n} serviços via HTTP.",
+      filterBannerHttp1: "Chamada por mais 1 serviço via HTTP.",
       noUsers: "Nada lê nem escreve nesta tabela.",
       noResults: "Nada encontrado.", evidence: "Definido em", why: "Por quê",
       tip: "Clique num serviço para expandi-lo e na caixa dele de novo para recolher. A busca centraliza e destaca o nó.",
@@ -448,13 +454,18 @@
     var lab = function (i) { var s = N[i][1]; return short((s >= 0 ? SV[s].name + " · " : "") + N[i][2], 40); };
     var posOf = {};
     g.pos.forEach(function (p) { posOf[p[0]] = { x: p[1], y: p[2] }; });
-    var svcs = new Set();
+    // services that read/write the table vs. services that only reach it over HTTP
+    var dataSvcs = new Set(), httpSvcs = new Set();
+    var svcOf = function (set) { return function (i) { if (N[i][1] >= 0) set.add(N[i][1]); }; };
+    R.functions.forEach(function (_v, f) { svcOf(dataSvcs)(f); });
+    R.entrypoints.forEach(function (_v, e) { if (!R.via.has(e)) svcOf(dataSvcs)(e); });
+    R.entrypoints.forEach(function (_v, e) { if (!dataSvcs.has(N[e][1])) svcOf(httpSvcs)(e); });
+    R.callers.forEach(function (_v, c) { if (!dataSvcs.has(N[c][1])) svcOf(httpSvcs)(c); });
     callers.concat(eps, fns).forEach(function (i) {
       var el = nodeEl(i, null, lab(i));
       el.position = posOf["n" + i];
       el.classes += " svc-" + N[i][1];
       els.push(el);
-      if (N[i][1] >= 0) svcs.add(N[i][1]);
     });
     var tel = nodeEl(t, null, N[t][2]);
     tel.position = posOf["n" + t];
@@ -483,7 +494,8 @@
     });
     var banner = $("banner");
     banner.style.display = "block";
-    banner.innerHTML = esc(fmt(L.filterBanner, { t: N[t][2], e: R.entrypoints.size, f: R.functions.size, s: svcs.size })) +
+    banner.innerHTML = esc(fmt(dataSvcs.size === 1 ? L.filterBanner1 : L.filterBanner, { t: N[t][2], e: R.entrypoints.size, f: R.functions.size, s: dataSvcs.size }) +
+      (httpSvcs.size ? " " + fmt(httpSvcs.size === 1 ? L.filterBannerHttp1 : L.filterBannerHttp, { n: httpSvcs.size }) : "")) +
       (hidden ? " <span class=muted>(+" + hidden + " " + L.more + ")</span>" : "") +
       ' <button class="link" id="clear-filter">' + esc(L.clearFilter) + "</button>";
     $("clear-filter").onclick = function () { clearFilter(); };

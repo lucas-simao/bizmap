@@ -6,6 +6,8 @@
 [![Docs](https://img.shields.io/badge/docs-lucas--simao.github.io%2Fbizmap-e8590c)](https://lucas-simao.github.io/bizmap/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
+📖 **Documentation: [lucas-simao.github.io/bizmap](https://lucas-simao.github.io/bizmap/)**
+
 **Who reads and writes this column — across all your services — and what triggers it?**
 
 BizMap reads your code and maps every entrypoint (HTTP route, job, queue
@@ -33,13 +35,15 @@ pipx install bizmap        # or: pip install bizmap   (Python 3.11+)
 bizmap scan . --mermaid    # writes bizmap.graph.json (+ bizmap.graph.mmd)
 bizmap why orders.status   # writers, readers, what triggers them, who calls in
 bizmap report              # how much of the code BizMap understood
+bizmap export --format html --out bizmap.html   # one offline page to browse the graph
 ```
 
 Several services at once — one graph, HTTP calls between them matched:
 
 ```bash
-bizmap scan ./web ./api ./billing           # or a bizmap.yaml with `repos:`
-bizmap scan --discover ~/work --list        # a work folder full of clones and worktrees
+bizmap scan --discover .                    # every git repo under the current folder
+bizmap report --cross-service               # which routes reach which services over HTTP
+bizmap scan ./web ./api ./billing           # or list them (or a bizmap.yaml with `repos:`)
 ```
 
 Try it on the demo in one minute:
@@ -93,8 +97,8 @@ jobs:
   bizmap:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: lucas-simao/bizmap@v0.4.3
+      - uses: actions/checkout@v4   # the base commit is fetched if missing; fetch-depth: 0 also works
+      - uses: lucas-simao/bizmap@v0.5.0
         with:
           path: .
 ```
@@ -124,9 +128,7 @@ Cursor (`.cursor/mcp.json`):
 Tools (`search`, `call_graph`, `function_data`, `table_usage`, `impact`,
 `why_column`) and other clients: [MCP server](https://lucas-simao.github.io/bizmap/mcp/).
 
-## Interactive map (HTML) *(coming in 0.5.0)*
-
-*Not in a release yet: merged on `main`, ships with bizmap 0.5.0.*
+## Interactive map (HTML)
 
 ```bash
 bizmap export --graph bizmap.graph.json --format html --out bizmap.html   # --lang pt-BR
@@ -138,7 +140,7 @@ route, function, table or column, and filter by a table across services.
 
 ![bizmap export --format html: services, expand, search, filter by table](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/img/export-html.gif)
 
-Details: [export](https://lucas-simao.github.io/bizmap/export/).
+Details: [export](https://lucas-simao.github.io/bizmap/commands/export/).
 
 ## Documentation
 
@@ -146,7 +148,7 @@ Details: [export](https://lucas-simao.github.io/bizmap/export/).
 | --- | --- |
 | [Getting started](https://lucas-simao.github.io/bizmap/getting-started/) | Install and walk through the demo |
 | [Configuration](https://lucas-simao.github.io/bizmap/configuration/) | `bizmap.yaml`: `services:`, `database:`, `repos:`, excludes, overrides |
-| [Commands](https://lucas-simao.github.io/bizmap/commands/) | `scan`, `why`, `report`, `impact`, `registry`, `mcp` |
+| [Commands](https://lucas-simao.github.io/bizmap/commands/) | `scan`, `why`, `report`, `impact`, `registry`, `mcp`, `export` |
 | [MCP server](https://lucas-simao.github.io/bizmap/mcp/) | Let Claude Code, Cursor or any MCP client query the graph |
 | [GitHub Action](https://lucas-simao.github.io/bizmap/github-action/) | The PR comment |
 | [Graph format](https://lucas-simao.github.io/bizmap/graph-schema/) | `bizmap.graph.json`, node and edge types, confidence |
