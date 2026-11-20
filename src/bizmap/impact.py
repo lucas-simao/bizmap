@@ -56,14 +56,59 @@ def _git_unquote(path: str) -> str:
 def parse_unified_diff(text: str) -> dict[str, set[int]]:
     """Return ``{new_path: changed new-side line numbers}``.
 
-    Added lines count as changed. A deletion marks the new-side line where the
-    removed block was (and the one before it), so a function that only lost
-    lines is still caught. Deleted files are ignored (nothing to map onto).
+    Added lines count as changed. A change block (a run of ``-``/``+`` lines)
+    with additions is fully described by them. A pure deletion marks the two
+    new-side lines around the gap: ``{c, c+1}`` when the hunk's new side is
+    empty (``@@ -14 +13,0 @@``: line 13 is *before* the gap), else the lines
+    before and after it, kept inside the hunk. Deleted files are ignored.
+
+    Hunk bodies are read by their header counts, so a removed ``-- comment``
+    (``--- comment``) is not mistaken for a file header.
     """
     out: dict[str, set[int]] = {}
     path: str | None = None
     line = 0
+    old_left = new_left = 0
+    h_start = h_count = 0
+    block_has_add = False
+    block_del_at: int | None = None
+
+    def flush() -> None:
+        nonlocal block_has_add, block_del_at
+        if path is not None and block_del_at is not None and not block_has_add:
+            if h_count == 0:
+                c = h_start
+                marks = {c, c + 1} if c >= 1 else {1}
+            else:
+                lo, hi = h_start, h_start + h_count - 1
+                marks = {min(max(p, lo), hi) for p in (block_del_at - 1, block_del_at)}
+            out[path].update(m for m in marks if m >= 1)
+        block_has_add = False
+        block_del_at = None
+
     for raw in text.splitlines():
+        if old_left > 0 or new_left > 0:
+            tag = raw[:1] or " "
+            if tag == "\\":  # "\ No newline at end of file"
+                continue
+            if tag == "+":
+                if path is not None:
+                    out[path].add(line)
+                line += 1
+                new_left -= 1
+                block_has_add = True
+                continue
+            if tag == "-":
+                old_left -= 1
+                if block_del_at is None:
+                    block_del_at = line
+                continue
+            flush()
+            line += 1
+            old_left -= 1
+            new_left -= 1
+            continue
+        flush()
         if raw.startswith("+++ "):
             target = raw[4:].rstrip("\n")
             target = _git_unquote(target) if target.startswith('"') else target.split("\t", 1)[0].strip()
@@ -73,26 +118,15 @@ def parse_unified_diff(text: str) -> dict[str, set[int]]:
                 path = target[2:] if target.startswith("b/") else target
                 out.setdefault(path, set())
             continue
-        if raw.startswith("--- ") or raw.startswith("diff --git"):
-            continue
         m = _HUNK.match(raw)
         if m:
-            line = int(m.group(1))
-            continue
-        if path is None or not raw:
-            if path is not None and not raw:
-                line += 1
-            continue
-        tag = raw[0]
-        if tag == "+":
-            out[path].add(line)
-            line += 1
-        elif tag == "-":
-            out[path].add(max(line, 1))
-            if line > 1:
-                out[path].add(line - 1)
-        elif tag == " ":
-            line += 1
+            om = re.match(r"^@@ -\d+(?:,(\d+))?", raw)
+            old_left = int(om.group(1)) if om and om.group(1) is not None else 1
+            h_start = int(m.group(1))
+            h_count = int(m.group(2)) if m.group(2) is not None else 1
+            new_left = h_count
+            line = h_start
+    flush()
     return {p: lines for p, lines in out.items() if lines}
 
 
@@ -457,7 +491,11 @@ def render_markdown(
         text = build(n, True)
     if len(text) > max_chars:
         text = build(0, False)
-    if len(text) > max_chars:  # pathological labels: hard cut on a line boundary
-        cut = text[: max_chars - 200].rsplit("\n", 1)[0]
-        text = cut + "\n\n…truncated.\n"
+    if len(text) > max_chars:  # pathological labels: hard cut, marker and header kept
+        tail = "\n\n…truncated" + (f" — full report in the [run summary]({details_url})" if details_url else "") + ".\n"
+        keep = "\n".join(head) + "\n"
+        room = max_chars - len(keep) - len(tail)
+        rest = text[len(keep):]
+        cut = rest[:room].rsplit("\n", 1)[0] if room > 0 else ""
+        text = keep + cut + tail
     return text
