@@ -20,7 +20,6 @@ Graphs from 0.2.x and 0.3.0 are not directly diffable for these nodes:
   longer `inferred`.
 - **Graph `version`** is `"0.3.0"`.
 
-
 ### Fixed
 
 - **`baseURL` inside a config object sent through a local wrapper**
