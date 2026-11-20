@@ -44,6 +44,9 @@ theme:
     - content.code.copy
     - content.action.edit
 
+exclude_docs: |
+  requirements.txt
+
 plugins:
   - search
 
