@@ -104,6 +104,26 @@ jobs:
 Live examples: [bizmap-demo pull requests](https://github.com/lucas-simao/bizmap-demo/pulls).
 Inputs, outputs and behaviour: [GitHub Action](https://lucas-simao.github.io/bizmap/github-action/).
 
+## Ask the graph from your coding agent (MCP)
+
+`bizmap mcp` serves the graph to Claude Code, Cursor, Claude Desktop or any MCP
+client — read-only and offline — so an agent can ask *what writes
+`orders.status`?* or *what does this diff touch?* instead of grepping.
+
+```bash
+bizmap scan . --out bizmap.graph.json
+claude mcp add bizmap -- bizmap mcp --graph "$PWD/bizmap.graph.json"   # Claude Code
+```
+
+Cursor (`.cursor/mcp.json`):
+
+```json
+{ "mcpServers": { "bizmap": { "command": "bizmap", "args": ["mcp", "--graph", "${workspaceFolder}/bizmap.graph.json"] } } }
+```
+
+Tools (`search`, `call_graph`, `function_data`, `table_usage`, `impact`,
+`why_column`) and other clients: [MCP server](https://lucas-simao.github.io/bizmap/mcp/).
+
 ## Interactive map (HTML) *(coming in 0.5.0)*
 
 *Not in a release yet: merged on `main`, ships with bizmap 0.5.0.*
