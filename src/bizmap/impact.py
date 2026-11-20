@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from bizmap.graph import Graph, Node
@@ -151,10 +151,31 @@ class FunctionImpact:
 
 
 @dataclass
+class SchemaChange:
+    """A changed line in a `.sql` file that names a known column."""
+
+    column: str
+    file: str
+    line: int
+    entrypoints: list[str] = field(default_factory=list)
+    functions: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "column": self.column,
+            "file": self.file,
+            "line": self.line,
+            "entrypoints": self.entrypoints,
+            "functions": self.functions,
+        }
+
+
+@dataclass
 class Impact:
     functions: list[FunctionImpact]
     unmapped_files: list[str]
     hint: str | None = None
+    schema_changes: list[SchemaChange] = field(default_factory=list)
 
     @property
     def entrypoints(self) -> list[str]:
@@ -176,6 +197,7 @@ class Impact:
             "reads": self.reads,
             "unmapped_files": self.unmapped_files,
             "hint": self.hint,
+            "schema_changes": [c.to_dict() for c in self.schema_changes],
         }
 
 
@@ -283,7 +305,76 @@ def _data_reached(
     return writes, reads
 
 
-def compute_impact(graph: Graph, diff_text: str, *, prefix: str = ".") -> Impact:
+_SQL_TABLE_STMT = re.compile(
+    r"(?is)\b(?:CREATE\s+(?:UNLOGGED\s+|TEMP(?:ORARY)?\s+)?TABLE(?:\s+IF\s+NOT\s+EXISTS)?|ALTER\s+TABLE(?:\s+IF\s+EXISTS)?(?:\s+ONLY)?)\s+([\w\".]+)"
+)
+_SQL_ADD_COLUMN = re.compile(r'(?i)\b(?:ADD|ALTER|DROP|RENAME)\s+(?:COLUMN\s+)?(?:IF\s+(?:NOT\s+)?EXISTS\s+)?"?([A-Za-z_]\w*)"?')
+_SQL_COLUMN_DEF = re.compile(r'^\s*,?\s*"?([A-Za-z_]\w*)"?\s+[A-Za-z]')
+_SQL_NOT_COLUMN = {
+    "constraint", "primary", "foreign", "unique", "check", "exclude", "like", "create",
+    "alter", "table", "add", "drop", "references", "on", "insert", "update", "delete", "select",
+}
+
+
+def _schema_changes(
+    graph: Graph,
+    changes: dict[str, set[int]],
+    unmapped: list[str],
+    repo_root: Path,
+    inc: dict[str, list[Any]],
+) -> list[SchemaChange]:
+    """Changed lines of `.sql` files inside `CREATE TABLE` / `ALTER TABLE` that
+    name a column the graph knows, with what reads or writes that column."""
+    by_name: dict[tuple[str, str], list[str]] = {}
+    for nid, node in graph.nodes.items():
+        if node.type == "column":
+            table = str(node.attrs.get("table") or "").lower().split(".")[-1]
+            name = str(node.attrs.get("name") or "").lower()
+            by_name.setdefault((table, name), []).append(nid)
+    out: list[SchemaChange] = []
+    seen: set[str] = set()
+    for path in unmapped:
+        if not path.lower().endswith(".sql"):
+            continue
+        try:
+            lines = (repo_root / path).read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for ln in sorted(changes.get(path, ())):
+            if not 1 <= ln <= len(lines):
+                continue
+            # statement holding the line: from the previous ';' up to it
+            start = ln - 1
+            while start > 0 and ";" not in lines[start - 1]:
+                start -= 1
+            stmt = "\n".join(lines[start:ln])
+            m = None
+            for m in _SQL_TABLE_STMT.finditer(stmt):
+                pass
+            if m is None:
+                continue
+            table = m.group(1).replace('"', "").split(".")[-1].lower()
+            text = lines[ln - 1]
+            cm = _SQL_ADD_COLUMN.search(text) or _SQL_COLUMN_DEF.match(text)
+            if cm is None or cm.group(1).lower() in _SQL_NOT_COLUMN:
+                continue
+            for cid in by_name.get((table, cm.group(1).lower()), []):
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                fns = sorted({e.from_id for e in inc.get(cid, []) if e.type in {"reads", "writes"}
+                              and (graph.get(e.from_id) is not None and graph.nodes[e.from_id].type == "function")})
+                eps: set[str] = {e.from_id for e in inc.get(cid, []) if e.type in {"reads", "writes"}
+                                 and graph.get(e.from_id) is not None and graph.nodes[e.from_id].type == "entrypoint"}
+                for fid in fns:
+                    eps |= _entrypoints_reaching(graph, fid, inc)
+                out.append(SchemaChange(column=cid, file=path, line=ln, entrypoints=sorted(eps), functions=fns))
+    return out
+
+
+def compute_impact(
+    graph: Graph, diff_text: str, *, prefix: str = ".", repo_root: Path | None = None
+) -> Impact:
     """Impact of ``diff_text`` (paths relative to the git root) on ``graph``.
 
     ``prefix`` is the scanned directory relative to the git root (the path
@@ -324,7 +415,8 @@ def compute_impact(graph: Graph, diff_text: str, *, prefix: str = ".") -> Impact
             + "). "
             + ("Pass --prefix <dir given to bizmap scan>." if graph.attrs.get("repo_roots_base") != "git" else "")
         ).strip()
-    return Impact(functions=out, unmapped_files=unmapped, hint=hint)
+    schema = _schema_changes(graph, changes, unmapped, repo_root, in_idx) if repo_root is not None else []
+    return Impact(functions=out, unmapped_files=unmapped, hint=hint, schema_changes=schema)
 
 
 # ── rendering ────────────────────────────────────────────────────────────────
@@ -407,6 +499,60 @@ def render_mermaid(graph: Graph, impact: Impact, *, limit: int = 40) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _plural(n: int, word: str) -> str:
+    return word if n == 1 else word + "s"
+
+
+def _fold_pass_through(graph: Graph, functions: list[FunctionImpact]) -> dict[str, str]:
+    """caller → callee for a changed function that only hands off to another
+    changed function with the very same impact (an inline route handler that
+    calls `cancelOrder`): one row instead of two."""
+    by_id = {f.function: f for f in functions}
+    calls: dict[str, set[str]] = {}
+    for edge in graph.edges.values():
+        if edge.type == "calls" and edge.from_id in by_id and edge.to_id in by_id:
+            calls.setdefault(edge.from_id, set()).add(edge.to_id)
+    folded: dict[str, str] = {}
+
+    def key(f: FunctionImpact) -> tuple:
+        return (tuple(f.entrypoints), tuple(f.writes), tuple(f.reads))
+
+    for caller in sorted(calls):
+        same = sorted(c for c in calls[caller] if key(by_id[c]) == key(by_id[caller]) and c not in folded)
+        if same and caller not in folded.values():
+            folded[caller] = same[0]
+    return folded
+
+
+def _schema_section(graph: Graph, impact: Impact) -> list[str]:
+    if not impact.schema_changes:
+        return []
+    out = ["**Schema changes**", "", "| Column | Used by entrypoints | Functions |", "|---|---|---|"]
+    for ch in impact.schema_changes[:30]:
+        eps = "<br>".join(f"`{_label(graph, e)}`" for e in ch.entrypoints[:6]) or "— (not used yet)"
+        if len(ch.entrypoints) > 6:
+            eps += f"<br>+{len(ch.entrypoints) - 6}"
+        fns = "<br>".join(f"`{_label(graph, f)}`" for f in ch.functions[:4]) or "—"
+        if len(ch.functions) > 4:
+            fns += f"<br>+{len(ch.functions) - 4}"
+        node = graph.get(ch.column)
+        name = f"{node.attrs.get('table')}.{node.attrs.get('name')}" if node is not None else ch.column
+        out.append(f"| `{name}` ({ch.file}:{ch.line}) | {eps} | {fns} |")
+    if len(impact.schema_changes) > 30:
+        out.append(f"\n+{len(impact.schema_changes) - 30} more changed column(s).")
+    return out
+
+
+def _other_unmapped(impact: Impact) -> str:
+    """Changed files no function or schema line maps to, named (not just counted)."""
+    covered = {c.file for c in impact.schema_changes}
+    rest = [p for p in impact.unmapped_files if p not in covered]
+    if not rest:
+        return ""
+    shown = ", ".join(f"`{p}`" for p in rest[:5]) + (f", +{len(rest) - 5}" if len(rest) > 5 else "")
+    return f"{len(rest)} changed {_plural(len(rest), 'file')} outside any function: {shown}."
+
+
 def _weight(fi: FunctionImpact) -> int:
     return len(fi.entrypoints) + len(_tables_only(fi.writes)) + len(_tables_only(fi.reads))
 
@@ -426,6 +572,13 @@ def render_markdown(
     rest are ranked by how much they reach and capped at ``max_rows``.
     """
     head = [MARKER, "### BizMap impact", ""]
+    schema_md = _schema_section(graph, impact)
+    if not impact.functions and schema_md:
+        body = head + ["No mapped function changed in this diff.", "", *schema_md]
+        other = _other_unmapped(impact)
+        if other:
+            body += ["", other]
+        return "\n".join(body) + "\n"
     if not impact.functions:
         head.append("No mapped function changed in this diff.")
         if impact.unmapped_files:
@@ -435,14 +588,20 @@ def render_markdown(
             head.append("")
             head.append(f"Note: {impact.hint}")
         return "\n".join(head) + "\n"
+    folded = _fold_pass_through(graph, impact.functions)
     reaching = sorted(
-        (f for f in impact.functions if _weight(f)), key=lambda f: (-_weight(f), f.function)
+        (f for f in impact.functions if _weight(f) and f.function not in folded),
+        key=lambda f: (-_weight(f), f.function),
     )
-    quiet = len(impact.functions) - len(reaching)
+    quiet = len([f for f in impact.functions if not _weight(f)])
+    via: dict[str, list[str]] = {}
+    for caller, callee in folded.items():
+        via.setdefault(callee, []).append(caller)
+    n_w, n_r = len(_tables_only(impact.writes)), len(_tables_only(impact.reads))
     head.append(
-        f"**{len(impact.functions)}** changed function(s) · "
-        f"**{len(impact.entrypoints)}** entrypoint(s) · "
-        f"writes **{len(_tables_only(impact.writes))}** · reads **{len(_tables_only(impact.reads))}** table(s)"
+        f"**{len(impact.functions)}** changed {_plural(len(impact.functions), 'function')} · "
+        f"**{len(impact.entrypoints)}** {_plural(len(impact.entrypoints), 'entrypoint')} · "
+        f"writes **{n_w}** {_plural(n_w, 'table')} · reads **{n_r}** {_plural(n_r, 'table')}"
     )
 
     def data_labels(ids: list[str]) -> list[str]:
@@ -472,8 +631,17 @@ def render_markdown(
             labels.append(f"+{len(names) - 8}")
         return "<br>".join(labels)
 
+    def fn_cell(fi: FunctionImpact) -> str:
+        label = f"`{_label(graph, fi.function)}`"
+        callers = sorted(via.get(fi.function, []))
+        if callers:
+            names = ", ".join(f"`{_label(graph, c)}`" for c in callers[:3])
+            more = f" +{len(callers) - 3}" if len(callers) > 3 else ""
+            label += f"<br><sub>also changed: {names}{more} (same impact)</sub>"
+        return label
+
     rows = [
-        f"| `{_label(graph, fi.function)}` | {cell(fi.entrypoints)} | "
+        f"| {fn_cell(fi)} | {cell(fi.entrypoints)} | "
         f"{cell(fi.writes, data=True)} | {cell(fi.reads, data=True)} |"
         for fi in reaching
     ]
@@ -499,6 +667,11 @@ def render_markdown(
             notes.append(f"+{quiet} changed function(s) reach no route or table")
         if notes:
             body += ["", " · ".join(notes) + "."]
+        if schema_md:
+            body += ["", *schema_md]
+        other = _other_unmapped(impact)
+        if other:
+            body += ["", other]
         if len(reaching) > n_rows and details_url:
             body.append(f"Full list: [workflow run summary]({details_url}).")
         return "\n".join(body + footer) + "\n"
