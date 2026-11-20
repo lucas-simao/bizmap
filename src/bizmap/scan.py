@@ -29,10 +29,12 @@ from bizmap.graph import (
     view_id,
 )
 from bizmap.http_match import (
+    _service_fields,
     base_is_known,
     classify_unresolved_http,
     drop_leading_placeholders,
     has_explicit_base,
+    leading_env_key,
     match_http,
     normalize_path,
     path_template_match,
@@ -2143,7 +2145,12 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
     Intra-repo linking happens in `_scan_one`. After merge, qualify_graph rewrites
     ids; this pass re-matches using each function's ``http_calls`` /
     ``unresolved_http`` so cross-repo ``calls_http`` edges match a joint scan.
-    """
+
+    Env keys no ``services:`` entry maps (`{VITE_API_URL}/x`) are linked to a
+    repo when every call through that key that did match points at that one
+    repo: the key's other calls are matched against that repo only
+    (`via: env_inferred`). Keys left with unmatched calls get a
+    ``services:`` hint (graph attr ``service_hints``)."""
     routes = [
         (n.id, str(n.attrs.get("method") or ""), str(n.attrs.get("path") or ""))
         for n in graph.nodes.values()
@@ -2152,45 +2159,80 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
         and n.attrs.get("method")
         and n.attrs.get("path")
     ]
-    unmatched: list[dict] = []
     route_repos = {
         n.id: str(n.attrs.get("repo") or graph.repo or "")
         for n in graph.nodes.values()
         if n.type == "entrypoint"
     }
+    mapped_envs: set[str] = set()
+    for name, spec in (services or {}).items():
+        mapped_envs.update(_service_fields(str(name), spec)[1])
+
+    # pass 1: match everything; note which repo each unmapped env key reaches
+    results: list[tuple[object, list[tuple[str, str, Evidence | None, dict, list[str]]]]] = []
+    votes: dict[str, set[str]] = defaultdict(set)
     for node in graph.nodes.values():
         pending = list(node.attrs.get("http_calls") or [])
         if not pending:
             for note in node.attrs.get("unresolved_http") or []:
                 if isinstance(note, dict) and note.get("url"):
                     pending.append(note)
-        still: list[dict] = []
+        if not pending:
+            continue
+        caller_repo = str(node.attrs.get("repo") or graph.repo or "") or None
+        rows = []
         for item in pending:
             method = str(item.get("method") or "GET")
             url = str(item.get("url") or "")
             if not url:
                 continue
             ev = Evidence.from_dict(item.get("evidence")) if item.get("evidence") else None
-            caller_repo = str(node.attrs.get("repo") or graph.repo or "") or None
-            hits = match_http(
-                method,
-                url,
-                routes,
-                services,
-                caller_repo=caller_repo,
-                route_repos=route_repos,
-            )
+            hits = match_http(method, url, routes, services, caller_repo=caller_repo, route_repos=route_repos)
+            key = leading_env_key(url)
+            if hits and key and key not in mapped_envs:
+                for eid in hits:
+                    target = route_repos.get(eid) or ""
+                    if target and target != caller_repo:
+                        votes[key].add(target)
+            rows.append((method, url, ev, item, hits))
+        results.append((node, rows))
+    inferred = {key: next(iter(repos)) for key, repos in votes.items() if len(repos) == 1}
+
+    unmatched: list[dict] = []
+    other_repos = sorted({r for r in route_repos.values() if r})
+    inferred_counts: dict[tuple[str, str], int] = defaultdict(int)
+    hint_votes: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    hint_calls: dict[str, int] = defaultdict(int)
+    for node, rows in results:
+        caller_repo = str(node.attrs.get("repo") or graph.repo or "") or None
+        still: list[dict] = []
+        for method, url, ev, item, hits in rows:
+            via = None
+            key = leading_env_key(url)
+            if not hits and key in inferred:
+                repo = inferred[key]
+                extra = dict(services or {})
+                extra[f"__env_{key}"] = {"env": key, "repo": repo}
+                hits = match_http(method, url, routes, extra, caller_repo=caller_repo, route_repos=route_repos)
+                if hits:
+                    via = "env_inferred"
+                    inferred_counts[(key, repo)] += 1
             if hits:
                 for eid in hits:
-                    graph.add_edge(
-                        "calls_http", node.id, eid, confidence=Confidence.INFERRED, evidence=ev
-                    )
+                    attrs = {"via": via} if via else {}
+                    graph.add_edge("calls_http", node.id, eid, confidence=Confidence.INFERRED, evidence=ev, **attrs)
                 continue
             keys = unresolved_http_keys(url)
-            reason = classify_unresolved_http(
-                url, client_unknown=bool(item.get("client_unknown"))
-            )
+            reason = classify_unresolved_http(url, client_unknown=bool(item.get("client_unknown")))
             service = service_for_url(url, services)
+            if reason == "target_not_scanned" and key and key not in mapped_envs:
+                hint_calls[key] += 1
+                for repo in other_repos:
+                    if repo == caller_repo:
+                        continue
+                    trial = {"__hint": {"env": key, "repo": repo}}
+                    if match_http(method, url, routes, trial, caller_repo=caller_repo, route_repos=route_repos):
+                        hint_votes[key][repo] += 1
             note = {"url": url, "method": method, "keys": keys, "reason": reason}
             if service:
                 note["service"] = service
@@ -2206,6 +2248,19 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
         elif "unresolved_http" in node.attrs:
             node.attrs["unresolved_http"] = []
     graph.attrs["unresolved_http"] = unmatched
+    graph.attrs["inferred_services"] = [
+        {"env": key, "repo": repo, "calls": n} for (key, repo), n in sorted(inferred_counts.items())
+    ]
+    hints = []
+    for key, n in sorted(hint_calls.items()):
+        by_repo = hint_votes.get(key) or {}
+        repo = inferred.get(key)
+        if repo is None and by_repo:
+            ranked = sorted(by_repo.items(), key=lambda kv: (-kv[1], kv[0]))
+            repo = ranked[0][0] if len(ranked) == 1 or ranked[0][1] > ranked[1][1] else None
+        if repo:
+            hints.append({"env": key, "repo": repo, "calls": n, "matching": int(by_repo.get(repo, 0))})
+    graph.attrs["service_hints"] = hints
 
 
 def _relink_queues_from_graph(graph: Graph, services: dict[str, str]) -> None:
