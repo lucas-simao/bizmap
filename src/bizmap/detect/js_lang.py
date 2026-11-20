@@ -979,6 +979,7 @@ class JsAnalyzer:
     ) -> JsAnalysis:
         analysis = JsAnalysis()
         _REEXPORTS.clear()
+        _LITERAL_TOP.clear()
         yaml_constants = constants or {}
         path_aliases = _ts_path_aliases(root)
         parsed: list[tuple[Path, str, str, Node, bytes]] = []
@@ -3430,14 +3431,37 @@ def _is_plus(node: Node) -> bool:
     return bool(ops) and text(ops[0]) == "+"
 
 
+# node key -> top of its `+` chain; filled while climbing so sibling literals
+# of a long chain reuse it (in tree-sitter `node.parent` costs a walk from the
+# root, so climbing from every literal of an n-term chain was ~O(n^3)).
+_LITERAL_TOP: dict[tuple[int, int, int], Node] = {}
+
+
+def _node_key(node: Node) -> tuple[int, int, int]:
+    return (node.id, node.start_byte, node.end_byte)
+
+
 def _literal_top(node: Node) -> Node:
+    path: list[Node] = []
     cur = node
-    while cur.parent is not None and (
-        (cur.parent.type == "binary_expression" and _is_plus(cur.parent))
-        or cur.parent.type == "parenthesized_expression"
-    ):
-        cur = cur.parent
-    return cur
+    while True:
+        hit = _LITERAL_TOP.get(_node_key(cur))
+        if hit is not None:
+            top = hit
+            break
+        parent = cur.parent
+        if parent is not None and (
+            (parent.type == "binary_expression" and _is_plus(parent))
+            or parent.type == "parenthesized_expression"
+        ):
+            path.append(cur)
+            cur = parent
+            continue
+        top = cur
+        break
+    for visited in path:
+        _LITERAL_TOP[_node_key(visited)] = top
+    return top
 
 
 def _is_route_registration(call: Node, routers: dict[str, str]) -> bool:

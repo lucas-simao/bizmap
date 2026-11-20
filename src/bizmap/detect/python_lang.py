@@ -227,13 +227,34 @@ def _enclosing_function_names(node: Node) -> str | None:
     return ".".join(reversed(names)) or None
 
 
+# node key -> enclosing function_definition (or None); filled for every node
+# on the climb, so the many strings of one function share it (tree-sitter's
+# `node.parent` walks from the root each time).
+_ENCLOSING_FN: dict[tuple[int, int, int], Node | None] = {}
+_MISSING = object()
+
+
 def _enclosing_fn_node(node: Node) -> Node | None:
+    """Nearest function_definition above ``node``. The cache value of a node
+    is the answer for anything whose climb passes through it (a definition
+    maps to itself)."""
+    path: list[tuple[int, int, int]] = []
     cur = node.parent
+    found: Node | None = None
     while cur is not None:
+        key = (cur.id, cur.start_byte, cur.end_byte)
+        hit = _ENCLOSING_FN.get(key, _MISSING)
+        if hit is not _MISSING:
+            found = hit  # type: ignore[assignment]
+            break
+        path.append(key)
         if cur.type == "function_definition":
-            return cur
+            found = cur
+            break
         cur = cur.parent
-    return None
+    for key in path:
+        _ENCLOSING_FN[key] = found
+    return found
 
 
 def _decorator_target(dec: Node) -> Node | None:
@@ -893,6 +914,7 @@ class PythonAnalyzer:
         constants: dict[str, str] | None = None,
     ) -> PyAnalysis:
         analysis = PyAnalysis()
+        _ENCLOSING_FN.clear()
         _PY_REEXPORTS.clear()
         parsed: list[tuple[Path, str, bytes, Node, str, ImportMap, list[PyFunction]]] = []
         forest: list[object] = []
