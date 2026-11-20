@@ -703,40 +703,6 @@ def _plus(lv: ResolvedString, rv: ResolvedString) -> ResolvedString:
     return ResolvedString(combined or None, False, True, placeholder=combined or None)
 
 
-_GO_TRANSPARENT_STRINGS = {
-    "TrimRight",
-    "TrimLeft",
-    "TrimSuffix",
-    "TrimPrefix",
-    "TrimSpace",
-    "Trim",
-    "ToLower",
-}
-
-
-def _unwrap_go_transparent(node: Node | None, aliases: dict[str, str]) -> Node | None:
-    """`strings.TrimRight(x, "/")` → `x` (repeatedly)."""
-    cur = node
-    for _ in range(4):
-        cur = _unwrap_literal(cur) or cur
-        if cur is None or cur.type != "call_expression":
-            return cur
-        func = cur.child_by_field_name("function")
-        if func is None or func.type != "selector_expression":
-            return cur
-        operand = func.child_by_field_name("operand")
-        recv = text(operand) if operand is not None else ""
-        if call_callee_name(cur) not in _GO_TRANSPARENT_STRINGS:
-            return cur
-        if not (aliases.get(recv) == "strings" or recv == "strings"):
-            return cur
-        args = call_args(cur)
-        if not args:
-            return cur
-        cur = args[0]
-    return cur
-
-
 def _resolve_expr(
     node: Node | None,
     env: dict[str, ResolvedString],
@@ -812,20 +778,6 @@ def _resolve_expr(
             if resolved.placeholder:
                 return resolved
             return ResolvedString(None, False, True, placeholder="{id}")
-        if method in _GO_TRANSPARENT_STRINGS and args and (ip == "strings" or recv == "strings"):
-            # strings.TrimRight(base, "/") & co. do not change where a base points
-            return _resolve_expr(args[0], env, package_consts, aliases, consts_by_import)
-        if method in {"JoinPath", "Join"} and args and (
-            (method == "JoinPath" and (ip == "net/url" or recv == "url"))
-            or (method == "Join" and (ip in {"path", "path/filepath"} or recv in {"path", "filepath"}))
-        ):
-            parts = [_resolve_expr(a, env, package_consts, aliases, consts_by_import) for a in args]
-            joined = ""
-            for part in parts:
-                piece = part.path_text if part.usable else "{" + "part" + "}"
-                joined = (joined.rstrip("/") + "/" + piece.lstrip("/")) if joined else piece
-            static = all(p.fully_static for p in parts)
-            return ResolvedString(joined if static else None, static, not static, placeholder=None if static else joined)
         if method in {"Getenv", "LookupEnv"} and args and (ip == "os" or recv == "os"):
             key = _resolve_expr(args[0], env, package_consts, aliases, consts_by_import)
             if key.fully_static and key.text:
@@ -1632,17 +1584,7 @@ class GoAnalyzer:
                 bases = getattr(self, "_field_bases", None) or {}
                 for (ip_, typ_, _field), base in bases.items():
                     if ip_ == fn.import_path and typ_ == fn.receiver and base.usable:
-                        value = (base.path_text or "").rstrip("/")
-                        # only a concrete base (env placeholder, absolute URL,
-                        # static text) replaces `{base}`; an opaque expression
-                        # would turn a matchable call into path_dynamic
-                        concrete = (
-                            value.startswith(("http://", "https://", "/"))
-                            or re.fullmatch(r"\{[A-Z][A-Z0-9_]*\}", value) is not None
-                            or (base.fully_static and value)
-                        )
-                        if concrete:
-                            url = value + url[len("{base}"):]
+                        url = (base.path_text or "").rstrip("/") + url[len("{base}"):]
                         break
             if not (
                 url.startswith("/")
@@ -2711,12 +2653,12 @@ class GoAnalyzer:
                         continue
                     fn = self._enclosing(info, node)
                     key = (gtype.import_path or info.import_path, gtype.name, field)
-                    val_u = _unwrap_go_transparent(val_n, info.import_aliases) or val_n
+                    val_u = _unwrap_literal(val_n) or val_n
                     if val_u.type == "identifier" and fn is not None and text(val_u) in fn.params:
                         # &ReportClient{baseURL: baseURL} inside NewReportClient(baseURL string)
                         pending.setdefault((fn.import_path, fn.name, text(val_u)), []).append(key)
                         continue
-                    resolved = resolve_value(val_u, fn, info)
+                    resolved = resolve_value(val_n, fn, info)
                     if resolved.usable:
                         out[key] = resolved
             _ = dummy
@@ -2737,9 +2679,7 @@ class GoAnalyzer:
                             pkey = (callee.import_path, callee.name, pname)
                             if pkey not in pending or i >= len(args):
                                 continue
-                            res = resolve_value(
-                                _unwrap_go_transparent(args[i], info.import_aliases) or args[i], fn, info
-                            )
+                            res = resolve_value(args[i], fn, info)
                             label = res.path_text if res.usable else ""
                             seen.setdefault(pkey, set()).add(label)
                             if res.usable:
