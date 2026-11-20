@@ -1,0 +1,77 @@
+# `bizmap scan`
+
+Reads source code and SQL and writes the lineage graph.
+
+```bash
+bizmap scan [PATH ...] [options]
+```
+
+- **One path** — one repository (or a [workspace](../configuration.md#repos)
+  whose `bizmap.yaml` lists `repos:`).
+- **Several paths** — scanned jointly: one graph, HTTP calls between them
+  matched, tables shared when they declare the same `database:`.
+- **No path** with `--discover DIR` — see [scan --discover](../discover.md).
+
+```bash
+bizmap scan .                                # this repo → bizmap.graph.json
+bizmap scan . --mermaid                      # + bizmap.graph.mmd
+bizmap scan ./web ./api ./billing --out merged.json
+bizmap scan --discover ~/work --list         # what would be scanned, and why
+```
+
+## Options
+
+| Option | Meaning |
+| --- | --- |
+| `--out PATH` | Where to write the graph JSON (default `bizmap.graph.json`). |
+| `--mermaid` | Also write a Mermaid flowchart next to the JSON (`.mmd`): entrypoint → table rollup, plus cross-service `calls_http` in joint scans. |
+| `--mermaid-focus TABLE` | Restrict the diagram to one table or view and its neighbourhood. |
+| `--mermaid-limit N` | Maximum nodes in the diagram (default 80). |
+| `--expand-star` | Expand `SELECT *` to every schema column (off by default: table-level). |
+| `--rules PATH` | Extra [YAML detector rules](../detector-rules.md), file or directory (repeatable). |
+| `--config PATH` | Path to `bizmap.yaml` (default: scan root, then git top level). |
+| `--exclude GLOB` | Exclude glob (repeatable), added to `exclude:` in `bizmap.yaml`. |
+| `-v`, `--verbose` | List every unresolved HTTP call and warning (default: counts and the top 10). |
+| `-q`, `--quiet` | No progress lines on stderr (they only appear for scans longer than a few seconds). |
+| `--profile` | Print phase timings (parse, resolve, sql, propagate) to stderr. |
+| `--discover DIR` | Find the git repos under `DIR` and scan them jointly. With it: `--list`, `--json`, `--depth N`, `--include GLOB`, `--prefer PATH`. See [scan --discover](../discover.md). |
+
+## What it prints
+
+![bizmap scan on bizmap-demo: the workspace, then the shop service alone](../assets/demo/scan.gif){ .shot }
+
+```text
+wrote bizmap.graph.json  (59 nodes, 139 edges)
+wrote bizmap.graph.mmd
+```
+
+When something could not be linked, the summary says what and why. Scanning
+only the `shop` service of the [demo](../getting-started.md), the call to
+the payments service has no target:
+
+```text
+wrote /tmp/shop.json  (46 nodes, 119 edges)
+1 unresolved HTTP calls: target_not_scanned=1
+  POST {PAYMENTS_URL}/charges
+```
+
+Each unresolved call has a reason: `target_not_scanned` (the URL is complete
+but no scanned route matches — scan the other service too), `base_unknown`
+(the path is known, the base URL is not — map it in
+[`services:`](../configuration.md#services)), `path_dynamic` (the path is
+built at runtime), `client_unknown` (the HTTP client could not be traced).
+When an env var or host shows up, `scan` prints a ready-to-paste `services:`
+hint.
+
+It also names what it skipped (generated code, build caches, `.gitignore`d
+paths) — see [`scan:` in the configuration](../configuration.md#exclude-and-scan).
+
+## Output
+
+- `bizmap.graph.json` — the graph: nodes, edges with `file:line` evidence and
+  confidence, the reconstructed schema. Format: [Graph format](../graph-schema.md).
+- `bizmap.graph.mmd` — with `--mermaid`; GitHub renders it in Markdown files
+  and PR descriptions inside a ` ```mermaid ` block.
+
+The output is deterministic: the same input gives byte-identical JSON (except
+`generated_at`), so the graph can be committed and diffed.

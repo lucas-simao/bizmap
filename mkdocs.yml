@@ -1,0 +1,104 @@
+# Documentation site: https://lucas-simao.github.io/bizmap/
+# Build locally:  pip install -r docs/requirements.txt && mkdocs serve
+# Published by .github/workflows/docs.yml on every push to main.
+site_name: BizMap
+site_description: >-
+  Deterministic data-lineage map for application code: entrypoints → functions →
+  tables and columns, across services. No AI, no tokens, no account.
+site_url: https://lucas-simao.github.io/bizmap/
+repo_url: https://github.com/lucas-simao/bizmap
+repo_name: lucas-simao/bizmap
+edit_uri: edit/main/docs/
+copyright: MIT licensed · fixtures and examples are fictional
+
+theme:
+  name: material
+  language: en
+  icon:
+    logo: material/graph-outline
+    repo: fontawesome/brands/github
+  favicon: assets/favicon.svg
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep orange
+      accent: deep orange
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep orange
+      accent: deep orange
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify   # GitHub-style anchors,
+        kwds: { case: lower }                                  # so links work in both places
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+extra_css:
+  - assets/extra.css
+
+validation:
+  omitted_files: info      # other branches may add docs before they join the nav
+  absolute_links: info
+  unrecognized_links: warn
+  anchors: warn
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Configuration: configuration.md
+  - Commands:
+      - commands/index.md
+      - scan: commands/scan.md
+      - scan --discover: discover.md
+      - why: commands/why.md
+      - report: commands/report.md
+      - impact: commands/impact.md
+      - registry: commands/registry.md
+      - mcp: commands/mcp.md
+      - export (coming soon): commands/export.md
+  - Languages and detectors: languages.md
+  - MCP server: mcp.md
+  - GitHub Action: github-action.md
+  - Reference:
+      - Graph format: graph-schema.md
+      - How it works: how-it-works.md
+      - YAML detector rules: detector-rules.md
+  - FAQ and limitations: faq.md
