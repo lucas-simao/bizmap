@@ -126,6 +126,8 @@ name: api
 database: checkout            # repos with the same database share table ids
 services:                     # which env var / host points at which service
   billing: { url: http://billing.internal, env: BILLING_URL }
+  api: { env: VITE_API_URL, prefix: /api/v1 }   # the env value already ends in /api/v1
+  backend: { env: BACKEND_URL, repo: core-api }  # key ≠ repo name: point at the repo
 exclude: [cmd/seed, demo/]
 scan:                         # what is left out by default, and how to bring it back
   include: ["*_test.go", .yarn]   # skip_generated: false brings everything back
@@ -134,6 +136,15 @@ overrides:                    # anything static analysis cannot see
     orders.status:
       why: "Lifecycle: pending → paid | expired"
 ```
+
+A `services:` key (or its `repo:`) is the name of a scanned repo — with
+`--discover`, the name `--list` shows. The short form `billing: http://billing.internal`
+is a URL alone; `url`/`base`/`host`, `env` (one or a list), `hostname`, `repo` and
+`prefix` are the long form's keys. It works in each repo's bizmap.yaml and in the
+one at the workspace or `--discover` root. When every call that already matched
+through an env key goes to one repo, the key's other calls are linked to that repo
+too (`via: env_inferred`); `bizmap scan` prints the rest as a ready-to-paste
+`services:` hint.
 
 Dependency and build folders (`node_modules`, `vendor`, `dist`, `build`, `.venv`)
 are never scanned unless listed in `scan: include`. Left out by default

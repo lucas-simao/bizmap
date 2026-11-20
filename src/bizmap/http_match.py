@@ -263,6 +263,31 @@ def service_for_url(url: str, services: dict[str, Any] | None) -> str | None:
     return None
 
 
+def service_path_prefix(url: str, services: dict[str, Any] | None) -> str:
+    """The `prefix:` of the ``services:`` entry a URL points at
+    (`api: {env: VITE_API_URL, prefix: /api/v1}`), else ""."""
+    if not url or not services:
+        return ""
+    target = service_for_url(url, services)
+    if target is None:
+        return ""
+    for name, spec in services.items():
+        if not isinstance(spec, dict):
+            continue
+        if str(spec.get("repo") or name) == target and spec.get("prefix"):
+            return "/" + str(spec["prefix"]).strip("/")
+    return ""
+
+
+def leading_env_key(url: str) -> str | None:
+    """`{VITE_API_URL}/orders` → `VITE_API_URL` (env-like names only)."""
+    m = _LEADING_HOLE.match((url or "").strip())
+    if not m:
+        return None
+    leaf = m.group(1).strip().split(".")[-1]
+    return leaf if _ENV_LIKE_NAME.match(leaf) else None
+
+
 def has_explicit_base(url: str) -> bool:
     """`{anything}/x` or `https://h/x`: the path that follows is complete."""
     raw = (url or "").strip()
@@ -302,6 +327,11 @@ def match_http(
     candidates = [path]
     if leading != path:
         candidates.append(leading)
+    prefix = service_path_prefix(url, services or {})
+    if prefix:
+        # the env/base carries the API prefix: `VITE_API_URL=https://h/api/v1`
+        prefixed = [normalize_path(prefix + c) for c in candidates if not c.startswith(prefix + "/")]
+        candidates = prefixed + candidates
     if not any(has_meaningful_literal(c) for c in candidates):
         return []
     relative = is_relative_client_url(url)
@@ -343,7 +373,40 @@ def match_http(
         # for a client calling `/shops/points`
         best = max(scores.values())
         hits = [h for h in hits if scores[h] == best]
+    if not hits and target_service is not None and route_repos is not None:
+        hits = _unique_suffix_match(method_u, candidates, routes, route_repos, target_service)
     return hits
+
+
+def _unique_suffix_match(
+    method_u: str,
+    candidates: list[str],
+    routes: list[tuple[str, str, str]],
+    route_repos: dict[str, str],
+    target_service: str,
+) -> list[str]:
+    """In the one repo a declared service points at, `/orders/{id}` may be the
+    tail of `/api/v1/orders/:id` (the base URL carries the prefix). Only a
+    single matching route counts."""
+    for cand in candidates:
+        if literal_segment_count(cand) < 1:
+            continue
+        c_parts = [p for p in normalize_path(cand).split("/") if p]
+        found: list[str] = []
+        for eid, rmethod, rpath in routes:
+            if rmethod.upper() != method_u or (route_repos.get(eid) or "") != target_service:
+                continue
+            t_parts = [p for p in normalize_path(rpath).split("/") if p]
+            if len(t_parts) <= len(c_parts):
+                continue
+            tail = "/" + "/".join(t_parts[-len(c_parts):])
+            if path_template_match(tail, cand):
+                found.append(eid)
+        if len(found) == 1:
+            return found
+        if found:
+            return []
+    return []
 
 
 UNRESOLVED_HTTP_REASONS = (

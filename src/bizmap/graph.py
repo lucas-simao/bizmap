@@ -238,6 +238,9 @@ class Graph:
         skipped = self.attrs.get("skipped")
         if skipped:
             payload["skipped"] = dict(sorted(skipped.items()))
+        for key in ("inferred_services", "service_hints"):
+            if self.attrs.get(key):
+                payload[key] = list(self.attrs[key])
         skipped_paths = self.attrs.get("skipped_paths")
         if skipped_paths:
             payload["skipped_paths"] = {k: sorted(v) for k, v in sorted(skipped_paths.items())}
@@ -276,6 +279,8 @@ class Graph:
         graph.attrs["repo_roots_base"] = data.get("repo_roots_base")
         graph.attrs["skipped"] = data.get("skipped") or {}
         graph.attrs["skipped_paths"] = data.get("skipped_paths") or {}
+        graph.attrs["inferred_services"] = data.get("inferred_services") or []
+        graph.attrs["service_hints"] = data.get("service_hints") or []
         graph.attrs["queues"] = data.get("queues") or {}
         graph.attrs["unresolved_http"] = data.get("unresolved_http") or []
         for raw in data.get("nodes") or []:

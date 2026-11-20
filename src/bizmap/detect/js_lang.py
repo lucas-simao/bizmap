@@ -1190,6 +1190,7 @@ class JsAnalyzer:
             wrappers_by_mod[module] = _collect_wrappers(
                 tree, consts_by_mod.get(module) or {}, clients_by_mod.get(module) or {}
             )
+        _import_wrappers(wrappers_by_mod, import_specs_by_mod, exports_by_mod, set(trees_by_mod))
 
         for _path, rel_file, module, tree, _src in parsed:
             consts = consts_by_mod.get(module) or {}
@@ -2785,6 +2786,36 @@ def _resolve_route_handlers(
             for c in analysis.calls
             if renames.get(c.caller, c.caller) != renames.get(c.callee, c.callee)
         ]
+
+
+def _import_wrappers(
+    wrappers_by_mod: dict[str, dict[str, JsHttpWrapper]],
+    import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
+    exports_by_mod: dict[str, dict[str, str]],
+    known: set[str],
+) -> None:
+    """`import { getJSON } from '../lib/http'`: an HTTP wrapper defined in
+    another module (`getJSON(path) => http.get(path)`) is followed at the
+    importing module's call sites too."""
+    own = {mod: dict(ws) for mod, ws in wrappers_by_mod.items()}
+    for module, specs in import_specs_by_mod.items():
+        local = wrappers_by_mod.setdefault(module, {})
+        for name, (src_mod, orig) in specs.items():
+            if name in local:
+                continue
+            name_in_src = "default" if orig == "require" else orig
+            sources = _export_sources(src_mod, name_in_src, exports_by_mod, known)
+            wrap = None
+            if len(sources) == 1:
+                mod, loc = sources[0]
+                wrap = (own.get(mod) or {}).get(loc)
+            elif not sources:
+                for mod in (src_mod, f"{src_mod}.index"):
+                    wrap = (own.get(mod) or {}).get(name_in_src)
+                    if wrap is not None:
+                        break
+            if wrap is not None:
+                local[name] = wrap
 
 
 def _imported_function(

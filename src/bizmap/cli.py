@@ -84,7 +84,21 @@ def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
         lines.append("warning: " + (warning if verbose else _short(warning, 160)))
     if len(warnings) > len(shown):
         lines.append(f"… {len(warnings) - len(shown)} more warnings (use --verbose, or see `warnings` in the JSON)")
+    for item in graph.attrs.get("inferred_services") or []:
+        lines.append(
+            f"linked {item['calls']} call(s) through {item['env']} to {item['repo']} "
+            f"(every matched call through it goes there; confirm with services: {item['repo']}: {{env: {item['env']}}})"
+        )
     unresolved = graph.attrs.get("unresolved_http") or []
+    hints = graph.attrs.get("service_hints") or []
+    if hints:
+        lines.append("hint: these env keys point at a scanned repo; add to bizmap.yaml so their calls link:")
+        lines.append("  services:")
+        for h in hints:
+            lines.append(
+                f"    {h['repo']}: {{ env: {h['env']} }}   # {h['calls']} unmatched call(s), "
+                f"{h['matching']} match routes in {h['repo']} (add prefix: /api/... if the env holds one)"
+            )
     if not unresolved:
         return lines
     reason_counts: dict[str, int] = {}
