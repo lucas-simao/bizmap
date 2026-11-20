@@ -62,6 +62,10 @@ EXECUTE_FN = re.compile(
     rf"EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+({QUAL_IDENT})",
     re.IGNORECASE,
 )
+RENAME_COLUMN = re.compile(
+    rf"(?is)^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?({QUAL_IDENT})\s+RENAME\s+(?:COLUMN\s+)?"
+    r'("?[A-Za-z_]\w*"?)\s+TO\s+("?[A-Za-z_]\w*"?)\s*;?\s*$'
+)
 SQL_VERB = re.compile(
     r"(?is)\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|SELECT|WITH)\b"
 )
@@ -1013,6 +1017,18 @@ def apply_statement(schema: Schema, sql: str, evidence: Evidence) -> None:
         parsed = sqlglot.parse(stripped, read="postgres", error_level=ErrorLevel.IGNORE)
     except Exception:
         parsed = []
+
+    m = RENAME_COLUMN.search(stripped)
+    if m:
+        # `ALTER TABLE t RENAME [COLUMN] a TO b`: sqlglot's shape varies by
+        # version, so it is applied here and the statement is done
+        table = _table(schema, ident_leaf(m.group(1)))
+        old, new = m.group(2).strip('"').lower(), m.group(3).strip('"').lower()
+        col = table.columns.pop(old, None)
+        if col is not None:
+            col.name = new
+            table.columns[new] = col
+        return
 
     handled = False
     for stmt in parsed or []:

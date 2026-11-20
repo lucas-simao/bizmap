@@ -159,9 +159,22 @@ class SchemaChange:
     line: int
     entrypoints: list[str] = field(default_factory=list)
     functions: list[str] = field(default_factory=list)
+    op: str = "changed"  # added | altered | dropped | renamed | changed | new table
+    table: str = ""
+    name: str = ""
+    detail: str = ""  # new name for `renamed`, "N columns" for a new table
+
+    @property
+    def risky(self) -> bool:
+        """Dropped / renamed while code still uses it."""
+        return self.op in {"dropped", "renamed"} and bool(self.entrypoints or self.functions)
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "op": self.op,
+            "table": self.table,
+            "name": self.name,
+            "detail": self.detail,
             "column": self.column,
             "file": self.file,
             "line": self.line,
@@ -176,6 +189,7 @@ class Impact:
     unmapped_files: list[str]
     hint: str | None = None
     schema_changes: list[SchemaChange] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def entrypoints(self) -> list[str]:
@@ -198,6 +212,7 @@ class Impact:
             "unmapped_files": self.unmapped_files,
             "hint": self.hint,
             "schema_changes": [c.to_dict() for c in self.schema_changes],
+            "warnings": self.warnings,
         }
 
 
@@ -306,14 +321,97 @@ def _data_reached(
 
 
 _SQL_TABLE_STMT = re.compile(
-    r"(?is)\b(?:CREATE\s+(?:UNLOGGED\s+|TEMP(?:ORARY)?\s+)?TABLE(?:\s+IF\s+NOT\s+EXISTS)?|ALTER\s+TABLE(?:\s+IF\s+EXISTS)?(?:\s+ONLY)?)\s+([\w\".]+)"
+    r"(?is)\b(CREATE\s+(?:UNLOGGED\s+|TEMP(?:ORARY)?\s+)?TABLE(?:\s+IF\s+NOT\s+EXISTS)?|ALTER\s+TABLE(?:\s+IF\s+EXISTS)?(?:\s+ONLY)?)\s+([\w\".]+)"
 )
-_SQL_ADD_COLUMN = re.compile(r'(?i)\b(?:ADD|ALTER|DROP|RENAME)\s+(?:COLUMN\s+)?(?:IF\s+(?:NOT\s+)?EXISTS\s+)?"?([A-Za-z_]\w*)"?')
+_SQL_COLUMN_OP = re.compile(
+    r'(?i)\b(ADD|ALTER|DROP|RENAME)\s+(?:COLUMN\s+)?(?:IF\s+(?:NOT\s+)?EXISTS\s+)?"?([A-Za-z_]\w*)"?'
+    r'(?:\s+TO\s+"?([A-Za-z_]\w*)"?)?'
+)
 _SQL_COLUMN_DEF = re.compile(r'^\s*,?\s*"?([A-Za-z_]\w*)"?\s+[A-Za-z]')
 _SQL_NOT_COLUMN = {
     "constraint", "primary", "foreign", "unique", "check", "exclude", "like", "create",
     "alter", "table", "add", "drop", "references", "on", "insert", "update", "delete", "select",
+    "to", "index", "default", "not", "null",
 }
+_SQL_OPS = {"add": "added", "alter": "altered", "drop": "dropped", "rename": "renamed"}
+
+
+def _sql_cosmetic_lines(diff_text: str) -> dict[str, set[int]]:
+    """New-side lines of `.sql` files whose change is only punctuation or
+    spacing (`email TEXT NOT NULL` → `email TEXT NOT NULL,` when a column is
+    appended after it)."""
+
+    def norm(line: str) -> str:
+        return re.sub(r"\s+", " ", line).strip().rstrip(",;").strip()
+
+    out: dict[str, set[int]] = {}
+    path: str | None = None
+    removed: list[str] = []
+    added: list[tuple[int, str]] = []
+    line = 0
+    old_left = new_left = 0
+
+    def flush() -> None:
+        if path and path.lower().endswith(".sql") and removed and added:
+            pool = [norm(r) for r in removed]
+            for ln, txt in added:
+                if norm(txt) in pool:
+                    pool.remove(norm(txt))
+                    out.setdefault(path, set()).add(ln)
+        removed.clear()
+        added.clear()
+
+    for raw in diff_text.splitlines():
+        if old_left > 0 or new_left > 0:
+            tag = raw[:1] or " "
+            if tag == "\\":
+                continue
+            if tag == "+":
+                added.append((line, raw[1:]))
+                line += 1
+                new_left -= 1
+            elif tag == "-":
+                removed.append(raw[1:])
+                old_left -= 1
+            else:
+                flush()
+                line += 1
+                old_left -= 1
+                new_left -= 1
+            continue
+        flush()
+        if raw.startswith("+++ "):
+            target = raw[4:]
+            target = _git_unquote(target) if target.startswith('"') else target.split("\t", 1)[0].strip()
+            path = None if target == "/dev/null" else (target[2:] if target.startswith("b/") else target)
+            continue
+        m = _HUNK.match(raw)
+        if m:
+            om = re.match(r"^@@ -\d+(?:,(\d+))?", raw)
+            old_left = int(om.group(1)) if om and om.group(1) is not None else 1
+            new_left = int(m.group(2)) if m.group(2) is not None else 1
+            line = int(m.group(1))
+    flush()
+    return out
+
+
+def _column_users(graph: Graph, cids: list[str], inc: dict[str, list[Any]]) -> tuple[list[str], list[str]]:
+    fns: set[str] = set()
+    eps: set[str] = set()
+    for cid in cids:
+        for e in inc.get(cid, []):
+            if e.type not in {"reads", "writes"}:
+                continue
+            src = graph.get(e.from_id)
+            if src is None:
+                continue
+            if src.type == "function":
+                fns.add(e.from_id)
+            elif src.type == "entrypoint":
+                eps.add(e.from_id)
+    for fid in fns:
+        eps |= _entrypoints_reaching(graph, fid, inc)
+    return sorted(eps), sorted(fns)
 
 
 def _schema_changes(
@@ -322,28 +420,37 @@ def _schema_changes(
     unmapped: list[str],
     repo_root: Path,
     inc: dict[str, list[Any]],
+    cosmetic: dict[str, set[int]] | None = None,
+    missing: list[str] | None = None,
 ) -> list[SchemaChange]:
-    """Changed lines of `.sql` files inside `CREATE TABLE` / `ALTER TABLE` that
-    name a column the graph knows, with what reads or writes that column."""
+    """Changed lines of `.sql` files inside `CREATE TABLE` / `ALTER TABLE`:
+    each column change with its operation (added / altered / dropped /
+    renamed), or one row for a new table, with what reads or writes it."""
     by_name: dict[tuple[str, str], list[str]] = {}
+    by_table: dict[str, list[str]] = {}
     for nid, node in graph.nodes.items():
         if node.type == "column":
             table = str(node.attrs.get("table") or "").lower().split(".")[-1]
             name = str(node.attrs.get("name") or "").lower()
             by_name.setdefault((table, name), []).append(nid)
+            if not node.attrs.get("external"):
+                by_table.setdefault(table, []).append(nid)
     out: list[SchemaChange] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str, str]] = set()
+    new_tables: set[str] = set()
     for path in unmapped:
         if not path.lower().endswith(".sql"):
             continue
         try:
             lines = (repo_root / path).read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
+            if missing is not None:
+                missing.append(path)
             continue
+        skip = (cosmetic or {}).get(path, set())
         for ln in sorted(changes.get(path, ())):
-            if not 1 <= ln <= len(lines):
+            if not 1 <= ln <= len(lines) or ln in skip:
                 continue
-            # statement holding the line: from the previous ';' up to it
             start = ln - 1
             while start > 0 and ";" not in lines[start - 1]:
                 start -= 1
@@ -351,27 +458,49 @@ def _schema_changes(
             found = list(_SQL_TABLE_STMT.finditer(stmt))
             if not found:
                 continue
-            table = found[-1].group(1).replace('"', "").split(".")[-1].lower()
-            text = lines[ln - 1]
-            # `ALTER TABLE orders ADD COLUMN note`: skip the `ALTER TABLE` match
-            names = [m.group(1) for m in _SQL_ADD_COLUMN.finditer(text)]
-            cm = _SQL_COLUMN_DEF.match(text)
-            if cm is not None:
-                names.append(cm.group(1))
-            col = next((n for n in names if n.lower() not in _SQL_NOT_COLUMN), None)
-            if col is None:
+            head = found[-1]
+            table = head.group(2).replace('"', "").split(".")[-1].lower()
+            is_create = head.group(1).upper().startswith("CREATE")
+            head_line = start + stmt.count("\n", 0, head.start()) + 1
+            if is_create and (head_line == ln or table in new_tables):
+                # the `CREATE TABLE x (` line itself changed: a new table
+                if table not in new_tables:
+                    new_tables.add(table)
+                    cols = by_table.get(table, [])
+                    eps, fns = _column_users(graph, cols, inc)
+                    out.append(
+                        SchemaChange(
+                            column=f"table:{table}", file=path, line=ln, entrypoints=eps, functions=fns,
+                            op="new table", table=table, name="", detail=f"{len(cols)} columns",
+                        )
+                    )
                 continue
-            for cid in by_name.get((table, col.lower()), []):
-                if cid in seen:
+            text = lines[ln - 1]
+            ops: list[tuple[str, str, str | None]] = []
+            for m in _SQL_COLUMN_OP.finditer(text):
+                if m.group(2).lower() in _SQL_NOT_COLUMN:
                     continue
-                seen.add(cid)
-                fns = sorted({e.from_id for e in inc.get(cid, []) if e.type in {"reads", "writes"}
-                              and (graph.get(e.from_id) is not None and graph.nodes[e.from_id].type == "function")})
-                eps: set[str] = {e.from_id for e in inc.get(cid, []) if e.type in {"reads", "writes"}
-                                 and graph.get(e.from_id) is not None and graph.nodes[e.from_id].type == "entrypoint"}
-                for fid in fns:
-                    eps |= _entrypoints_reaching(graph, fid, inc)
-                out.append(SchemaChange(column=cid, file=path, line=ln, entrypoints=sorted(eps), functions=fns))
+                ops.append((_SQL_OPS[m.group(1).lower()], m.group(2), m.group(3)))
+            if not ops and is_create:
+                cm = _SQL_COLUMN_DEF.match(text)
+                if cm is not None and cm.group(1).lower() not in _SQL_NOT_COLUMN:
+                    ops.append(("changed", cm.group(1), None))
+            for op, col, new_name in ops:
+                key = (table, col.lower(), op)
+                if key in seen:
+                    continue
+                seen.add(key)
+                cids = by_name.get((table, col.lower()), [])
+                if not cids and op not in {"dropped", "renamed"}:
+                    continue
+                eps, fns = _column_users(graph, cids, inc)
+                out.append(
+                    SchemaChange(
+                        column=cids[0] if cids else f"column:{table}.{col.lower()}",
+                        file=path, line=ln, entrypoints=eps, functions=fns,
+                        op=op, table=table, name=col.lower(), detail=(new_name or "").lower(),
+                    )
+                )
     return out
 
 
@@ -402,7 +531,7 @@ def compute_impact(
             )
         )
     hint = None
-    code_exts = {".go", ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".sql"}
+    code_exts = {".go", ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
     known = {
         p for n in graph.nodes.values() if n.type == "function" for p in [_function_file(n, graph, prefix)] if p
     }
@@ -418,8 +547,21 @@ def compute_impact(
             + "). "
             + ("Pass --prefix <dir given to bizmap scan>." if graph.attrs.get("repo_roots_base") != "git" else "")
         ).strip()
-    schema = _schema_changes(graph, changes, unmapped, repo_root, in_idx) if repo_root is not None else []
-    return Impact(functions=out, unmapped_files=unmapped, hint=hint, schema_changes=schema)
+    schema: list[SchemaChange] = []
+    warnings: list[str] = []
+    if repo_root is not None:
+        missing: list[str] = []
+        schema = _schema_changes(
+            graph, changes, unmapped, repo_root, in_idx, _sql_cosmetic_lines(diff_text), missing
+        )
+        if missing:
+            shown = ", ".join(missing[:3]) + (f", +{len(missing) - 3}" if len(missing) > 3 else "")
+            warnings.append(
+                f"{len(missing)} changed .sql file(s) not found under --repo-root {str(repo_root)!r}: {shown}"
+            )
+    return Impact(
+        functions=out, unmapped_files=unmapped, hint=hint, schema_changes=schema, warnings=warnings
+    )
 
 
 # ── rendering ────────────────────────────────────────────────────────────────
@@ -530,19 +672,28 @@ def _fold_pass_through(graph: Graph, functions: list[FunctionImpact]) -> dict[st
 def _schema_section(graph: Graph, impact: Impact) -> list[str]:
     if not impact.schema_changes:
         return []
-    out = ["**Schema changes**", "", "| Column | Used by entrypoints | Functions |", "|---|---|---|"]
-    for ch in impact.schema_changes[:30]:
-        eps = "<br>".join(f"`{_label(graph, e)}`" for e in ch.entrypoints[:6]) or "— (not used yet)"
+    out = ["**Schema changes**", "", "| Change | Used by entrypoints | Functions |", "|---|---|---|"]
+    ordered = sorted(impact.schema_changes, key=lambda c: (not c.risky, c.file, c.line))
+    for ch in ordered[:30]:
+        if ch.op == "new table":
+            label = f"new table `{ch.table}` ({ch.detail})"
+        else:
+            op = f"renamed → `{ch.detail}`" if ch.op == "renamed" and ch.detail else ch.op
+            if ch.op in {"dropped", "renamed"}:
+                op = f"**{op}**"
+            label = f"`{ch.table}.{ch.name}` {op}"
+        if ch.risky:
+            label = "⚠️ " + label + " — still used"
+        empty = "— (not used yet)" if ch.op in {"added", "new table", "changed"} else "—"
+        eps = "<br>".join(f"`{_label(graph, e)}`" for e in ch.entrypoints[:6]) or empty
         if len(ch.entrypoints) > 6:
             eps += f"<br>+{len(ch.entrypoints) - 6}"
         fns = "<br>".join(f"`{_label(graph, f)}`" for f in ch.functions[:4]) or "—"
         if len(ch.functions) > 4:
             fns += f"<br>+{len(ch.functions) - 4}"
-        node = graph.get(ch.column)
-        name = f"{node.attrs.get('table')}.{node.attrs.get('name')}" if node is not None else ch.column
-        out.append(f"| `{name}` ({ch.file}:{ch.line}) | {eps} | {fns} |")
-    if len(impact.schema_changes) > 30:
-        out.append(f"\n+{len(impact.schema_changes) - 30} more changed column(s).")
+        out.append(f"| {label} <sub>{ch.file}:{ch.line}</sub> | {eps} | {fns} |")
+    if len(ordered) > 30:
+        out.append(f"\n+{len(ordered) - 30} more schema change(s).")
     return out
 
 
@@ -581,6 +732,8 @@ def render_markdown(
         other = _other_unmapped(impact)
         if other:
             body += ["", other]
+        for warning in impact.warnings:
+            body += ["", f"Note: {warning}."]
         return "\n".join(body) + "\n"
     if not impact.functions:
         head.append("No mapped function changed in this diff.")
@@ -590,6 +743,9 @@ def render_markdown(
         if impact.hint:
             head.append("")
             head.append(f"Note: {impact.hint}")
+        for warning in impact.warnings:
+            head.append("")
+            head.append(f"Note: {warning}.")
         return "\n".join(head) + "\n"
     folded = _fold_pass_through(graph, impact.functions)
     reaching = sorted(
@@ -601,8 +757,9 @@ def render_markdown(
     for caller, callee in folded.items():
         via.setdefault(callee, []).append(caller)
     n_w, n_r = len(_tables_only(impact.writes)), len(_tables_only(impact.reads))
+    folded_note = f" ({len(folded)} folded into another row)" if folded else ""
     head.append(
-        f"**{len(impact.functions)}** changed {_plural(len(impact.functions), 'function')} · "
+        f"**{len(impact.functions)}** changed {_plural(len(impact.functions), 'function')}{folded_note} · "
         f"**{len(impact.entrypoints)}** {_plural(len(impact.entrypoints), 'entrypoint')} · "
         f"writes **{n_w}** {_plural(n_w, 'table')} · reads **{n_r}** {_plural(n_r, 'table')}"
     )
@@ -675,6 +832,8 @@ def render_markdown(
         other = _other_unmapped(impact)
         if other:
             body += ["", other]
+        for warning in impact.warnings:
+            body += ["", f"Note: {warning}."]
         if len(reaching) > n_rows and details_url:
             body.append(f"Full list: [workflow run summary]({details_url}).")
         return "\n".join(body + footer) + "\n"
