@@ -255,11 +255,18 @@ def split_factory_members(
         if not members:
             continue
         outgoing = [e for e in graph.edges.values() if e.from_id == node.id and e.type in _MOVABLE]
+        # members already measured as functions of their own (method
+        # definitions the detector named) keep their node
+        taken = {
+            ((n.attrs.get("start_line") or (n.attrs.get("evidence") or {}).get("line")), n.attrs.get("end_line"))
+            for n in graph.nodes.values()
+            if n.type == "function" and (n.attrs.get("evidence") or {}).get("file") == rel and n.id != node.id
+        }
         for key, mnode in members:
             m_start, m_end = mnode.start_point[0] + 1, mnode.end_point[0] + 1
             child_name = f"{name}.{key}"
             child_id = f"function:{child_name}"
-            if child_id in graph.nodes:
+            if child_id in graph.nodes or (m_start, m_end) in taken:
                 continue
             graph.add_node(
                 child_id,

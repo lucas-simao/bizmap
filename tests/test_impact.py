@@ -312,12 +312,18 @@ def test_factory_members_get_their_own_routes(tmp_path: Path) -> None:
             for t in [e.to_id]
         }, [f.function for f in imp.functions]
 
+    got5, fns5 = routes(5)
+    assert len(fns5) == 1 and fns5[0].endswith("createShopClient.order"), fns5
+    assert got5 == {"/orders/:id"}, got5
+    got9, fns9 = routes(9)
+    assert len(fns9) == 1 and fns9[0].endswith("createShopClient.addUser"), fns9
+    assert got9 == {"/settings/users"}, got9
+    # a method definition is its own function already: only its route
     got7, fns7 = routes(7)
-    assert fns7 == ["function:src.clients.shop.createShopClient.stock"], fns7
-    assert got7 == {"/inventory/:id"}, got7
+    assert len(fns7) == 1 and got7 == {"/inventory/:id"}, (fns7, got7)
     _got, fns3 = routes(3)
-    assert fns3 == ["function:src.clients.shop.createShopClient"], fns3
-    # the factory still reaches every member's route through `calls`
-    factory = "function:src.clients.shop.createShopClient"
+    assert len(fns3) == 1 and fns3[0].endswith("createShopClient"), fns3
+    # the factory still reaches its members' routes through `calls`
+    factory = fns3[0]
     members = {e.to_id for e in graph.edges.values() if e.type == "calls" and e.from_id == factory}
-    assert {m.rsplit(".", 1)[-1] for m in members} >= {"order", "stock", "addUser"}, members
+    assert {m.rsplit(".", 1)[-1] for m in members} >= {"order", "addUser"}, members
