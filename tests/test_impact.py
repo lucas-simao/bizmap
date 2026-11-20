@@ -27,7 +27,7 @@ def _diff(path: str, line: int, old: str = "old", new: str = "new") -> str:
 def test_parse_unified_diff_lines() -> None:
     text = (
         "diff --git a/x.go b/x.go\n--- a/x.go\n+++ b/x.go\n"
-        "@@ -10,4 +10,5 @@ func A() {\n"
+        "@@ -10,4 +10,4 @@ func A() {\n"
         " ctx\n"
         "+added\n"
         " ctx\n"
@@ -329,3 +329,76 @@ def test_factory_members_get_their_own_routes(tmp_path: Path) -> None:
     factory = fns3[0]
     members = {e.to_id for e in graph.edges.values() if e.type == "calls" and e.from_id == factory}
     assert {m.rsplit(".", 1)[-1] for m in members} >= {"order", "addUser"}, members
+
+
+FACTORY = (
+    "import { AxiosInstance } from 'axios';\n"                 # 1
+    "export function createShopClient(http: AxiosInstance) {\n"  # 2
+    "  return {\n"                                               # 3
+    "    order: (id: string) =>\n"                               # 4
+    "      http.get(`/orders/${id}`),\n"                         # 5
+    "    stock: (id: string) =>\n"                               # 6
+    "      http.get(`/inventory/${id}`),\n"                      # 7
+    "    addUser: () =>\n"                                       # 8
+    "      http.post('/settings/users', {}),\n"                  # 9
+    "  };\n"                                                     # 10
+    "}\n"                                                        # 11
+)
+
+
+def _git_diff(tmp_path: Path, old: str, new: str) -> tuple[str, object]:
+    import subprocess
+
+    rel = "web/src/clients/shop.ts"
+    for base, body in (("old", old), ("repo", new)):
+        p = tmp_path / base / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+    proc = subprocess.run(
+        ["git", "diff", "--no-index", "--unified=0", f"old/{rel}", f"repo/{rel}"],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    return proc.stdout, scan_path(tmp_path / "repo")
+
+
+def _members_hit(tmp_path: Path, new: str) -> list[str]:
+    diff, graph = _git_diff(tmp_path, FACTORY, new)
+    imp = compute_impact(graph, diff, prefix="repo")
+    return sorted(f.function.rsplit(".", 1)[-1] for f in imp.functions)
+
+
+def test_unified0_replace_first_line_of_member(tmp_path: Path) -> None:
+    new = FACTORY.replace("    stock: (id: string) =>", "    stock: (sku: string) =>")
+    assert _members_hit(tmp_path, new) == ["stock"]
+
+
+def test_unified0_replace_last_line_of_member(tmp_path: Path) -> None:
+    new = FACTORY.replace("`/inventory/${id}`", "`/inventory/${id}/v2`")
+    assert _members_hit(tmp_path, new) == ["stock"]
+
+
+def test_unified0_delete_last_member(tmp_path: Path) -> None:
+    new = FACTORY.replace("    addUser: () =>\n      http.post('/settings/users', {}),\n", "")
+    # the gap is between stock's last line and the object's closing line: the
+    # factory owns it, not both remaining members
+    hit = _members_hit(tmp_path, new)
+    assert "order" not in hit and hit in (["createShopClient"], ["createShopClient", "stock"]), hit
+
+
+def test_unified0_delete_first_member(tmp_path: Path) -> None:
+    new = FACTORY.replace("    order: (id: string) =>\n      http.get(`/orders/${id}`),\n", "")
+    hit = _members_hit(tmp_path, new)
+    assert "stock" not in hit or hit == ["createShopClient", "stock"], hit
+    assert "addUser" not in hit and "createShopClient" in hit, hit
+
+
+def test_marker_survives_tiny_cap() -> None:
+    from bizmap.graph import Graph
+    from bizmap.impact import FunctionImpact, Impact
+
+    graph = Graph()
+    graph.add_node("function:a." + "x" * 500, "function", name="a." + "x" * 500)
+    imp = Impact(functions=[FunctionImpact(function="function:a." + "x" * 500, file="a.py", lines=[1], writes=["table:t"])],
+                 unmapped_files=[])
+    md = render_markdown(graph, imp, max_chars=200)
+    assert md.startswith(MARKER) and "### BizMap impact" in md and "truncated" in md
