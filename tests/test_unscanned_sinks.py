@@ -129,3 +129,34 @@ def charge(amount):
     graph = scan_path(tmp_path)
     node = graph.get(function_id("svc.charge"))
     assert (node.attrs.get("unresolved_calls") or []) == [], node.attrs.get("unresolved_calls")
+
+
+def test_unscanned_submodule_under_scanned_package_is_reported(tmp_path: Path) -> None:
+    """`pkg/__init__.py` and `pkg/store/__init__.py` are scanned, but
+    `pkg/store/lens/counts.py` is not: the call must be `target_not_scanned`,
+    never silently dropped. A class method in a scanned module is not."""
+    _write(tmp_path, "schema.sql", SCHEMA)
+    _write(tmp_path, "pkg/__init__.py", "")
+    _write(tmp_path, "pkg/store/__init__.py", "")
+    _write(tmp_path, "pkg/models.py", "class Repo:\n    pass\n")
+    _write(
+        tmp_path,
+        "pkg/api.py",
+        """
+from pkg.store.lens import counts
+from pkg.store.lens.counts import tenant_counts
+from pkg import models
+
+
+def dashboard(conn):
+    a = tenant_counts(conn)
+    b = counts.tenant_counts(conn)
+    models.Repo.load(conn)
+    return a, b
+""",
+    )
+    graph = scan_path(tmp_path)
+    node = graph.get(function_id("pkg.api.dashboard"))
+    reasons = node.attrs.get("unresolved_call_reasons") or {}
+    assert reasons.get("pkg.store.lens.counts.tenant_counts") == "target_not_scanned", node.attrs
+    assert "pkg.models.Repo.load" not in reasons, reasons

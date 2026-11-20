@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **Silent drop of calls into unscanned submodules of scanned packages**:
+  with an `__init__.py` chain, `pkg.store.lens.counts.tenant_counts` was
+  skipped because `pkg` / `pkg.store` are scanned (their `__init__.py`). Now
+  only the longest scanned prefix decides: a package means an unscanned
+  submodule → `target_not_scanned`; a regular module means our own class /
+  constant → left alone.
+
 - **False link from object-member path helpers**: a helper stored as an
   object property (`export const paths = { pdfReport: (id) => … }`) had no
   symbol of its own, so its literal stayed on `<module>.module` without the

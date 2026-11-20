@@ -4285,6 +4285,9 @@ def _link_unscanned_sinks(
     declared: set[str] | None = None,
 ) -> None:
     scanned_modules = {module for _p, _rf, _s, _t, module, _i, _f in parsed}
+    package_modules = {
+        module for _p, rf, _s, _t, module, _i, _f in parsed if rf.endswith("__init__.py")
+    }
     scanned_roots = {m.split(".", 1)[0] for m in scanned_modules}
     known_unresolved = {(u.caller, u.callee) for u in analysis.unresolved_calls}
     resolved_pairs = {(c, d) for c, d, _e, _k in analysis.calls}
@@ -4355,10 +4358,19 @@ def _link_unscanned_sinks(
                 qual = _imported_qualname(target, imap)
                 if not qual or qual in analysis.functions or (fn.qualname, qual) in resolved_pairs:
                     continue
-                # any scanned module along the dotted path means it is our code,
-                # just not a plain function (class, instance, constant)
-                prefixes = [".".join(qual.split(".")[:i]) for i in range(1, qual.count(".") + 1)]
-                if any(p in scanned_modules for p in prefixes) or qual in scanned_modules:
+                # Longest scanned prefix of the dotted path: a regular module
+                # means our own code that is just not a plain function (class,
+                # instance, constant) → leave it. A *package* (`__init__.py`)
+                # means the next segment is a submodule that was not scanned →
+                # report it (`pkg.store.lens.counts.tenant_counts`).
+                if qual in scanned_modules:
+                    continue
+                parts = qual.split(".")
+                longest = next(
+                    (".".join(parts[:i]) for i in range(len(parts) - 1, 0, -1) if ".".join(parts[:i]) in scanned_modules),
+                    None,
+                )
+                if longest is not None and longest not in package_modules:
                     continue
                 src_module = qual.rsplit(".", 1)[0]
                 if not _is_first_party(src_module, scanned_roots, declared):
