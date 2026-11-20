@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Local helpers in anonymous callbacks / object-literal methods**: `const
+  report = (m) => ...` declared inside `schema.refine((p, ctx) => {...})` or a
+  `{ async start(c) {...} }` method is the callee of `report(...)` there
+  (0.3.3's shadowing check stopped at the `const` and lost these `calls`).
+- **Ambiguous `export *`**: a name two `export * from` sources both provide is
+  not exported by TypeScript, so no `calls` edge is made to either.
+- **Path aliases**: tsconfig `baseUrl`/`paths` resolve relative to the config
+  that declares them (also through `extends`), each alias applies only under
+  its config's directory (two apps can each have `@/*`), and simple Vite
+  `resolve.alias` entries (`'@': path.resolve(__dirname, './src')`,
+  `fileURLToPath(new URL('./src', import.meta.url))`) are read.
+
 ## 0.3.3 — 2026-11-20
 
 No tag was pushed for 0.3.0–0.3.2; this is the first tagged release of the
@@ -32,6 +48,10 @@ No tag was pushed for 0.3.0–0.3.2; this is the first tagged release of the
   like named handlers, so `report`/`why` see them.
 
 ## 0.3.2 — 2026-11-20
+
+<!-- 0.3.1 -->
+_0.3.1 has no entry of its own: it was bumped on `main` (the first `bizmap impact`
++ Action) but never tagged, and its changes are listed under 0.3.2._
 
 0.3.1 was bumped on `main` but never tagged; its additions ship here.
 

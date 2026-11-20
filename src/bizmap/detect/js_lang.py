@@ -1025,6 +1025,11 @@ class JsAnalyzer:
                                 JsCall(caller=parent_qual, callee=qual, file=rel_file, line=line_of(value))
                             )
             # calls to helpers declared in an enclosing function's scope
+            fn_by_span = {
+                (n.start_byte, n.end_byte): q
+                for q, n in fn_nodes.items()
+                if q.startswith(module + ".") and analysis.functions.get(q, ("",))[0] == rel_file
+            }
             for node in walk(tree):
                 if node.type != "call_expression":
                     continue
@@ -1050,8 +1055,16 @@ class JsAnalyzer:
                     continue
                 name = text(fn_n)
                 callee = _scoped_callee(caller, name, module, fn_nodes)
-                if callee is None and _locally_shadowed(node, name):
-                    continue  # a parameter / local variable, not the module's function
+                if callee is None:
+                    scope = _binding_scope(node, name)
+                    if scope is not None:
+                        # `const report = (m) => ...` in an anonymous callback or
+                        # an object-literal method: that local function is the
+                        # callee; a parameter / plain variable is not a function
+                        bound = _bound_function(scope, name)
+                        callee = fn_by_span.get((bound.start_byte, bound.end_byte)) if bound is not None else None
+                        if callee is None or callee == caller:
+                            continue
                 if callee is None and f"{module}.{name}" in fn_nodes and f"{module}.{name}" != caller:
                     callee = f"{module}.{name}"  # module-level function
                 if callee:
@@ -1791,17 +1804,44 @@ def _scope_bindings(scope: Node) -> set[str]:
     return names
 
 
-def _locally_shadowed(call: Node, name: str) -> bool:
-    """`name` is bound between the call and module scope by a parameter,
-    `let`/`var`/`const` or a `catch (name)`; a module-level or imported
-    function of that name is not the callee."""
+def _binding_scope(call: Node, name: str) -> Node | None:
+    """Innermost function / catch clause between the call and module scope
+    that binds ``name`` (parameter, `let`/`var`/`const`, `catch (name)`)."""
     cur = call.parent
     while cur is not None and cur.type != "program":
         if cur.type in _FN_SCOPE_TYPES or cur.type == "catch_clause":
             if name in _scope_bindings(cur):
-                return True
+                return cur
         cur = cur.parent
-    return False
+    return None
+
+
+def _locally_shadowed(call: Node, name: str) -> bool:
+    return _binding_scope(call, name) is not None
+
+
+def _bound_function(scope: Node, name: str) -> Node | None:
+    """The arrow/function a `const name = () => {}` in ``scope``'s own body
+    binds (nested functions excluded), else None."""
+    if scope.type == "catch_clause":
+        return None
+    body = scope.child_by_field_name("body")
+    if body is None or body.type != "statement_block":
+        return None
+    stack = list(body.named_children)
+    while stack:
+        cur = stack.pop()
+        if cur.type in _FN_SCOPE_TYPES or cur.type == "class_declaration":
+            continue
+        if cur.type == "variable_declarator":
+            nm = cur.child_by_field_name("name")
+            value = cur.child_by_field_name("value")
+            if nm is not None and nm.type == "identifier" and text(nm) == name:
+                if value is not None and value.type in {"arrow_function", "function", "function_expression"}:
+                    return value
+                return None
+        stack.extend(cur.named_children)
+    return None
 
 
 def _scoped_callee(caller: str, callee: str, module: str, fn_nodes: dict[str, Node]) -> str | None:
@@ -2080,7 +2120,7 @@ def _receiver_is_non_http(call: Node) -> bool:
 def _collect_imports(
     tree: Node,
     module: str,
-    path_aliases: list[tuple[str, list[str]]] | None = None,
+    path_aliases: list | None = None,
 ) -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
     """Return (local→qualname, local→(src_module, orig_name))."""
     out: dict[str, str] = {}
@@ -2427,6 +2467,36 @@ def _final_source(
     return None
 
 
+def _export_sources(
+    mod: str,
+    name: str,
+    exports_by_mod: dict[str, dict[str, str]],
+    known: set[str],
+    depth: int = 0,
+) -> set[tuple[str, str]]:
+    """Every (module, local name) ``name`` can come from when imported from
+    ``mod``: its own export, `export { a as b } from`, or each `export *`."""
+    if depth > 6:
+        return set()
+    for cand in (mod, f"{mod}.index"):
+        if cand not in known:
+            continue
+        exports = exports_by_mod.get(cand) or {}
+        if name in exports:
+            return {(cand, exports[name])}
+        named, stars = _REEXPORTS.get(cand, ({}, []))
+        if name in named:
+            nmod, orig = named[name]
+            return _export_sources(nmod, orig, exports_by_mod, known, depth + 1) or {(nmod, orig)}
+        found: set[tuple[str, str]] = set()
+        for star in stars:
+            if name == "default":
+                continue  # `export *` never re-exports the default
+            found |= _export_sources(star, name, exports_by_mod, known, depth + 1)
+        return found
+    return set()
+
+
 def _imported_function(
     src_mod: str,
     orig: str,
@@ -2436,15 +2506,20 @@ def _imported_function(
 ) -> str | None:
     """Scanned function an import names: through `index` barrels,
     `export { a } from` / `export * from`, `export default <identifier>` and
-    CommonJS exports."""
+    CommonJS exports. A name two `export *` sources both provide is
+    ambiguous (TypeScript does not export it): no target."""
     if orig == "require":
         orig = "default"
-    hit = _final_source(src_mod, orig, exports_by_mod, known) or (src_mod, orig)
-    for mod, name in (hit, (src_mod, orig), (f"{src_mod}.index", orig)):
-        exports = exports_by_mod.get(mod) or {}
-        local = exports.get(name) or name
-        if f"{mod}.{local}" in fn_nodes:
-            return f"{mod}.{local}"
+    sources = _export_sources(src_mod, orig, exports_by_mod, known)
+    targets = {f"{m}.{local}" for m, local in sources if f"{m}.{local}" in fn_nodes}
+    if len(sources) > 1:
+        return None
+    if len(targets) == 1:
+        return next(iter(targets))
+    if not sources:
+        for mod in (src_mod, f"{src_mod}.index"):
+            if f"{mod}.{orig}" in fn_nodes:
+                return f"{mod}.{orig}"
     return None
 
 
@@ -2638,7 +2713,7 @@ def _propagate_client_bases(
 def _spec_to_module(
     spec: str,
     current: str,
-    path_aliases: list[tuple[str, list[str]]] | None = None,
+    path_aliases: list | None = None,
 ) -> str:
     spec = spec.strip()
     if spec.startswith("."):
@@ -2652,7 +2727,7 @@ def _spec_to_module(
         rest = _strip_js_ext(rest)
         bits = [p for p in rest.split("/") if p and p != "."]
         return ".".join([*parts[:-1], *bits]) if bits else ".".join(parts[:-1]) or current
-    mapped = _map_ts_alias(spec, path_aliases or [])
+    mapped = _map_ts_alias(spec, path_aliases or [], current)
     if mapped:
         return mapped
     if spec.startswith("@/"):
@@ -2694,10 +2769,26 @@ def _apply_ts_pattern(spec: str, pattern: str, target: str) -> str | None:
     return target
 
 
-def _map_ts_alias(spec: str, aliases: list[tuple[str, list[str]]]) -> str | None:
+def _map_ts_alias(spec: str, aliases: list, current: str | None = None) -> str | None:
+    """Map ``spec`` with tsconfig ``paths`` (or a Vite ``resolve.alias``).
+
+    Entries are ``(pattern, targets)`` or ``(pattern, targets, scope)``; a
+    scoped entry (the module prefix of the config's directory) only applies
+    to files under it, and the deepest matching scope wins, so two apps in one
+    repo can each define their own ``@/*``."""
     if not aliases:
         return None
-    for pattern, targets in sorted(aliases, key=lambda item: -len(item[0])):
+
+    def scope_of(item: tuple) -> str:
+        return item[2] if len(item) > 2 else ""
+
+    usable = [
+        a
+        for a in aliases
+        if not scope_of(a) or (current is not None and (current == scope_of(a) or current.startswith(scope_of(a) + ".")))
+    ]
+    for item in sorted(usable, key=lambda a: (-len(scope_of(a)), -len(a[0]))):
+        pattern, targets = item[0], item[1]
         for target in targets:
             mapped = _apply_ts_pattern(spec, pattern, target)
             if mapped:
@@ -2773,6 +2864,16 @@ def _load_tsconfig(path: Path, seen: set[Path] | None = None) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
+    opts = data.get("compilerOptions")
+    if isinstance(opts, dict):
+        # baseUrl is relative to the config that sets it; paths without a
+        # baseUrl are relative to the config that sets them
+        opts = dict(opts)
+        if opts.get("baseUrl"):
+            opts["_baseDir"] = str((path.parent / str(opts["baseUrl"])).resolve())
+        if opts.get("paths"):
+            opts["_pathsDir"] = str(path.parent)
+        data = dict(data, compilerOptions=opts)
     merged: dict = {}
     ext = data.get("extends")
     exts = ext if isinstance(ext, list) else ([ext] if ext else [])
@@ -2800,9 +2901,12 @@ def _join_ts_base(base_url: str, target: str) -> str:
     return base + "/" + target
 
 
-def _ts_path_aliases(root: Path) -> list[tuple[str, list[str]]]:
-    """compilerOptions.paths from tsconfig.json / jsconfig.json (with extends)."""
+def _ts_path_aliases(root: Path) -> list[tuple[str, list[str], str]]:
+    """compilerOptions.paths from tsconfig.json / jsconfig.json (with extends),
+    plus simple Vite ``resolve.alias`` entries. Targets are made relative to
+    the scan root; each alias is scoped to the directory of its config."""
     configs: list[Path] = []
+    vite: list[Path] = []
     root = root.resolve()
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
@@ -2811,17 +2915,35 @@ def _ts_path_aliases(root: Path) -> list[tuple[str, list[str]]]:
                 name.startswith("tsconfig.") and name.endswith(".json")
             ):
                 configs.append(Path(dirpath) / name)
-    aliases: list[tuple[str, list[str]]] = []
-    seen: set[tuple[str, tuple[str, ...]]] = set()
+            elif re.match(r"vite\.config\.(?:[cm]?[jt]s)$", name):
+                vite.append(Path(dirpath) / name)
+
+    def rel_to_root(abs_dir: Path, target: str) -> str | None:
+        try:
+            joined = (abs_dir / target.replace("\\", "/").lstrip("/")).resolve()
+            out = joined.relative_to(root).as_posix()
+        except (ValueError, OSError):
+            return None
+        if target.rstrip("/").endswith("*") and not out.endswith("*"):
+            out = out + "/*"
+        return out
+
+    def scope_for(cfg_dir: Path) -> str:
+        rel = cfg_dir.resolve().relative_to(root).as_posix() if cfg_dir.resolve() != root else ""
+        return ".".join(p for p in rel.split("/") if p and p != ".")
+
+    aliases: list[tuple[str, list[str], str]] = []
+    seen: set[tuple[str, tuple[str, ...], str]] = set()
     for cfg_path in sorted(configs):
         data = _load_tsconfig(cfg_path)
         opts = data.get("compilerOptions") if isinstance(data, dict) else None
         if not isinstance(opts, dict):
             continue
-        base_url = str(opts.get("baseUrl") or ".")
         paths = opts.get("paths") or {}
         if not isinstance(paths, dict):
             continue
+        base_dir = Path(opts.get("_baseDir") or opts.get("_pathsDir") or cfg_path.parent)
+        scope = scope_for(cfg_path.parent)
         for pattern, targets in paths.items():
             if isinstance(targets, str):
                 target_list = [targets]
@@ -2829,12 +2951,32 @@ def _ts_path_aliases(root: Path) -> list[tuple[str, list[str]]]:
                 target_list = [str(t) for t in targets if t]
             else:
                 continue
-            joined = [_join_ts_base(base_url, t) for t in target_list]
-            key = (str(pattern), tuple(joined))
-            if key in seen:
+            joined = [j for t in target_list for j in [rel_to_root(base_dir, t)] if j]
+            key = (str(pattern), tuple(joined), scope)
+            if not joined or key in seen:
                 continue
             seen.add(key)
-            aliases.append((str(pattern), joined))
+            aliases.append((str(pattern), joined, scope))
+    for cfg_path in sorted(vite):
+        try:
+            raw = cfg_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        scope = scope_for(cfg_path.parent)
+        # '@': path.resolve(__dirname, './src')  /  '@': fileURLToPath(new URL('./src', import.meta.url))
+        for m in re.finditer(
+            r"""['"]?([@~#][\w\-/]*)['"]?\s*:\s*(?:path\.)?(?:resolve|join|fileURLToPath)\s*\((?:[^'"()]*?,\s*)?(?:new\s+URL\(\s*)?['"]([^'"]+)['"]""",
+            raw,
+        ):
+            name, target = m.group(1), m.group(2)
+            target_rel = rel_to_root(cfg_path.parent, target)
+            if not target_rel:
+                continue
+            for pattern, tgt in ((name, target_rel), (name.rstrip("/") + "/*", target_rel.rstrip("/") + "/*")):
+                key = (pattern, (tgt,), scope)
+                if key not in seen:
+                    seen.add(key)
+                    aliases.append((pattern, [tgt], scope))
     return aliases
 
 
@@ -3501,7 +3643,7 @@ _REEXPORTS: dict[str, tuple[dict[str, tuple[str, str]], list[str]]] = {}
 
 
 def _collect_reexports(
-    tree: Node, module: str, path_aliases: list[tuple[str, list[str]]] | None
+    tree: Node, module: str, path_aliases: list | None
 ) -> tuple[dict[str, tuple[str, str]], list[str]]:
     """`export { a as b } from './x'` → {b: (x, a)}; `export * from './y'` → [y]."""
     named: dict[str, tuple[str, str]] = {}

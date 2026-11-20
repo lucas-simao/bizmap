@@ -229,8 +229,8 @@ and marks those links `inferred`. Details: [docs/how-it-works.md](docs/how-it-wo
 
 ## Roadmap
 
-- **v0.3.3** — `bizmap impact` + GitHub Action that comments on each PR with the
-  routes, functions, tables and columns it impacts (and a Mermaid diagram).
+- **Shipped in v0.3.3** — `bizmap impact` + GitHub Action that comments on each PR
+  with the routes, functions, tables and columns it impacts (and a Mermaid diagram).
 - **v0.4** — MCP server so coding agents can ask `why orders.status` instead of grepping.
 - Static graph page (GitHub Pages).
 
