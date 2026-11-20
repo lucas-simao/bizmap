@@ -1,0 +1,17 @@
+# Dogfood: the BizMap impact Action from this checkout, on this repo's PRs.
+name: Impact
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: bizmap-impact-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  impact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          path: .

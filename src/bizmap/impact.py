@@ -27,6 +27,32 @@ _CALL_EDGES = {"calls", "calls_http", "triggers", "enqueues"}
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 
+def _git_unquote(path: str) -> str:
+    """Undo git's C-style quoting (`"caf\\303\\251.py"` → `café.py`)."""
+    if len(path) < 2 or not (path.startswith('"') and path.endswith('"')):
+        return path
+    body = path[1:-1]
+    out = bytearray()
+    i = 0
+    simple = {"n": 10, "t": 9, '"': 34, "\\": 92, "a": 7, "b": 8, "f": 12, "r": 13, "v": 11}
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and i + 1 < len(body):
+            nxt = body[i + 1]
+            octal = body[i + 1:i + 4]
+            if len(octal) == 3 and all(c in "01234567" for c in octal):
+                out.append(int(octal, 8))
+                i += 4
+                continue
+            if nxt in simple:
+                out.append(simple[nxt])
+                i += 2
+                continue
+        out.extend(ch.encode("utf-8"))
+        i += 1
+    return out.decode("utf-8", errors="replace")
+
+
 def parse_unified_diff(text: str) -> dict[str, set[int]]:
     """Return ``{new_path: changed new-side line numbers}``.
 
@@ -39,7 +65,8 @@ def parse_unified_diff(text: str) -> dict[str, set[int]]:
     line = 0
     for raw in text.splitlines():
         if raw.startswith("+++ "):
-            target = raw[4:].strip().split("\t", 1)[0]
+            target = raw[4:].rstrip("\n")
+            target = _git_unquote(target) if target.startswith('"') else target.split("\t", 1)[0].strip()
             if target == "/dev/null":
                 path = None
             else:
