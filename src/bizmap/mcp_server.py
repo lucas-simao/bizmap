@@ -13,6 +13,14 @@ Tools:
 - ``impact``         changed functions → routes and data for a unified diff (`bizmap impact`)
 - ``why_column``     the `bizmap why` text for TABLE.COLUMN
 
+Output contract (every tool): node items are `{id, type, label, repo?,
+evidence: "file:line", why?}`; items that come from an edge also carry
+`confidence` (exact > inferred > heuristic > unknown). Lists hold at most
+`limit` items (default 20, max 100) next to `<list>_total`, with `truncated`
+when anything was cut; the whole result stays under ``MAX_TEXT`` characters.
+Order is stable: search by match quality then id; call graphs by depth, edge
+type, id; data by table then column; everything else by id.
+
 The graph is reloaded when its file changes, so a long-lived session sees a
 fresh `bizmap scan`.
 """
@@ -33,7 +41,10 @@ from bizmap.why import format_why
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 _CALL_EDGES = {"calls", "calls_http", "triggers", "enqueues"}
 _DATA_EDGES = {"reads", "writes"}
-_MAX_LIMIT = 200
+DEFAULT_LIMIT = 20
+MAX_LIMIT = 100
+# ceiling for one tool result (JSON text); lists are halved until it fits
+MAX_TEXT = 20_000
 
 INSTRUCTIONS = (
     "BizMap answers questions about a codebase's data lineage from a graph built by "
@@ -86,6 +97,10 @@ class GraphStore:
             pass  # keep serving the last good graph
 
 
+_RANK = {"exact": 4, "inferred": 3, "heuristic": 2, "unknown": 1}
+_BY_RANK = {v: k for k, v in _RANK.items()}
+
+
 def _leaf(node_id: str) -> str:
     head = node_id.split(":", 1)[0]
     return node_id.split("/", 1)[1] if "/" in head else node_id
@@ -113,7 +128,20 @@ def _label(graph: Graph, node_id: str) -> str:
     return str(a.get("name") or leaf.split(":", 1)[-1])
 
 
+def _ev_str(file: Any, line: Any) -> str | None:
+    if not file:
+        return None
+    return f"{file}:{line}" if line else str(file)
+
+
+def _edge_evidence(edge: Any) -> str | None:
+    ev = edge.evidence
+    return _ev_str(ev.file, ev.line) if ev is not None else None
+
+
 def _brief(store: GraphStore, node_id: str) -> dict[str, Any]:
+    """`{id, type, label, repo?, evidence?, end_line?, why?, method?, path?}`;
+    ``evidence`` is `file:line` where the node is defined."""
     graph = store.graph
     node = graph.get(node_id)
     out: dict[str, Any] = {"id": node_id, "label": _label(graph, node_id)}
@@ -125,11 +153,9 @@ def _brief(store: GraphStore, node_id: str) -> dict[str, Any]:
     if repo:
         out["repo"] = repo
     ev = a.get("evidence") or {}
-    if ev.get("file"):
-        out["file"] = ev["file"]
-        start = a.get("start_line") or ev.get("line")
-        if start:
-            out["line"] = start
+    evidence = _ev_str(ev.get("file"), a.get("start_line") or ev.get("line"))
+    if evidence:
+        out["evidence"] = evidence
         if a.get("end_line"):
             out["end_line"] = a["end_line"]
     if a.get("why"):
@@ -193,65 +219,92 @@ def _matches(store: GraphStore, ref: str, types: set[str]) -> list[str]:
 def _resolve(store: GraphStore, ref: str, kind: str) -> str:
     ids = _matches(store, ref, _TYPE_ALIASES[kind])
     if not ids:
-        raise ToolError(f"no {kind} matches {ref!r}; use `search` to find its id")
+        raise ToolError(f"no {kind} matches {ref!r}. Use the `search` tool to find its id.")
     if len(ids) > 1:
-        shown = ", ".join(ids[:10]) + (f" (+{len(ids) - 10})" if len(ids) > 10 else "")
-        raise ToolError(f"{ref!r} is ambiguous ({len(ids)} matches): {shown}; pass one of these ids")
+        shown = ", ".join(ids[:10]) + (f" (+{len(ids) - 10} more)" if len(ids) > 10 else "")
+        raise ToolError(f"{ref!r} matches {len(ids)} nodes: {shown}. Pass one of these ids.")
     return ids[0]
 
 
-def _limit(args: dict[str, Any], default: int = 50) -> int:
-    value = args.get("limit", default)
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise ToolError("limit must be a positive integer")
-    return min(value, _MAX_LIMIT)
+def _limit(args: dict[str, Any]) -> int:
+    value = args.get("limit", DEFAULT_LIMIT)
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= MAX_LIMIT:
+        raise ToolError(f"limit must be an integer from 1 to {MAX_LIMIT}")
+    return value
 
 
-def _entrypoints_reaching(store: GraphStore, node_id: str) -> list[str]:
+def _page(rows: list[Any], limit: int, out: dict[str, Any], key: str) -> None:
+    """``out[key]`` = first ``limit`` rows, ``out[key + "_total"]`` = all."""
+    out[key] = rows[:limit]
+    out[f"{key}_total"] = len(rows)
+    if len(rows) > limit:
+        out["truncated"] = True
+
+
+def _entrypoints_reaching(store: GraphStore, node_id: str) -> list[tuple[str, str]]:
+    """(entrypoint id, confidence) for every entrypoint reaching ``node_id``:
+    the confidence of the strongest path (its weakest edge)."""
     graph = store.graph
-    seen: set[str] = set()
-    found: set[str] = set()
-    q = deque([node_id])
-    while q:
-        cur = q.popleft()
-        if cur in seen:
-            continue
-        seen.add(cur)
-        node = graph.get(cur)
-        if node is not None and node.type == "entrypoint":
-            found.add(cur)
-        for edge in store.inc.get(cur, []):
-            if edge.type in _CALL_EDGES:
-                q.append(edge.from_id)
-    return sorted(found)
+    best: dict[str, int] = {node_id: 4}
+    frontier = [node_id]
+    while frontier:
+        nxt: list[str] = []
+        for cur in frontier:
+            for edge in store.inc.get(cur, []):
+                if edge.type not in _CALL_EDGES:
+                    continue
+                rank = min(best[cur], _RANK.get(edge.confidence.value, 1))
+                if rank > best.get(edge.from_id, 0):
+                    best[edge.from_id] = rank
+                    nxt.append(edge.from_id)
+        frontier = sorted(set(nxt))
+    return sorted(
+        (nid, _BY_RANK[r]) for nid, r in best.items()
+        if nid != node_id and (n := graph.get(nid)) is not None and n.type == "entrypoint"
+    )
+
+
+def _ep_rows(store: GraphStore, eps: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    rows = []
+    for nid, conf in eps:
+        row = _brief(store, nid)
+        row["confidence"] = conf
+        rows.append(row)
+    return rows
 
 
 def _table_of(graph: Graph, target: str) -> tuple[str, str | None]:
-    """(table label, column name or None) for a data node id."""
     node = graph.get(target)
     if node is not None and node.type == "column":
         return str(node.attrs.get("table")), str(node.attrs.get("name"))
     return _label(graph, target), None
 
 
-def _group_data(graph: Graph, edges: list[tuple[str, str, str]]) -> dict[str, list[dict[str, Any]]]:
-    """{reads|writes: [{table, columns, confidence}]} from (type, target, confidence)."""
-    rank = {"exact": 4, "inferred": 3, "heuristic": 2, "unknown": 1}
-    acc: dict[str, dict[str, dict[str, Any]]] = {"reads": {}, "writes": {}}
-    for etype, target, conf in edges:
-        table, col = _table_of(graph, target)
-        slot = acc[etype].setdefault(table, {"table": table, "columns": set(), "confidence": conf})
-        if col:
-            slot["columns"].add(col)
-        if rank.get(conf, 0) > rank.get(slot["confidence"], 0):
+def _data_rows(graph: Graph, edges: list[Any]) -> list[dict[str, Any]]:
+    """Group data edges by table: `{table, confidence, evidence, columns:
+    [{column, confidence, evidence}]}`; strongest confidence wins, the
+    first evidence (sorted) is shown. Sorted by table, then column."""
+    tables: dict[str, dict[str, Any]] = {}
+    for edge in sorted(edges, key=lambda e: (e.to_id, -_RANK.get(e.confidence.value, 1), _edge_evidence(e) or "")):
+        table, col = _table_of(graph, edge.to_id)
+        conf = edge.confidence.value
+        slot = tables.setdefault(table, {"table": table, "confidence": conf, "evidence": None, "columns": {}})
+        if _RANK.get(conf, 1) > _RANK.get(slot["confidence"], 1):
             slot["confidence"] = conf
-    return {
-        etype: [
-            {"table": v["table"], "columns": sorted(v["columns"]), "confidence": v["confidence"]}
-            for _k, v in sorted(rows.items())
-        ]
-        for etype, rows in acc.items()
-    }
+        if slot["evidence"] is None:
+            slot["evidence"] = _edge_evidence(edge)
+        if col:
+            prev = slot["columns"].get(col)
+            if prev is None or _RANK.get(conf, 1) > _RANK.get(prev["confidence"], 1):
+                slot["columns"][col] = {"column": col, "confidence": conf, "evidence": _edge_evidence(edge)}
+    rows = []
+    for name in sorted(tables):
+        slot = tables[name]
+        row = {"table": slot["table"], "confidence": slot["confidence"], "columns": [slot["columns"][c] for c in sorted(slot["columns"])]}
+        if slot["evidence"]:
+            row["evidence"] = slot["evidence"]
+        rows.append(row)
+    return rows
 
 
 # ── tools ────────────────────────────────────────────────────────────────────
@@ -260,11 +313,11 @@ def _group_data(graph: Graph, edges: list[tuple[str, str, str]]) -> dict[str, li
 def tool_search(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
     query = str(args.get("query") or "").strip()
     if not query:
-        raise ToolError("query is required")
+        raise ToolError("`query` is required, e.g. {\"query\": \"markPaid\"}")
     kind = str(args.get("kind") or "any")
     if kind not in _TYPE_ALIASES:
-        raise ToolError(f"kind must be one of {sorted(_TYPE_ALIASES)}")
-    limit = _limit(args, 20)
+        raise ToolError(f"`kind` must be one of: {', '.join(sorted(_TYPE_ALIASES))}")
+    limit = _limit(args)
     graph = store.graph
     low = query.lower()
     scored: list[tuple[int, str]] = []
@@ -273,37 +326,41 @@ def tool_search(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
             continue
         label = _label(graph, nid)
         hay = [label.lower(), _leaf(nid).lower()]
-        if node.attrs.get("why"):
-            hay.append(str(node.attrs["why"]).lower())
         short = label.lower().rsplit(".", 1)[-1]
         if low in {label.lower(), short}:
             score = 0
         elif label.lower().startswith(low) or short.startswith(low):
             score = 1
-        elif any(low in h for h in hay[:2]):
+        elif any(low in h for h in hay):
             score = 2
-        elif any(low in h for h in hay[2:]):
+        elif node.attrs.get("why") and low in str(node.attrs["why"]).lower():
             score = 3
         else:
             continue
         scored.append((score, nid))
     scored.sort()
-    results = [_brief(store, nid) for _s, nid in scored[:limit]]
-    return {"query": query, "kind": kind, "total": len(scored), "results": results}
+    out: dict[str, Any] = {"query": query, "kind": kind, "truncated": False}
+    rows = []
+    for score, nid in scored:
+        row = _brief(store, nid)
+        row["match"] = ("exact", "prefix", "substring", "doc")[score]
+        rows.append(row)
+    _page(rows, limit, out, "results")
+    return out
 
 
 def tool_call_graph(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
-    ref = str(args.get("function") or args.get("id") or "").strip()
+    ref = str(args.get("function") or "").strip()
     if not ref:
-        raise ToolError("function is required (an id, a name or `METHOD /path`)")
+        raise ToolError("`function` is required: an id from `search`, a name, or `METHOD /path`")
     node_id = _resolve(store, ref, "any")
     direction = str(args.get("direction") or "both")
     if direction not in {"callers", "callees", "both"}:
-        raise ToolError("direction must be callers, callees or both")
+        raise ToolError("`direction` must be callers, callees or both")
     depth = args.get("depth", 1)
     if not isinstance(depth, int) or isinstance(depth, bool) or not 1 <= depth <= 5:
-        raise ToolError("depth must be an integer from 1 to 5")
-    limit = _limit(args, 50)
+        raise ToolError("`depth` must be an integer from 1 to 5")
+    limit = _limit(args)
 
     def walk(forward: bool) -> list[dict[str, Any]]:
         seen = {node_id}
@@ -323,34 +380,34 @@ def tool_call_graph(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
                     nxt.append(other)
                     row = _brief(store, other)
                     row.update({"edge": edge.type, "confidence": edge.confidence.value, "depth": level})
+                    call_ev = _edge_evidence(edge)
+                    if call_ev:
+                        row["call_evidence"] = call_ev
                     if edge.attrs.get("via"):
                         row["via"] = edge.attrs["via"]
                     rows.append(row)
             frontier = sorted(nxt)
-        rows.sort(key=lambda r: (r["depth"], r["id"]))
+        rows.sort(key=lambda r: (r["depth"], r["edge"], r["id"]))
         return rows
 
-    result: dict[str, Any] = {"node": _brief(store, node_id), "depth": depth}
+    out: dict[str, Any] = {"node": _brief(store, node_id), "direction": direction, "depth": depth, "truncated": False}
     if direction in {"callers", "both"}:
-        callers = walk(False)
-        result["callers"] = callers[:limit]
-        result["callers_total"] = len(callers)
-        result["entrypoints"] = [_brief(store, e) for e in _entrypoints_reaching(store, node_id)][:limit]
+        _page(walk(False), limit, out, "callers")
+        _page(_ep_rows(store, _entrypoints_reaching(store, node_id)), limit, out, "entrypoints")
     if direction in {"callees", "both"}:
-        callees = walk(True)
-        result["callees"] = callees[:limit]
-        result["callees_total"] = len(callees)
-    return result
+        _page(walk(True), limit, out, "callees")
+    return out
 
 
 def tool_function_data(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
-    ref = str(args.get("function") or args.get("id") or "").strip()
+    ref = str(args.get("function") or "").strip()
     if not ref:
-        raise ToolError("function is required (an id, a name or `METHOD /path`)")
+        raise ToolError("`function` is required: an id from `search`, a name, or `METHOD /path`")
     node_id = _resolve(store, ref, "any")
     transitive = bool(args.get("transitive", False))
-    graph = store.graph
-    edges: list[tuple[str, str, str]] = []
+    limit = _limit(args)
+    reads: list[Any] = []
+    writes: list[Any] = []
     seen: set[str] = set()
     q = deque([node_id])
     while q:
@@ -359,18 +416,23 @@ def tool_function_data(store: GraphStore, args: dict[str, Any]) -> dict[str, Any
             continue
         seen.add(cur)
         for edge in store.out.get(cur, []):
-            if edge.type in _DATA_EDGES:
-                edges.append((edge.type, edge.to_id, edge.confidence.value))
+            if edge.type == "reads":
+                reads.append(edge)
+            elif edge.type == "writes":
+                writes.append(edge)
             elif transitive and edge.type in _CALL_EDGES:
                 q.append(edge.to_id)
-    return {"node": _brief(store, node_id), "transitive": transitive, **_group_data(graph, edges)}
+    out: dict[str, Any] = {"node": _brief(store, node_id), "transitive": transitive, "truncated": False}
+    _page(_data_rows(store.graph, writes), limit, out, "writes")
+    _page(_data_rows(store.graph, reads), limit, out, "reads")
+    return out
 
 
 def tool_table_usage(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
-    ref = str(args.get("table") or args.get("column") or "").strip()
+    ref = str(args.get("table") or "").strip()
     if not ref:
-        raise ToolError("table is required (`orders`, or `orders.status` for one column)")
-    limit = _limit(args, 50)
+        raise ToolError("`table` is required: `orders`, or `orders.status` for one column")
+    limit = _limit(args)
     graph = store.graph
     if "." in ref and _matches(store, ref, {"column"}):
         targets = [_resolve(store, ref, "column")]
@@ -385,8 +447,8 @@ def tool_table_usage(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
             and str(n.attrs.get("table", "")).lower() == tname
             and (n.attrs.get("repo") or _repo(nid)) == repo
         )
-    by_fn: dict[str, dict[str, set[str]]] = {}
-    direct_eps: set[str] = set()
+    by_fn: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
+    direct_eps: dict[str, str] = {}
     for target in targets:
         for edge in store.inc.get(target, []):
             if edge.type not in _DATA_EDGES:
@@ -394,57 +456,111 @@ def tool_table_usage(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
             src = graph.get(edge.from_id)
             if src is None:
                 continue
+            conf = edge.confidence.value
             if src.type == "entrypoint":
-                direct_eps.add(edge.from_id)
+                if _RANK.get(conf, 1) > _RANK.get(direct_eps.get(edge.from_id, "unknown"), 0):
+                    direct_eps[edge.from_id] = conf
                 continue
             if src.type != "function":
                 continue
             _t, col = _table_of(graph, target)
-            slot = by_fn.setdefault(edge.from_id, {"reads": set(), "writes": set()})
-            slot[edge.type].add(col or "*")
+            col = col or "*"
+            slot = by_fn.setdefault(edge.from_id, {"reads": {}, "writes": {}})[edge.type]
+            prev = slot.get(col)
+            if prev is None or _RANK.get(conf, 1) > _RANK.get(prev["confidence"], 1):
+                slot[col] = {"column": col, "confidence": conf, "evidence": _edge_evidence(edge)}
     functions = []
     for fid in sorted(by_fn):
         row = _brief(store, fid)
-        row["reads"] = sorted(by_fn[fid]["reads"])
-        row["writes"] = sorted(by_fn[fid]["writes"])
+        row["writes"] = [by_fn[fid]["writes"][c] for c in sorted(by_fn[fid]["writes"])]
+        row["reads"] = [by_fn[fid]["reads"][c] for c in sorted(by_fn[fid]["reads"])]
+        row["confidence"] = _BY_RANK[max(_RANK.get(x["confidence"], 1) for x in row["writes"] + row["reads"])]
         functions.append(row)
-    eps: set[str] = set(direct_eps)
-    for fid in by_fn:
-        eps.update(_entrypoints_reaching(store, fid))
-    return {
-        "target": [_brief(store, t) for t in targets[:1]][0],
-        "functions": functions[:limit],
-        "functions_total": len(functions),
-        "entrypoints": [_brief(store, e) for e in sorted(eps)][:limit],
-        "entrypoints_total": len(eps),
-    }
+    eps: dict[str, int] = {k: _RANK.get(v, 1) for k, v in direct_eps.items()}
+    for fid, fn_slot in by_fn.items():
+        fn_rank = max(_RANK.get(x["confidence"], 1) for d in fn_slot.values() for x in d.values())
+        for ep, conf in _entrypoints_reaching(store, fid):
+            rank = min(fn_rank, _RANK.get(conf, 1))
+            eps[ep] = max(eps.get(ep, 0), rank)
+    out: dict[str, Any] = {"target": _brief(store, targets[0]), "truncated": False}
+    _page(functions, limit, out, "functions")
+    _page(_ep_rows(store, [(e, _BY_RANK[r]) for e, r in sorted(eps.items())]), limit, out, "entrypoints")
+    return out
 
 
 def tool_impact(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
     diff = args.get("diff")
     if not isinstance(diff, str) or not diff.strip():
-        raise ToolError("diff is required (unified diff text, e.g. `git diff --unified=0 main...`)")
+        raise ToolError("`diff` is required: unified diff text, e.g. the output of `git diff --unified=0 main...`")
     prefix = str(args.get("prefix") or ".")
+    limit = _limit(args)
     result = compute_impact(store.graph, diff, prefix=prefix, repo_root=store.repo_root)
-    out = result.to_dict()
+    full = result.to_dict()
+    out: dict[str, Any] = {"truncated": False}
+    functions = []
+    for f in full["functions"]:
+        row = _brief(store, f["function"])
+        row["changed_lines"] = f["lines"]
+        row["entrypoints"] = [_brief(store, e) for e in f["entrypoints"]]
+        row["writes"] = f["writes"]
+        row["reads"] = f["reads"]
+        functions.append(row)
+    _page(functions, limit, out, "functions")
+    _page(full["entrypoints"], limit, out, "entrypoints")
+    _page(full["writes"], limit, out, "writes")
+    _page(full["reads"], limit, out, "reads")
+    _page(full["schema_changes"], limit, out, "schema_changes")
+    _page(full["unmapped_files"], limit, out, "unmapped_files")
+    for key in ("hint", "warnings"):
+        if full.get(key):
+            out[key] = full[key]
     if args.get("markdown"):
-        out["markdown"] = render_markdown(store.graph, result)
+        out["markdown"] = render_markdown(store.graph, result, max_chars=MAX_TEXT // 2)
     return out
 
 
 def tool_why_column(store: GraphStore, args: dict[str, Any]) -> dict[str, Any]:
     column = str(args.get("column") or "").strip()
     if not column:
-        raise ToolError("column is required (`table.column`)")
+        raise ToolError("`column` is required: `table.column`, e.g. `orders.status`")
     try:
         text = format_why(store.graph, column)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
-    return {"column": column, "text": text}
+    if text.startswith("unknown column"):
+        raise ToolError(f"{text.strip()}. Use `search` with kind `column` to find it.")
+    return {"column": column, "text": text, "truncated": False}
+
+
+def _fit(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep the JSON text under ``MAX_TEXT`` characters: halve the longest list
+    (or cut the text fields) until it fits, and say so with ``truncated``."""
+
+    def size(obj: Any) -> int:
+        return len(json.dumps(obj, sort_keys=True, ensure_ascii=False))
+
+    if size(payload) <= MAX_TEXT:
+        return payload
+    payload = dict(payload)
+    payload["truncated"] = True
+    for _ in range(64):
+        if size(payload) <= MAX_TEXT:
+            return payload
+        lists = [(k, v) for k, v in payload.items() if isinstance(v, list) and v]
+        texts = [(k, v) for k, v in payload.items() if isinstance(v, str) and len(v) > 200]
+        if lists:
+            key, value = max(lists, key=lambda kv: (size(kv[1]), kv[0]))
+            payload[key] = value[: len(value) // 2]
+        elif texts:
+            key, value = max(texts, key=lambda kv: (len(kv[1]), kv[0]))
+            payload[key] = value[: len(value) // 2].rsplit("\n", 1)[0] + "\n… (truncated)"
+        else:
+            break
+    return payload
 
 
 _REF = {"type": "string", "description": "Node id from `search`, a function name, or `METHOD /path` for a route."}
-_LIMIT = {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT}
+_LIMIT = {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": DEFAULT_LIMIT}
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -457,7 +573,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "query": {"type": "string", "description": "Text to look for (e.g. `markPaid`, `/orders`, `orders.status`)."},
                 "kind": {"type": "string", "enum": sorted(_TYPE_ALIASES), "default": "any"},
-                "limit": {**_LIMIT, "default": 20},
+                "limit": _LIMIT,
             },
             "required": ["query"],
             "additionalProperties": False,
@@ -475,7 +591,7 @@ TOOLS: list[dict[str, Any]] = [
                 "function": _REF,
                 "direction": {"type": "string", "enum": ["callers", "callees", "both"], "default": "both"},
                 "depth": {"type": "integer", "minimum": 1, "maximum": 5, "default": 1},
-                "limit": {**_LIMIT, "default": 50},
+                "limit": _LIMIT,
             },
             "required": ["function"],
             "additionalProperties": False,
@@ -492,6 +608,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "function": _REF,
                 "transitive": {"type": "boolean", "default": False},
+                "limit": _LIMIT,
             },
             "required": ["function"],
             "additionalProperties": False,
@@ -507,7 +624,7 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "table": {"type": "string", "description": "`orders`, or `orders.status` for one column."},
-                "limit": {**_LIMIT, "default": 50},
+                "limit": _LIMIT,
             },
             "required": ["table"],
             "additionalProperties": False,
@@ -525,6 +642,7 @@ TOOLS: list[dict[str, Any]] = [
                 "diff": {"type": "string", "description": "Unified diff text, paths relative to the git root."},
                 "prefix": {"type": "string", "default": ".", "description": "Scanned directory relative to the git root (graphs without git)."},
                 "markdown": {"type": "boolean", "default": False, "description": "Also return the PR-comment Markdown."},
+                "limit": _LIMIT,
             },
             "required": ["diff"],
             "additionalProperties": False,
@@ -609,7 +727,7 @@ def handle(store: GraphStore, message: Any) -> dict[str, Any] | None:
             return _error(msg_id, -32602, "arguments must be an object")
         store.refresh()
         try:
-            payload = handler(store, args)
+            payload = _fit(handler(store, args))
         except ToolError as exc:
             return {
                 "jsonrpc": "2.0",
