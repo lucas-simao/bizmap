@@ -513,6 +513,9 @@ def test_go_inline_closure_handler(tmp_path: Path) -> None:
     assert any("orders" in r for r in reads), reads
     main_reads = {e.to_id for e in graph.edges.values() if e.type == "reads" and e.from_id == "function:main.main"}
     assert not any("orders" in r for r in main_reads), main_reads
+    # rolled up onto the route, like a named handler
+    ep_reads = {e.to_id for e in graph.edges.values() if e.type == "reads" and e.from_id == ep}
+    assert any(r.endswith("table:orders") for r in ep_reads), ep_reads
     imp = compute_impact(graph, _added("svc/main.go", 13))
     assert [f.function for f in imp.functions] == [closure]
     assert imp.functions[0].entrypoints == [ep]
@@ -572,3 +575,25 @@ def test_method_members_are_called_by_the_factory(tmp_path: Path) -> None:
     calls = {(e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls"}
     f = "function:web.c.createShopClient"
     assert (f, f + ".stock") in calls and (f, f + ".order") in calls, calls
+
+
+def test_literal_route_beats_param_route(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "api/server.ts": (
+                "import express from 'express';\nconst app = express();\n"
+                "app.get('/shops/points', (req, res) => res.json({}));\n"
+                "app.get('/shops/:shop_id', (req, res) => res.json({}));\n"
+            ),
+            "web/c.ts": (
+                "import axios from 'axios';\n"
+                "export const points = () => axios.get('/shops/points');\n"
+                "export const one = (id) => axios.get(`/shops/${id}`);\n"
+                "export const other = () => axios.get('/shops/main');\n"
+            ),
+        },
+    )
+    assert _http_targets(graph, "function:web.c.points") == {"/shops/points"}
+    assert _http_targets(graph, "function:web.c.one") == {"/shops/:shop_id"}
+    assert _http_targets(graph, "function:web.c.other") == {"/shops/:shop_id"}

@@ -388,3 +388,30 @@ def split_go_route_closures(
                 continue
             del graph.edges[edge.id]
             graph.add_edge(edge.type, fid, edge.to_id, confidence=edge.confidence, evidence=e_ev, **edge.attrs)
+        _rollup_to_entrypoint(graph, ep.id, fid, Evidence(file=str(rel), line=line, symbol=name))
+
+
+def _rollup_to_entrypoint(graph: Graph, ep_id: str, fid: str, evidence: Evidence) -> None:
+    """Table-level reads/writes the closure (or what it calls) does, on the
+    route itself, like named handlers get, so report/why see them."""
+    seen: set[str] = set()
+    todo = [fid]
+    hits: set[tuple[str, str]] = set()
+    while todo:
+        cur = todo.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        for edge in graph.edges.values():
+            if edge.from_id != cur:
+                continue
+            if edge.type in {"reads", "writes"}:
+                target = edge.to_id
+                if target.startswith("column:"):
+                    target = "table:" + target.removeprefix("column:").split(".", 1)[0]
+                if target in graph.nodes:
+                    hits.add((edge.type, target))
+            elif edge.type == "calls":
+                todo.append(edge.to_id)
+    for etype, target in sorted(hits):
+        graph.add_edge(etype, ep_id, target, confidence="inferred", evidence=evidence)

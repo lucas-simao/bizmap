@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **JS/TS calls to module-level and imported functions** produce `calls`
+  (callee resolved by scope: nested helper → module function → import, only
+  when the target is a scanned function).
+- **Method members** (`return { stock(sku) {...} }`) are called by their
+  factory, like arrow members.
+- **Literal route precedence**: a client calling `/shops/points` links only to
+  `GET /shops/points`, not also to `GET /shops/{shop_id}`.
+- **Go inline route closures** roll their table reads/writes up onto the route,
+  like named handlers, so `report`/`why` see them.
+
 ## 0.3.2 — 2026-11-20
 
 0.3.1 was bumped on `main` but never tagged; its additions ship here.
@@ -24,11 +38,12 @@
   tables/columns they (or their callees, across `calls_http`) read or write —
   as Markdown with a Mermaid diagram, or JSON.
 - **GitHub Action** (`action.yml`, `uses: lucas-simao/bizmap@<tag>`): scans the
-  PR, runs `impact` on `git diff base...HEAD`, writes the step summary and keeps
-  one PR comment up to date.
+  PR, runs `impact` on the PR's diff (base..HEAD for the default merge-commit
+  checkout, merge-base..HEAD otherwise), writes the step summary and keeps one
+  PR comment up to date.
 - **Graph**: function nodes carry `end_line`; the graph records `repo_roots`
-  (repo name → directory relative to the scan path) so diff paths map to
-  functions in joint scans.
+  (repo name → directory, relative to the git root inside a git work tree,
+  else to the scan path) so diff paths map to functions in joint scans.
 - **`fail-on-error`** Action input (default `"false"`: advisory check).
 - **Graph**: `start_line` on function nodes whose definition starts below the
   evidence line; `repo_roots_base` (`git` or `scan`).

@@ -173,6 +173,16 @@ def _service_prefix_hit(url: str, services: dict[str, Any] | None) -> bool:
     return False
 
 
+def literal_hits(template: str, actual: str) -> int:
+    """Segments where the route is literal and equals the client path, or -1
+    when ``template`` does not match ``actual``."""
+    if not path_template_match(template, actual):
+        return -1
+    t_parts = normalize_path(template).split("/")
+    a_parts = normalize_path(actual).split("/")
+    return sum(1 for t, a in zip(t_parts, a_parts, strict=True) if t and not _is_param(t) and t == a)
+
+
 def path_template_match(template: str, actual: str) -> bool:
     """Match a client path against a route template.
 
@@ -305,6 +315,7 @@ def match_http(
         target_service = service_for_url(url, services or {})
     specific = max((literal_segment_count(c) for c in candidates), default=0) >= 2
     hits: list[str] = []
+    scores: dict[str, int] = {}
     for eid, rmethod, rpath in routes:
         if rmethod.upper() != method_u:
             continue
@@ -322,9 +333,16 @@ def match_http(
         for cand in candidates:
             if not has_meaningful_literal(cand):
                 continue
-            if path_template_match(rpath, cand):
+            score = literal_hits(rpath, cand)
+            if score >= 0:
                 hits.append(eid)
+                scores[eid] = score
                 break
+    if len(hits) > 1:
+        # literal route precedence: `/shops/points` beats `/shops/{shop_id}`
+        # for a client calling `/shops/points`
+        best = max(scores.values())
+        hits = [h for h in hits if scores[h] == best]
     return hits
 
 
