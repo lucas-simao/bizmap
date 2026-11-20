@@ -14,6 +14,9 @@
   Subgraphs are built on demand, so ~55k-node graphs stay usable.
   `bizmap.yaml` `export.services` splits a monorepo into services.
   `--format llm` is reserved for 0.5.1. See `docs/export.md`.
+- Table filter banner counts the services that read or write the table apart
+  from those that only call in over HTTP ("5 services read or write it.
+  Called from 3 more services over HTTP.").
 
 ## 0.4.3 — 2026-11-20
 
