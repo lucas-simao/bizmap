@@ -4467,6 +4467,8 @@ def _link_unscanned_sinks(
                 qual = _imported_qualname(target, imap)
                 if not qual or qual in analysis.functions or (fn.qualname, qual) in resolved_pairs:
                     continue
+                if _PY_REEXPORTS.get(qual) in analysis.functions:
+                    continue  # re-exported by a package __init__.py: resolved
                 # Longest scanned prefix of the dotted path: a regular module
                 # means our own code that is just not a plain function (class,
                 # instance, constant) → leave it. A *package* (`__init__.py`)
