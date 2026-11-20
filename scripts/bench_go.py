@@ -279,7 +279,8 @@ def run(n: int, client: int, profile: bool, heavy: bool = False, all_files: bool
               f"({1000 * dt / max(made, 1):.1f} ms/file)", flush=True)
         if pr:
             out = io.StringIO()
-            pstats.Stats(pr, stream=out).sort_stats("tottime").print_stats(25)
+            pstats.Stats(pr, stream=out).sort_stats("tottime").print_stats(30)
+            pstats.Stats(pr, stream=out).sort_stats("cumulative").print_stats(40)
             print(out.getvalue())
 
 
