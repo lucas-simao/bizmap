@@ -156,19 +156,28 @@ git diff --unified=0 origin/main... | bizmap impact --graph /tmp/g.json --prefix
 As a GitHub Action (one comment per PR, updated on each push):
 
 ```yaml
-on: pull_request
+on: pull_request            # not pull_request_target: never run PR code with a write token
 permissions:
   contents: read
   pull-requests: write
+concurrency:                # two quick pushes must not race to create two comments
+  group: bizmap-impact-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 jobs:
   bizmap:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: lucas-simao/bizmap@v0.3.1
+      - uses: actions/checkout@v4   # the base commit is fetched if missing; fetch-depth: 0 also works
+      - uses: lucas-simao/bizmap@v0.3.2
         with:
           path: .            # or the workspace dir holding bizmap.yaml with `repos:`
 ```
+
+The comment lists at most `max-rows` functions (default 50, ranked by how many
+routes and tables they reach) and stays under GitHub's size limit; the workflow
+run summary has the full list. PRs from forks get a read-only token, so they
+only get the summary. If the scan fails, the comment says so and links the log.
+Only comments by `comment-author` (default `github-actions[bot]`) are updated.
 
 Lines outside any function (imports, migrations, docs) are listed as unmapped and
 don't produce impact.
@@ -215,7 +224,7 @@ and marks those links `inferred`. Details: [docs/how-it-works.md](docs/how-it-wo
 
 ## Roadmap
 
-- **v0.3.1** — `bizmap impact` + GitHub Action that comments on each PR with the
+- **v0.3.2** — `bizmap impact` + GitHub Action that comments on each PR with the
   routes, functions, tables and columns it impacts (and a Mermaid diagram).
 - **v0.4** — MCP server so coding agents can ask `why orders.status` instead of grepping.
 - Static graph page (GitHub Pages).

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`end_line` for every function node**: inline JS/TS handlers, Go func
+  literals, `<module>.module` pseudo-functions and SQL functions from
+  migrations now have spans, so a diff inside them maps (`start_line` is set
+  when the literal starts below the registration line).
+- **PR comment size**: rows ranked by reach and capped (`--max-rows`), functions
+  with no route/table summarized, hard cap `--max-chars 60000`, `--details-url`.
+- **Action robustness**: fork PRs write only the step summary; only the
+  bot's own marker comment is updated; base commit fetched with a clear error;
+  non-PR events are skipped; non-ASCII paths (`core.quotepath=false` and
+  unquoting in the parser); a failed scan updates the comment with a log link
+  and fails the job.
+
 ## 0.3.1 — 2026-11-19
 
 ### Added

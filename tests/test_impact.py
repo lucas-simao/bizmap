@@ -233,3 +233,11 @@ def test_comment_stays_under_github_limit() -> None:
     assert "https://example.invalid/run/1" in md
     tiny = render_markdown(graph, impact, max_chars=3000)
     assert len(tiny) <= 3000 and tiny.startswith(MARKER)
+
+
+def test_quoted_non_ascii_paths() -> None:
+    d = (
+        'diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n'
+        '--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -3,0 +4,1 @@\n+x\n'
+    )
+    assert parse_unified_diff(d) == {"café.py": {4}}

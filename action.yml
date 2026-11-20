@@ -11,18 +11,27 @@ inputs:
     description: Optional path to bizmap.yaml.
     default: ""
   comment:
-    description: Post (or update) the PR comment. Set to "false" to only write the step summary.
+    description: Post (or update) the PR comment. "false" only writes the step summary.
     default: "true"
+  comment-author:
+    description: Login that owns the comment to update (the token's user). Comments by anyone else are never edited.
+    default: github-actions[bot]
+  max-rows:
+    description: Max functions listed in the comment (the step summary lists all).
+    default: "50"
   python-version:
     description: Python used to run BizMap.
     default: "3.12"
   github-token:
-    description: Token for the comment (needs `pull-requests: write`).
+    description: "Token for the comment (needs `pull-requests: write`)."
     default: ${{ github.token }}
 outputs:
   markdown:
-    description: Path of the generated Markdown report.
+    description: Path of the Markdown written to the PR comment.
     value: ${{ steps.impact.outputs.markdown }}
+  status:
+    description: ok, skipped or failed.
+    value: ${{ steps.impact.outputs.status }}
 runs:
   using: composite
   steps:
@@ -38,40 +47,88 @@ runs:
       env:
         SCAN_PATH: ${{ inputs.path }}
         CONFIG: ${{ inputs.config }}
+        MAX_ROWS: ${{ inputs.max-rows }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
-        set -euo pipefail
+        set -uo pipefail
         out="$RUNNER_TEMP/bizmap"
         mkdir -p "$out"
+        comment="$out/comment.md"
+        echo "markdown=$comment" >> "$GITHUB_OUTPUT"
+        marker='<!-- bizmap-impact -->'
+        finish() {  # status, message
+          if [ "$1" != ok ]; then
+            printf '%s\n### BizMap impact\n\n%s ([log](%s))\n' "$marker" "$2" "$RUN_URL" > "$comment"
+            cat "$comment" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "status=$1" >> "$GITHUB_OUTPUT"
+          exit 0
+        }
         if [ -z "${BASE_SHA:-}" ]; then
-          echo "::warning::bizmap-impact runs on pull_request events; no base commit here."
-          BASE_SHA="$(git rev-parse HEAD~1)"
+          echo "::warning::bizmap-impact only runs on pull_request events (no base commit here)."
+          finish skipped "Skipped: not a pull_request event."
         fi
-        git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
+        if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+          if ! git fetch --no-tags --depth=1 origin "$BASE_SHA"; then
+            echo "::error::could not fetch the base commit $BASE_SHA. Use actions/checkout with fetch-depth: 0."
+            finish failed "Failed: base commit \`$BASE_SHA\` is not available (use \`fetch-depth: 0\`)."
+          fi
+        fi
         # HEAD is what actions/checkout checked out (the PR merge commit), so the
-        # diff line numbers match the code being scanned.
-        git diff --unified=0 "$BASE_SHA" HEAD > "$out/pr.diff"
+        # diff line numbers match the code being scanned. quotepath=false keeps
+        # non-ASCII paths readable.
+        if ! git -c core.quotepath=false diff --no-color --no-ext-diff --unified=0 "$BASE_SHA" HEAD > "$out/pr.diff"; then
+          echo "::error::git diff failed"
+          finish failed "Failed: \`git diff\` against the base failed."
+        fi
         args=()
         if [ -n "$CONFIG" ]; then args+=(--config "$CONFIG"); fi
-        bizmap scan "$SCAN_PATH" "${args[@]}" --out "$out/graph.json"
-        bizmap impact --graph "$out/graph.json" --diff "$out/pr.diff" --prefix "$SCAN_PATH" > "$out/impact.md"
-        cat "$out/impact.md" >> "$GITHUB_STEP_SUMMARY"
-        echo "markdown=$out/impact.md" >> "$GITHUB_OUTPUT"
+        if ! bizmap scan "$SCAN_PATH" "${args[@]}" --out "$out/graph.json"; then
+          echo "::error::bizmap scan failed"
+          finish failed "Failed: \`bizmap scan\` did not finish."
+        fi
+        common=(--graph "$out/graph.json" --diff "$out/pr.diff" --prefix "$SCAN_PATH")
+        if ! bizmap impact "${common[@]}" --max-rows 100000 --max-chars 900000 > "$out/full.md" \
+          || ! bizmap impact "${common[@]}" --max-rows "$MAX_ROWS" --details-url "$RUN_URL" > "$comment"; then
+          echo "::error::bizmap impact failed"
+          finish failed "Failed: \`bizmap impact\` did not finish."
+        fi
+        cat "$out/full.md" >> "$GITHUB_STEP_SUMMARY"
+        finish ok ""
     - name: Comment on the PR
-      if: inputs.comment == 'true' && github.event.pull_request.number
+      if: always() && inputs.comment == 'true' && github.event.pull_request.number && steps.impact.outputs.status != 'skipped'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         PR: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
+        HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        AUTHOR: ${{ inputs.comment-author }}
         BODY_FILE: ${{ steps.impact.outputs.markdown }}
       run: |
-        set -euo pipefail
+        set -uo pipefail
+        if [ "$HEAD_REPO" != "$REPO" ]; then
+          echo "::notice::PR from a fork: the token is read-only, so the impact is only in the step summary."
+          exit 0
+        fi
+        if [ ! -s "$BODY_FILE" ]; then
+          echo "::warning::no impact report to post"
+          exit 0
+        fi
         marker='<!-- bizmap-impact -->'
         id="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-          --jq "map(select(.body | startswith(\"$marker\"))) | .[0].id // empty" | head -n1)"
+          --jq ".[] | select(.user.login == \"$AUTHOR\" and (.body | startswith(\"$marker\"))) | .id" 2>/dev/null | head -n1)"
         if [ -n "$id" ]; then
-          gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$BODY_FILE" > /dev/null
+          gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$BODY_FILE" > /dev/null \
+            || echo "::warning::could not update the comment (does the token have pull-requests: write?)"
         else
-          gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$BODY_FILE" > /dev/null
+          gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$BODY_FILE" > /dev/null \
+            || echo "::warning::could not post the comment (does the token have pull-requests: write?)"
         fi
+    - name: Fail when the scan failed
+      if: steps.impact.outputs.status == 'failed'
+      shell: bash
+      run: |
+        echo "::error::BizMap impact failed; see the step above."
+        exit 1
