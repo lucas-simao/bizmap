@@ -19,6 +19,14 @@
   records how much was skipped (`skipped`). Bring things back with
   `scan: {include: [".yarn", "public/app.js"], skip_generated: false, gitignore: false}`
   in bizmap.yaml.
+- **`bizmap scan` output stays short**: unresolved HTTP calls are a count per
+  reason plus the 10 most frequent calls (each shortened to one line), and
+  warnings are capped at 10; `--verbose` lists everything (the JSON always has
+  the full lists). Skipped generated/ignored paths are reported as counts.
+- **Progress for slow scans**: past 3 seconds, `bizmap scan` prints each phase
+  (file listing, Go, Python, JS/TS, graph, cross-service merge) with its time to
+  stderr, and a per-phase total at the end; `--quiet` turns it off. The graph
+  and stdout are unchanged.
 - **A detector crash on one file no longer aborts the scan**: the files that
   make it fail are found, skipped and reported in the graph's `warnings`; the
   rest of the repo is analysed as usual.

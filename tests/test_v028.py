@@ -454,5 +454,5 @@ def no_base(path):
     result = runner.invoke(main, ["scan", str(tmp_path), "--out", str(out)])
     assert result.exit_code == 0, result.output
     assert "unresolved HTTP calls" in result.output
-    assert "HTTP unmatched by reason:" in result.output
+    assert "unresolved HTTP calls: " in result.output  # counts by reason on that line
     assert "target_not_scanned=" in result.output or "path_dynamic=" in result.output
