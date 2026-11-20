@@ -1523,3 +1523,41 @@ def test_express_router_route_chain(tmp_path: Path) -> None:
     assert "column:inventory.stock" in data("POST") and "column:customers.email" not in data("POST")
     imp = compute_impact(graph, _added("svc/routes.ts", 13))
     assert [e for f in imp.functions for e in f.entrypoints] == ["entrypoint:http:POST:/x"]
+
+
+def test_hono_route_mount_in_chain_keeps_handler_paths(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/schema.sql": (
+                "CREATE TABLE orders (id int primary key, status text, note text, qty int);\n"
+                "CREATE TABLE customers (id int primary key, email text);\n"
+                "CREATE TABLE inventory (sku text primary key, stock int);\n"
+            ),
+            "svc/app.ts": (
+                "import { Hono } from 'hono';\nimport { Pool } from 'pg';\nconst pool = new Pool();\n"
+                "const sub = new Hono().get('/items', async (c) => { await pool.query('SELECT sku FROM inventory'); return c.json({}); });\n"
+                "const sub2 = new Hono().get('/cust', async (c) => { await pool.query('SELECT email FROM customers'); return c.json({}); });\n"
+                "export const a = new Hono()\n"
+                "  .route('/inv', sub)\n"
+                "  .post('/pay', async (c) => { await pool.query(\"UPDATE orders SET status = 'p' WHERE id = $1\", [1]); return c.json({}); });\n"
+                "export const b = new Hono()\n"
+                "  .route('/inv2', sub)\n"
+                "  .route('/cust2', sub2)\n"
+                "  .get('/ping', async (c) => { await pool.query('SELECT note FROM orders'); return c.json({}); });\n"
+                "export const c = new Hono()\n"
+                "  .get('/first', async (c) => { await pool.query('SELECT qty FROM orders'); return c.json({}); })\n"
+                "  .route('/inv3', sub)\n"
+                "  .post('/last', async (c) => { await pool.query(\"UPDATE customers SET email = 'x'\"); return c.json({}); });\n"
+            ),
+            "svc/express.ts": (
+                "import express from 'express';\nconst router = express.Router();\n"
+                "router.route('/x').get(async (req, res) => { res.end(); });\nexport default router;\n"
+            ),
+        },
+    )
+    eps = {n for n in graph.nodes if n.startswith("entrypoint:http:")}
+    for want in ("POST:/pay", "GET:/ping", "POST:/last", "GET:/first", "GET:/x"):
+        assert f"entrypoint:http:{want}" in eps, sorted(eps)
+    for wrong in ("POST:/inv", "GET:/cust2", "POST:/inv3"):
+        assert f"entrypoint:http:{wrong}" not in eps, sorted(eps)
