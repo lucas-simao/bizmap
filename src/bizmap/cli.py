@@ -541,6 +541,19 @@ def report_cmd(
     help="Hard cap on the Markdown size (GitHub comments stop at 65,536).",
 )
 @click.option("--details-url", default=None, help="Link shown when rows are cut (e.g. the workflow run).")
+@click.option(
+    "--blob-url",
+    default=None,
+    help="Link `file:line` to this tree (https://github.com/OWNER/REPO/blob/SHA).",
+)
+@click.option("--mermaid/--no-mermaid", default=True, show_default=True, help="Include the Mermaid diagram.")
+@click.option(
+    "--shared-services",
+    type=click.IntRange(min=2),
+    default=3,
+    show_default=True,
+    help="High risk when the PR writes a table read or written by this many services.",
+)
 def impact_cmd(
     graph_path: Path,
     diff_path: Path,
@@ -551,6 +564,9 @@ def impact_cmd(
     max_rows: int,
     max_chars: int,
     details_url: str | None,
+    blob_url: str | None,
+    mermaid: bool,
+    shared_services: int,
 ) -> None:
     """Map a diff onto the graph: changed functions → entrypoints and data.
 
@@ -571,7 +587,15 @@ def impact_cmd(
     else:
         click.echo(
             render_markdown(
-                graph, result, limit=limit, max_rows=max_rows, max_chars=max_chars, details_url=details_url
+                graph,
+                result,
+                limit=limit,
+                max_rows=max_rows,
+                max_chars=max_chars,
+                details_url=details_url,
+                blob_url=blob_url,
+                mermaid=mermaid,
+                shared_services=shared_services,
             ),
             nl=False,
         )
