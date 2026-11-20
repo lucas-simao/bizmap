@@ -2807,7 +2807,7 @@ def _import_wrappers(
             sources = _export_sources(src_mod, name_in_src, exports_by_mod, known)
             wrap = None
             if len(sources) == 1:
-                mod, loc = sources[0]
+                mod, loc = next(iter(sources))
                 wrap = (own.get(mod) or {}).get(loc)
             elif not sources:
                 for mod in (src_mod, f"{src_mod}.index"):
