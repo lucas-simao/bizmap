@@ -49,6 +49,16 @@ jobs:
         run: |
           bizmap export --graph /tmp/checkout.json --format html --out /tmp/checkout.html
           test "$(grep -c 'Cytoscape Consortium' /tmp/checkout.html)" -ge 1
+      - name: TEMP old vs new python graphs
+        continue-on-error: true
+        run: |
+          python -m venv /tmp/base && /tmp/base/bin/pip install -q "git+https://github.com/lucas-simao/bizmap@main"
+          cd /tmp && /tmp/base/bin/python $GITHUB_WORKSPACE/scripts/tmp_compare.py old && cd -
+          python scripts/tmp_compare.py new
+          for n in 30 40 120; do cmp /tmp/old_$n.json /tmp/new_$n.json && echo "SAME $n" || echo "DIFF $n"; done
+          diff <(python -c "import json;d=json.load(open('/tmp/old_120.json'));print(len(d['nodes']),len(d['edges']))") <(python -c "import json;d=json.load(open('/tmp/new_120.json'));print(len(d['nodes']),len(d['edges']))") || true
+          echo GOLDEN_BEGIN; gzip -c /tmp/old_golden.txt | base64 -w0; echo; echo GOLDEN_END
+          python scripts/bench_py.py 150 300
       - name: Go phase scaling (informational)
         run: |
           python scripts/bench_go.py 500 1000 2000 4000

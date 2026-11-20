@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 import sqlglot
 from sqlglot import exp
@@ -461,14 +462,24 @@ def is_skipped_table_name(name: str | None, extra: set[str] | None = None) -> bo
     return False
 
 
+def _safe_name(node: object) -> str:
+    """``node.name`` without raising: sqlglot computes it from children that
+    can be missing (`Dot(this=…, expression=None)` for `UPDATE orders ...`)."""
+    try:
+        name = getattr(node, "name", None)
+    except (AttributeError, TypeError):
+        return ""
+    return str(name) if name else ""
+
+
 def _ident(node: exp.Expression | str | None) -> str:
     if node is None:
         return ""
     if isinstance(node, str):
         return node
-    name = getattr(node, "name", None)
+    name = _safe_name(node)
     if name:
-        return str(name)
+        return name
     this = getattr(node, "this", None)
     if this is not None and this is not node:
         return _ident(this)
@@ -479,7 +490,7 @@ def _table_name(table: exp.Table | exp.Expression | None) -> str:
     if table is None:
         return ""
     if isinstance(table, exp.Table):
-        name = table.name or ""
+        name = _safe_name(table)
         db = _ident(table.args.get("db"))
         if db:
             return f"{db}.{name}" if name else db
@@ -1124,7 +1135,33 @@ def _fallback_table_accesses(
     return out
 
 
-def analyze_sql(
+# SQL strings whose analysis raised: (first 80 chars, error), collected for
+# the scan summary by `drain_sql_failures()`.
+_SQL_FAILURES: list[tuple[str, str]] = []
+
+
+def drain_sql_failures() -> list[tuple[str, str]]:
+    out = list(_SQL_FAILURES)
+    _SQL_FAILURES.clear()
+    return out
+
+
+def analyze_sql(sql: str, **kwargs: Any) -> list[SqlAccess]:
+    """See `_analyze_sql`. A statement that cannot be analysed (sqlglot can
+    raise on odd input such as `UPDATE orders ...`) yields no accesses and is
+    reported, instead of failing the scan."""
+    try:
+        return _analyze_sql(sql, **kwargs)
+    except RecursionError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - one bad statement must not stop the scan
+        snippet = " ".join((sql or "").split())[:80]
+        if len(_SQL_FAILURES) < 1000:
+            _SQL_FAILURES.append((snippet, f"{type(exc).__name__}: {exc}"[:160]))
+        return []
+
+
+def _analyze_sql(
     sql: str,
     *,
     schema_columns: dict[str, list[str]] | None = None,
