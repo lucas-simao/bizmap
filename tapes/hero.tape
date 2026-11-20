@@ -1,6 +1,6 @@
 Output out/hero.gif
 Source tapes/common.tape
-Set Height 760
+Set Height 700
 Hide
 Type "cd demo && export PS1='\[\e[1;32m\]bizmap-demo\[\e[0m\] $ ' && clear" Enter
 Show
