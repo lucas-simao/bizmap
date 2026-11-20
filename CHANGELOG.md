@@ -7,7 +7,9 @@
 - **Long `+` chains no longer crash the scan** (`RecursionError` from about 990
   terms): string concatenation is resolved iteratively in the Go, JS/TS and
   Python detectors (constants, `var`, parenthesized chains, SQL built in a
-  function body).
+  function body). Climbing from each literal to the top of such a chain is
+  memoized too (tree-sitter's `node.parent` walks from the root, which made a
+  5,000-term chain take minutes); it now scans in seconds.
 - **A detector crash on one file no longer aborts the scan**: the files that
   make it fail are found, skipped and reported in the graph's `warnings`; the
   rest of the repo is analysed as usual.
