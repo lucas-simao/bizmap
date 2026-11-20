@@ -3936,7 +3936,9 @@ def _link_field_dispatch(analysis: PyAnalysis, parsed: list) -> None:
                     if classes and left is not None and left.type == "identifier":
                         roster_vars[text(left)] = classes
 
-            def _roster_targets(recv: Node | None, field_name: str) -> set[str]:
+            def _roster_targets(
+                recv: Node | None, field_name: str, roster_vars: dict[str, set[str]] = roster_vars
+            ) -> set[str]:
                 classes: set[str] = set()
                 if recv is not None and recv.type == "identifier":
                     classes = roster_vars.get(text(recv), set())
