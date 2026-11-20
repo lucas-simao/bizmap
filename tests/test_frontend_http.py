@@ -69,7 +69,8 @@ def _links(graph) -> dict[str, tuple[str, str | None]]:
     out = {}
     for e in graph.edges.values():
         if e.type == "calls_http":
-            out[e.from_id.split(":")[-1]] = (e.to_id.split(":", 2)[-1], e.attrs.get("via"))
+            fn = e.from_id.split("function:")[-1].removeprefix("src.")
+            out[fn] = (e.to_id.split("entrypoint:http:")[-1], e.attrs.get("via"))
     return out
 
 
@@ -80,8 +81,8 @@ def test_env_key_is_inferred_from_calls_that_matched(tmp_path: Path) -> None:
     assert links["pages.loadItems"][0].endswith("/api/v1/orders/{order_id}/items"), links
     # `/me` (one literal segment) goes to the repo VITE_API_URL already reaches;
     # the env value carries /api/v1, so the route matches by its unique tail
-    assert links["pages.loadMe"] == ("http:GET:/api/v1/me", "env_inferred"), links
-    assert links["pages.loadCart"] == ("http:GET:/api/v1/carts/{cart_id}", "env_inferred"), links
+    assert links["pages.loadMe"] == ("GET:/api/v1/me", "env_inferred"), links
+    assert links["pages.loadCart"] == ("GET:/api/v1/carts/{cart_id}", "env_inferred"), links
     assert graph.attrs["inferred_services"] == [{"env": "VITE_API_URL", "repo": "api", "calls": 2}]
     text = "\n".join(scan_summary(graph))
     assert "linked 2 call(s) through VITE_API_URL to api" in text
@@ -91,8 +92,8 @@ def test_service_prefix(tmp_path: Path) -> None:
     _workspace(tmp_path, "services:\n  api: { env: VITE_API_URL, prefix: /api/v1 }\n")
     graph = scan_path(tmp_path)
     links = _links(graph)
-    assert links["pages.loadMe"] == ("http:GET:/api/v1/me", None), links
-    assert links["pages.loadCart"] == ("http:GET:/api/v1/carts/{cart_id}", None), links
+    assert links["pages.loadMe"] == ("GET:/api/v1/me", None), links
+    assert links["pages.loadCart"] == ("GET:/api/v1/carts/{cart_id}", None), links
     assert not graph.attrs.get("unresolved_http")
 
 
@@ -100,7 +101,7 @@ def test_hint_for_keys_that_still_do_not_link(tmp_path: Path) -> None:
     _workspace(tmp_path)
     (tmp_path / "web/src/pages.ts").write_text(
         "import { http } from './client';\n"
-        "export async function loadMe() { return http.get('/api/v1/me'); }\n",
+        "export async function loadMe() { return http.get('/me'); }\n",
         encoding="utf-8",
     )
     graph = scan_path(tmp_path)

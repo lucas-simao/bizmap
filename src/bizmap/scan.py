@@ -2199,6 +2199,7 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
     inferred = {key: next(iter(repos)) for key, repos in votes.items() if len(repos) == 1}
 
     unmatched: list[dict] = []
+    other_repos = sorted({r for r in route_repos.values() if r})
     inferred_counts: dict[tuple[str, str], int] = defaultdict(int)
     hint_votes: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     hint_calls: dict[str, int] = defaultdict(int)
@@ -2226,10 +2227,12 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
             service = service_for_url(url, services)
             if reason == "target_not_scanned" and key and key not in mapped_envs:
                 hint_calls[key] += 1
-                for eid in match_http(method, url, routes, None):
-                    target = route_repos.get(eid) or ""
-                    if target and target != caller_repo:
-                        hint_votes[key][target] += 1
+                for repo in other_repos:
+                    if repo == caller_repo:
+                        continue
+                    trial = {"__hint": {"env": key, "repo": repo}}
+                    if match_http(method, url, routes, trial, caller_repo=caller_repo, route_repos=route_repos):
+                        hint_votes[key][repo] += 1
             note = {"url": url, "method": method, "keys": keys, "reason": reason}
             if service:
                 note["service"] = service
