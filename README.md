@@ -265,6 +265,25 @@ Every item carries `evidence` (`file:line`) and, when it comes from an edge, a
 `confidence`; lists are capped (`limit`, default 20) with totals. Setup per client,
 the full input/output contract and troubleshooting: [docs/mcp.md](https://github.com/lucas-simao/bizmap/blob/main/docs/mcp.md).
 
+## Interactive map (HTML)
+
+*Requires bizmap 0.5.0+.*
+
+```bash
+bizmap export --graph bizmap.graph.json --format html --out bizmap.html   # --lang pt-BR
+```
+
+One self-contained file, offline (no CDN, no server): open it with a double click or
+attach it to a ticket. It starts with the services and the HTTP links between them;
+click a service to expand its routes, functions and tables, search any route, function,
+table or column, and filter by a table to see every route and function that reads or
+writes it, across services. Services or tables used by 3+ services are flagged.
+Stays fast on ~55k-node graphs (subgraphs are built on demand).
+
+![bizmap export --format html: services, expand, search, filter by table](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/img/export-html.gif)
+
+Details: [docs/export.md](https://github.com/lucas-simao/bizmap/blob/main/docs/export.md).
+
 ## What it understands
 
 | | Routes / triggers | Data access | Outbound HTTP |

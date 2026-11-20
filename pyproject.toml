@@ -57,6 +57,11 @@ build-backend = "hatchling.build"
 "src/bizmap/rules/pgx.yaml" = "bizmap/rules/pgx.yaml"
 "src/bizmap/rules/sqlalchemy.yaml" = "bizmap/rules/sqlalchemy.yaml"
 "src/bizmap/rules/supabase.yaml" = "bizmap/rules/supabase.yaml"
+"src/bizmap/export/template.html" = "bizmap/export/template.html"
+"src/bizmap/export/app.js" = "bizmap/export/app.js"
+"src/bizmap/export/reach.js" = "bizmap/export/reach.js"
+"src/bizmap/export/vendor/cytoscape.min.js" = "bizmap/export/vendor/cytoscape.min.js"
+"src/bizmap/export/vendor/cytoscape.LICENSE" = "bizmap/export/vendor/cytoscape.LICENSE"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

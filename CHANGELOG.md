@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased (0.5.0)
+
+### Added
+
+- **`bizmap export --format html`**: one self-contained, offline HTML page
+  (Cytoscape.js, MIT, inlined; no CDN, no server). Opens on the services and
+  their `calls_http` links (with link counts); click a service to expand its
+  routes, functions and tables; search routes, functions, tables and columns;
+  filter by table across services (the `table_usage` traversal, plus the
+  functions of other services that call in over `calls_http`); services or
+  tables used by 3+ services flagged, top 5 highlighted. `--lang pt-BR`.
+  Subgraphs are built on demand, so ~55k-node graphs stay usable.
+  `bizmap.yaml` `export.services` splits a monorepo into services.
+  `--format llm` is reserved for 0.5.1. See `docs/export.md`.
+
 ## 0.4.3 — 2026-11-20
 
 ### Fixed

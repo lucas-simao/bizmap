@@ -45,6 +45,10 @@ jobs:
           cat /tmp/checkout*.mmd
           bizmap why orders.status --graph /tmp/checkout.json
           bizmap report examples/checkout
+      - name: Export the checkout demo to HTML (packaged assets)
+        run: |
+          bizmap export --graph /tmp/checkout.json --format html --out /tmp/checkout.html
+          test "$(grep -c 'Cytoscape Consortium' /tmp/checkout.html)" -ge 1
       - name: Go phase scaling (informational)
         run: |
           python scripts/bench_go.py 500 1000 2000 4000
