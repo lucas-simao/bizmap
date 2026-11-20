@@ -1182,3 +1182,78 @@ def test_js_why_on_named_route_handler_and_overloads(tmp_path: Path) -> None:
     ep = graph.nodes["entrypoint:http:GET:/orders/:id"]
     assert ep.attrs.get("why") == "Shows one order.", ep.attrs
     assert graph.nodes["function:svc.orders.overloaded"].attrs.get("why") == "Formats an id."
+
+
+def test_inline_express_handler_owns_its_sql(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/schema.sql": "CREATE TABLE customers (id int primary key, email text);\n",
+            "svc/server.ts": (
+                "import express from 'express';\nimport { Pool } from 'pg';\n"   # 1-2
+                "const pool = new Pool();\nconst app = express();\n"              # 3-4
+                "app.post('/local/:id', async (req, res) => {\n"                  # 5
+                "  await pool.query('UPDATE customers SET email = lower(email) WHERE id = $1', [req.params.id]);\n"  # 6
+                "  res.end();\n"                                                  # 7
+                "});\n"                                                           # 8
+            ),
+        },
+    )
+    ep = "entrypoint:http:POST:/local/:id"
+    handler = next(e.to_id for e in graph.edges.values() if e.type == "triggers" and e.from_id == ep)
+    writes = {e.to_id for e in graph.edges.values() if e.type == "writes" and e.from_id == handler}
+    assert any("customers" in w for w in writes), (handler, writes)
+    ep_writes = {e.to_id for e in graph.edges.values() if e.type == "writes" and e.from_id == ep}
+    assert "table:customers" in ep_writes, ep_writes
+    module_writes = {e.to_id for e in graph.edges.values() if e.type == "writes" and e.from_id == "function:svc.server.module"}
+    assert not module_writes, module_writes
+    imp = compute_impact(graph, _added("svc/server.ts", 7))
+    assert [f.function for f in imp.functions] == [handler] and imp.functions[0].entrypoints == [ep]
+
+
+def test_default_and_namespace_imported_route_handlers(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/schema.sql": "CREATE TABLE orders (id int primary key, status text);\n",
+            "svc/handlers.ts": (
+                "import { Pool } from 'pg';\nconst pool = new Pool();\n"
+                "/** Lists orders. */\n"
+                "export default async function listHandler(req: any, res: any) {\n"
+                "  res.json(await pool.query('SELECT id, status FROM orders'));\n"
+                "}\n"
+                "/** Cancels an order. */\n"
+                "export async function cancelHandler(req: any, res: any) {\n"
+                "  await pool.query('UPDATE orders SET status = $1 WHERE id = $2', ['x', 1]);\n"
+                "}\n"
+            ),
+            "svc/server.ts": (
+                "import express from 'express';\n"
+                "import listHandler, { cancelHandler } from './handlers';\n"
+                "import * as h from './handlers';\n"
+                "const app = express();\n"
+                "app.post('/cancel/:id', cancelHandler);\n"
+                "app.get('/orders', listHandler);\n"
+                "app.get('/orders2', h.cancelHandler);\n"
+            ),
+        },
+    )
+
+    def handler(path: str, method: str = "GET") -> str:
+        ep = f"entrypoint:http:{method}:{path}"
+        return next(e.to_id for e in graph.edges.values() if e.type == "triggers" and e.from_id == ep)
+
+    assert handler("/orders") == "function:svc.handlers.listHandler"
+    assert handler("/orders2") == "function:svc.handlers.cancelHandler"
+    assert handler("/cancel/:id", "POST") == "function:svc.handlers.cancelHandler"
+    assert graph.nodes["entrypoint:http:GET:/orders"].attrs.get("why") == "Lists orders."
+    assert "function:svc.handlers.default" not in graph.nodes
+    assert "function:svc.server.h.cancelHandler" not in graph.nodes
+
+
+def test_js_why_keeps_comments_that_mention_license(tmp_path: Path) -> None:
+    src = (
+        "// License checks for resellers happen here: only active licences may order.\n"
+        "export async function licenseRule(id: number) { return id }\n"
+    )
+    assert _why_of(tmp_path, src, "licenseRule") == "License checks for resellers happen here: only active licences may order."

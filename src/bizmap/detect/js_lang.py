@@ -789,6 +789,10 @@ class JsRoute:
     line: int
     unresolved: bool = False
     handler_qual: str | None = None
+    # `listHandler` / `h.cancelHandler` as written, for imports resolved once
+    # every file is indexed (default exports, namespaces, barrels)
+    handler_ref: tuple[str, ...] | None = None
+    module: str | None = None
 
 
 @dataclass
@@ -1164,6 +1168,7 @@ class JsAnalyzer:
             _collect_route_literals(
                 analysis, tree, rel_file, module, consts, routers, imports_by_mod.get(module) or {}
             )
+        _resolve_route_handlers(analysis, import_specs_by_mod, exports_by_mod, set(trees_by_mod), fn_nodes)
         _bind_param_bases(analysis, fn_nodes)
         return analysis
 
@@ -1222,6 +1227,14 @@ class JsAnalyzer:
                         path_norm = "/" + path_norm
                     if handler_qual is None and handler_label == "anonymous":
                         handler_qual = f"{module}.{method.upper()} {path_norm}"
+                    handler_ref: tuple[str, ...] | None = None
+                    if handler_node is not None and handler_node.type == "identifier":
+                        handler_ref = ("ident", text(handler_node))
+                    elif handler_node is not None and handler_node.type == "member_expression":
+                        h_obj = handler_node.child_by_field_name("object")
+                        h_prop = handler_node.child_by_field_name("property")
+                        if h_obj is not None and h_prop is not None and h_obj.type == "identifier":
+                            handler_ref = ("member", text(h_obj), text(h_prop))
                     route = JsRoute(
                         method=method.upper(),
                         path=path_norm,
@@ -1230,6 +1243,8 @@ class JsAnalyzer:
                         line=line_of(node),
                         unresolved=path_unresolved or ("{" in path_norm and "://" not in path_norm),
                         handler_qual=handler_qual,
+                        handler_ref=handler_ref,
+                        module=module,
                     )
                     analysis.routes.append(route)
                     self._scan_handler(
@@ -1709,7 +1724,10 @@ _JS_DIRECTIVE = re.compile(
     r"(?:TODO|FIXME|HACK|XXX)\b)",
     re.IGNORECASE,
 )
-_JS_LICENSE = re.compile(r"(?i)\b(?:copyright|licen[cs]e[ds]?|spdx-license-identifier)\b|\(c\)\s*\d{4}")
+_JS_LICENSE = re.compile(
+    r"(?i)\bcopyright\b|\bspdx-license-identifier\b|\blicensed\s+under\b|"
+    r"\ball\s+rights\s+reserved\b|\(c\)\s*\d{4}|©"
+)
 
 
 def _comment_lines(raw: str) -> list[str]:
@@ -2615,6 +2633,48 @@ def _export_sources(
             found |= _export_sources(star, name, exports_by_mod, known, depth + 1)
         return found
     return set()
+
+
+def _resolve_route_handlers(
+    analysis: "JsAnalysis",
+    import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
+    exports_by_mod: dict[str, dict[str, str]],
+    known: set[str],
+    fn_nodes: dict[str, Node],
+) -> None:
+    """`app.get('/orders', listHandler)` with `import listHandler from` (a
+    default export) or `h.cancelHandler` with `import * as h`: point the
+    route at the scanned function, so it gets its tables and `why`."""
+    renames: dict[str, str] = {}
+    for route in analysis.routes:
+        if not route.handler_ref or not route.module or (route.handler_qual and route.handler_qual in fn_nodes):
+            continue
+        specs = import_specs_by_mod.get(route.module) or {}
+        target = None
+        if route.handler_ref[0] == "ident":
+            spec = specs.get(route.handler_ref[1])
+            if spec:
+                target = _imported_function(spec[0], spec[1], exports_by_mod, known, fn_nodes)
+        elif route.handler_ref[0] == "member":
+            spec = specs.get(route.handler_ref[1])
+            if spec and spec[1] == "*":
+                target = _imported_function(spec[0], route.handler_ref[2], exports_by_mod, known, fn_nodes)
+        if target:
+            old = route.handler
+            renames[old] = target
+            route.handler = target
+            route.handler_qual = target
+    if renames:
+        analysis.calls[:] = [
+            JsCall(
+                caller=renames.get(c.caller, c.caller),
+                callee=renames.get(c.callee, c.callee),
+                file=c.file,
+                line=c.line,
+            )
+            for c in analysis.calls
+            if renames.get(c.caller, c.caller) != renames.get(c.callee, c.callee)
+        ]
 
 
 def _imported_function(
