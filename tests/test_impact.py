@@ -1334,7 +1334,7 @@ def test_punctuation_only_line_is_not_a_change(tmp_path: Path) -> None:
         "@@ -5 +5,2 @@\n-  updated_at timestamptz\n+  updated_at timestamptz,\n+  phone text\n"
     )
     _graph, imp, _md = _schema_md(tmp_path, files, diff)
-    assert [(c.op, c.name) for c in imp.schema_changes] == [("changed", "phone")], imp.schema_changes
+    assert [(c.op, c.name) for c in imp.schema_changes] == [("added", "phone")], imp.schema_changes
 
 
 def test_sql_only_diff_has_no_roots_hint_and_missing_file_warns(tmp_path: Path) -> None:

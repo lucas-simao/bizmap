@@ -673,9 +673,25 @@ def _fold_pass_through(graph: Graph, functions: list[FunctionImpact]) -> dict[st
     def key(f: FunctionImpact) -> tuple:
         return (tuple(f.entrypoints), tuple(f.writes), tuple(f.reads))
 
-    own_data = {
-        e.from_id for e in graph.edges.values() if e.type in {"reads", "writes"} and e.from_id in by_id
-    }
+    def runs_sql(fid: str) -> bool:
+        """A reads/writes edge whose evidence is inside the function's own
+        body (rolled-up copies of a callee's access don't count)."""
+        node = graph.nodes.get(fid)
+        if node is None:
+            return False
+        nev = node.attrs.get("evidence") or {}
+        start = node.attrs.get("start_line") or nev.get("line")
+        end = node.attrs.get("end_line")
+        if not isinstance(start, int) or not isinstance(end, int):
+            return False
+        for e in graph.edges.values():
+            if e.from_id != fid or e.type not in {"reads", "writes"} or e.evidence is None:
+                continue
+            if e.evidence.file == nev.get("file") and start <= e.evidence.line <= end:
+                return True
+        return False
+
+    own_data = {fid for fid in by_id if runs_sql(fid)}
     for caller in sorted(calls):
         if caller in own_data:
             continue  # it runs SQL itself: worth its own row even with the same reach
