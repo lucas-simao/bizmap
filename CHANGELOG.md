@@ -1,6 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-19
+
+### Upgrading — ids and confidence that changed
+
+Graphs from 0.2.x and 0.3.0 are not directly diffable for these nodes:
+
+- **Python module names follow package roots**: the highest `__init__.py`
+  package, else a declared source root (`src/` next to `pyproject.toml`), else
+  the path; collisions across services fall back to the path. Function ids
+  inside packages change (`reports.layers.asset.bind_id`, was
+  `services.reports.src.reports.layers.asset.bind_id`).
+- **Nested Python functions** include the enclosing function
+  (`app.create_app.list_items`).
+- **TS path helpers stored in an object** (`export const paths = { summary:
+  (id) => … }`) are attributed to `<module>.paths`, not `<module>.module`.
+- **New confidence `heuristic`** (between `inferred` and `unknown`):
+  route-literal suffix links on untraced clients are now `heuristic`, no
+  longer `inferred`.
+- **Graph `version`** is `"0.3.0"`.
+
 
 ### Fixed
 
