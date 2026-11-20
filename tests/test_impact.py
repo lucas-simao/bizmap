@@ -108,6 +108,7 @@ def test_markdown_and_cli(tmp_path: Path) -> None:
     assert res.output.startswith(MARKER)
     assert "```mermaid" in res.output and "CreateInvoice" in res.output
     assert "POST /api/orders" in res.output
+    assert "invoices (amount_cents, id, order_id, status)" in res.output
     res = CliRunner().invoke(
         main, ["impact", "--graph", str(gpath), "--diff", "-", "--prefix", PREFIX, "--json"],
         input=dpath.read_text(encoding="utf-8"),

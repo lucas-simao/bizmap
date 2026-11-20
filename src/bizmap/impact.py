@@ -329,17 +329,32 @@ def render_markdown(graph: Graph, impact: Impact, *, limit: int = 40) -> str:
     out += ["", "```mermaid", render_mermaid(graph, impact, limit=limit).rstrip(), "```", ""]
     out += ["| Changed function | Entrypoints | Writes | Reads |", "|---|---|---|---|"]
 
-    def cell(ids: list[str]) -> str:
+    def data_labels(ids: list[str]) -> list[str]:
+        """`invoices (id, status)`: columns grouped under their table."""
+        cols: dict[str, list[str]] = {}
+        for nid in ids:
+            head, sep, leaf = nid.rpartition("/")
+            if leaf.startswith("column:"):
+                table, _dot, col = leaf.removeprefix("column:").partition(".")
+                cols.setdefault(head + sep + "table:" + table, []).append(col)
+        out: list[str] = []
+        for tid in _tables_only(ids):
+            label = _label(graph, tid)
+            out.append(f"{label} ({', '.join(sorted(cols[tid]))})" if tid in cols else label)
+        return out
+
+    def cell(ids: list[str], *, data: bool = False) -> str:
         if not ids:
             return "—"
-        labels = [f"`{_label(graph, i)}`" for i in ids[:8]]
-        if len(ids) > 8:
-            labels.append(f"+{len(ids) - 8}")
+        names = data_labels(ids) if data else [_label(graph, i) for i in ids]
+        labels = [f"`{n}`" for n in names[:8]]
+        if len(names) > 8:
+            labels.append(f"+{len(names) - 8}")
         return "<br>".join(labels)
 
     for fi in impact.functions:
         out.append(
-            f"| `{_label(graph, fi.function)}` | {cell(fi.entrypoints)} | {cell(fi.writes)} | {cell(fi.reads)} |"
+            f"| `{_label(graph, fi.function)}` | {cell(fi.entrypoints)} | {cell(fi.writes, data=True)} | {cell(fi.reads, data=True)} |"
         )
     out.append("")
     out.append(
