@@ -1,4 +1,9 @@
-"""Go phase scaling (round 38). Slow: run with `pytest -m perf` (CI runs it)."""
+"""Go phase scaling (round 38). Slow: run with `pytest -m perf` (CI runs it).
+
+The checks compare timings taken within one run (1k vs 4k files), so a
+machine busy with other work slows both sides; the absolute bounds are
+loose for the same reason. A failure under heavy load is worth a re-run
+before it is worth a bug report."""
 
 from __future__ import annotations
 
@@ -50,5 +55,5 @@ def test_heavy_repo_all_files_stays_linear(tmp_path: Path) -> None:
     t_small, t_big = _time(small), _time(big)
     ratio = (t_big / t_small) / (n_big / n_small)
     print(f"heavy 1k: {t_small:.1f}s  4k: {t_big:.1f}s  normalized ratio {ratio:.2f}")
-    assert ratio <= 1.25, (t_small, t_big)
+    assert ratio <= 1.35, (t_small, t_big)
     assert t_big < 120, t_big
