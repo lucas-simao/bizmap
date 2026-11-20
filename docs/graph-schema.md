@@ -1,4 +1,4 @@
-# BizMap graph schema (v0.3.1)
+# BizMap graph schema (v0.3.2)
 
 `bizmap scan` writes `bizmap.graph.json`. The graph is fully deterministic: every
 node and edge is produced from source text (SQL, tree-sitter ASTs, comments, or
@@ -11,7 +11,7 @@ values except `generated_at`.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | string | Graph format version (`"0.3.1"`). |
+| `version` | string | Graph format version (`"0.3.2"`). |
 | `generated_at` | string | UTC timestamp. |
 | `schema` | object | Reconstructed database schema (`schema.tables`). |
 | `nodes` | array | Graph nodes (see below). |
@@ -19,7 +19,8 @@ values except `generated_at`.
 | `repo` | string? | Scan-root name (`bizmap.yaml` `name:`). |
 | `database` | string? | Shared-database key. Matching values share table/collection ids on merge. |
 | `repos` | array? | Repo names included in a merged registry graph. |
-| `repo_roots` | object? | Repo name → directory relative to the scan path (`.` for a single repo). Used by `bizmap impact` to map diff paths. |
+| `repo_roots` | object? | Repo name → its directory. Inside a git work tree (`repo_roots_base: git`) the path is relative to the git root, like diff paths, so per-repo scans + `registry merge` equal the joint scan. Outside git (`repo_roots_base: scan`) it is relative to the scan path (`.` for each separately scanned repo, so merge == joint does **not** hold there and `bizmap impact --prefix` is needed). |
+| `repo_roots_base` | string? | `git` or `scan`: what `repo_roots` is relative to. |
 | `services` | object? | Service name → base URL, used to match HTTP client calls. |
 | `queues` | object? | Queue name → consumer hint, copied from `bizmap.yaml` for rematch. |
 | `unresolved_http` | array? | Unmatched outbound HTTP calls (`url`, `method`, `keys`, `from`, `reason`). `reason` is one of `target_not_scanned` (URL fully composed but no matching route in scanned repos), `base_unknown` (path known, base not resolvable), `path_dynamic` (path not composable), `client_unknown`. Stderr counts this list and prints per-reason totals. |
@@ -49,7 +50,7 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 | `type` | `id` pattern | Extra fields |
 | --- | --- | --- |
 | `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:<kind>:<key>` | `kind` (`http` \| `scheduled_job` \| `firestore` \| `celery_task` \| `worker` \| `pubsub` \| `cloud_task` \| `firebase_http` \| `firebase_call`), `method`, `path`, `symbol`, `why`, `evidence`, optional `confidence`, `candidates`, `unresolved` (const path not in the scan), optional `unresolved_calls`, optional `collection` / `event`, optional `dynamic_table` / `dynamic_table_unknown` (flag/count when a reachable origin writes `table:unknown`; never a reach edge) |
-| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `end_line` (last line of the definition), optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http`, optional `route_literals` (JS/TS API-looking path strings `{path, method?, evidence}` kept for registry rematch) |
+| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `end_line` (last line of the definition) and `start_line` (first line, when it differs from `evidence.line`, e.g. a handler literal below its registration call), optional `parent` (enclosing factory/function for members and route closures), optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http`, optional `route_literals` (JS/TS API-looking path strings `{path, method?, evidence}` kept for registry rematch) |
 | `table` | `table:<name>` | `name`; optional `external` (system catalogs / `storage.*` / `vault.*` / `auth.*`), `kind` (`external_relation` \| `unresolved_relation`), `dropped` (still referenced after `DROP TABLE`), `candidates` (dynamic/`unknown`), `rls`, `policies` |
 | `view` | `view:<name>` | `name`, `kind` (`view` \| `unresolved_relation`), optional `materialized` |
 | `column` | `column:<table>.<column>` | `table`, `name`, `data_type`, `nullable`, optional `why` |
