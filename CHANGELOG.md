@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- **`baseURL` inside a config object sent through a local wrapper**
+  (`request({ method, url, baseURL: ALT })` → `http.request(config)`): a base
+  key in the same object literal as `url` is that request's base. Unresolved →
+  whole-path match only (no suffix link to the default API); an env mapped in
+  `services:` → `inferred` link to that service.
+
 - **Go base wrapped in `strings.TrimRight` (regression from the struct-base
   change)**: `strings.TrimRight/TrimLeft/TrimSuffix/TrimPrefix/TrimSpace/Trim/
   ToLower` are transparent for bases (like `encodeURIComponent` in TS), and

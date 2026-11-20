@@ -869,3 +869,66 @@ app.post('/api/v1/client/items/:id/pdf-report', h);
     assert _calls_http_from(graph, function_id("src.pdf.keepV1")) == {
         "api/entrypoint:http:POST:/api/v1/client/items/:id/pdf-report"
     }
+
+
+def test_per_call_baseurl_through_local_request_wrapper(tmp_path: Path) -> None:
+    """`request(config)` forwards an axios config; a `baseURL` in that config is
+    the request's base: unresolved → no suffix link; env mapped to a service →
+    inferred link there; no baseURL → the default behaviour (suffix allowed)."""
+    web, api = tmp_path / "web", tmp_path / "api"
+    alt = tmp_path / "alt"
+    _write(tmp_path, "bizmap.yaml", "services:\n  alt:\n    env: VITE_ALT_URL\n")
+    _write(
+        api,
+        "server.ts",
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.post('/api/v1/shop/orders/:id/report', h);
+""",
+    )
+    _write(
+        alt,
+        "server.ts",
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.post('/orders/:id/receipt', h);
+""",
+    )
+    _write(
+        web,
+        "src/reports.ts",
+        """
+import type { AxiosRequestConfig } from 'axios';
+import { http } from './http';
+
+const ALT_BASE_URL = window.__cfg.alt;
+
+async function request<T>(config: AxiosRequestConfig): Promise<T> {
+  const r = await http.request<T>(config);
+  return r.data;
+}
+
+export const reports = {
+  generate: (id: string) => request({ method: 'POST', url: `/orders/${id}/report`, baseURL: ALT_BASE_URL }),
+  receipt: (id: string) =>
+    request({ method: 'POST', url: `/orders/${id}/receipt`, baseURL: import.meta.env.VITE_ALT_URL }),
+  plain: (id: string) => request({ method: 'POST', url: `/orders/${id}/report` }),
+};
+""",
+    )
+    graph = scan_paths([web, api, alt], config=tmp_path / "bizmap.yaml")
+    links = sorted(
+        (e.attrs.get("via"), e.to_id, e.confidence.value)
+        for e in graph.edges.values()
+        if e.type == "calls_http" and e.from_id.startswith("web/")
+    )
+    # generate (unresolved baseURL) → nothing; receipt → alt, inferred;
+    # plain (no baseURL) → suffix match on the default API, heuristic
+    assert links == [
+        ("route_literal", "alt/entrypoint:http:POST:/orders/:id/receipt", "inferred"),
+        ("route_literal", "api/entrypoint:http:POST:/api/v1/shop/orders/:id/report", "heuristic"),
+    ], links

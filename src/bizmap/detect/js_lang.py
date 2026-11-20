@@ -2854,6 +2854,18 @@ def _clean_route_literal(value: str | None) -> str | None:
     return "/" + "/".join(parts)
 
 
+def _concrete_base(value: str | None) -> str | None:
+    """An env placeholder (`{VITE_ALT_URL}`) or absolute URL; else None."""
+    if not value:
+        return None
+    if value.startswith(("http://", "https://")):
+        return value
+    lead = _HOLE.match(value)
+    if lead is not None and _ENV_LIKE.match(lead.group(1)) and "{" not in value[lead.end():]:
+        return value
+    return None
+
+
 def _object_member_owner(top: Node) -> str | None:
     """`paths.pdfReport` when ``top`` is returned by an arrow/method stored as a
     property of a top-level `const paths = { ... }` (nested objects allowed)."""
@@ -3054,6 +3066,16 @@ def _collect_route_literals(
             and call_callee_name(top.parent.parent).lower() == "fetch"
         )
         symbol = _enclosing_symbol(top, module)
+        # `request({ method, url: `/x/${id}`, baseURL: ALT })`: a base in the
+        # same config object is this request's base, whatever wrapper sends it
+        config_base: str | None = None
+        if top.parent is not None and top.parent.type == "pair":
+            pkey = top.parent.child_by_field_name("key")
+            if pkey is not None and _unquote(text(pkey)) in {"url", "path", "endpoint"}:
+                bnode = _object_prop_node(top.parent.parent, _PER_CALL_BASE_KEYS)
+                if bnode is not None:
+                    bval, _bu = _resolve_js_string(bnode, consts)
+                    config_base = bval or "{baseURL}"
         member = False
         if const_name and symbol.endswith(".module"):
             symbol = f"{module}.{const_name}"
@@ -3077,9 +3099,11 @@ def _collect_route_literals(
                 symbol=symbol,
                 same_repo=same_repo,
                 helper=is_helper,
-                explicit_base=bool(value) and (value.startswith("{") or "://" in value),
+                explicit_base=bool(config_base)
+                or (bool(value) and (value.startswith("{") or "://" in value)),
                 base_hole=(_HOLE.match(value).group(1) if value and _HOLE.match(value) else None),
                 member_helper=member,
+                bound_base=_concrete_base(config_base),
             )
         )
 
