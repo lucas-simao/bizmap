@@ -9,10 +9,13 @@
   import path, `pkg.Const` lookups no longer scan every constant, package
   constants are grouped once, an HTTP client whose base URL is unknown no
   longer re-analyses its file on every helper call (800 methods: ~25 s →
-  0.3 s), imports are read from the top-level declarations only. Synthetic
-  4,000-file repo: 1.1 ms/file, flat from 500 to 4,000 files
-  (`scripts/bench_go.py`, `pytest -m perf`, both run in CI). A slow Go phase
-  prints `go: N/total files analysed`.
+  0.3 s), imports are read from the top-level declarations only. The time
+  per file now stays flat as the repo grows (4k/1k files = 4.6× on a
+  synthetic repo with tests and generated code; 8k vs 0.4.0: ~85 s → 53 s
+  analysing every file, 20 s with the new defaults below). Absolute cost
+  depends on the code: ~1 ms per file on the small files of
+  `scripts/bench_go.py`, ~5 ms on a heavier synthetic repo, ~11 ms on real
+  code. A slow Go phase prints `go: N/total files analysed`.
 - **Go tests, fixtures, mocks and generated code are skipped by default**
   (`skip_generated`): `*_test.go`, `testdata/`, `mocks/`, `*.pb.go`,
   `*.pb.gw.go`, `*_mock.go`, `mock_*.go` and files headed
