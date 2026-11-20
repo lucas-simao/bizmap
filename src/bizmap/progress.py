@@ -152,6 +152,19 @@ def note(message: str) -> None:
         _current.emit(message)
 
 
+def status(message: str, every: float = 2.0) -> None:
+    """A line from inside a long phase (``go: 1200/3700 files``): printed only
+    once the scan is slow, at most every ``every`` seconds, never queued."""
+    cur = _current
+    if cur is None or not cur.live:
+        return
+    with cur._lock:
+        now = time.perf_counter()
+        if now - cur.last_line < every:
+            return
+        cur._print(f"[bizmap {now - cur.start:6.1f}s] {message}")
+
+
 def begin(label: str, files: int | None = None) -> None:
     """A phase starts (shown only once the scan is slow)."""
     if _current is not None:

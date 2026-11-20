@@ -116,3 +116,19 @@ def test_phase_kind() -> None:
     assert progress.phase_kind("shop: files (0 go, 1 py)") == "files"
     assert progress.phase_kind("merge + cross-service links (2 repos)") == "merge + cross-service links"
     assert progress.phase_kind("shop: js/ts") == "js/ts"
+
+
+def test_status_lines_only_when_live_and_throttled() -> None:
+    out = io.StringIO()
+    progress.start(threshold=60, stream=out, live=False)
+    progress.status("go: 1/10 files analysed")
+    progress.stop()
+    assert out.getvalue() == ""
+    out = io.StringIO()
+    progress.start(threshold=0, stream=out, live=False)
+    progress.note("listing")
+    progress.status("go: 1/10 files analysed", every=0)
+    progress.status("go: 2/10 files analysed", every=3600)  # throttled
+    progress.stop()
+    text = out.getvalue()
+    assert "go: 1/10 files analysed" in text and "2/10" not in text

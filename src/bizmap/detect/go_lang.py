@@ -4,6 +4,7 @@ import codecs
 import re
 import time
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 import tree_sitter_go as tsgo
 from tree_sitter import Language, Node, Parser
 
+from bizmap import progress
 from bizmap.detect.rules import Rule, import_matches, method_matches
 from bizmap.detect.tsutil import (
     call_args,
@@ -250,6 +252,8 @@ class _Indexes:
     warnings: list[str] = field(default_factory=list)
     missing_gomod: bool = False
     known_import_paths: set[str] = field(default_factory=set)
+    import_match_cache: dict[str, str | None] = field(default_factory=dict)
+    known_by_last: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _unquote_go_string(raw: str) -> str:
@@ -574,6 +578,27 @@ def _unwrap_literal(node: Node | None) -> Node | None:
     return node
 
 
+# id(consts_by_import) → (that dict, its size when indexed, name → import
+# paths). Holding the dict keeps its id from being reused. Keys only: values
+# are read from the dict at lookup time, so updates of existing keys are
+# seen; a new key changes the size and rebuilds the index.
+_CONST_NAME_INDEX: dict[int, tuple[dict, int, dict[str, list[str]]]] = {}
+
+
+def _const_paths_named(consts_by_import: dict[tuple[str, str], ResolvedString], name: str) -> list[str]:
+    cached = _CONST_NAME_INDEX.get(id(consts_by_import))
+    if cached is None or cached[0] is not consts_by_import or cached[1] != len(consts_by_import):
+        by_name: dict[str, list[str]] = {}
+        for p, n in consts_by_import:
+            if p not in {"*", ""}:
+                by_name.setdefault(n, []).append(p)
+        if len(_CONST_NAME_INDEX) > 16:
+            _CONST_NAME_INDEX.clear()
+        cached = (consts_by_import, len(consts_by_import), by_name)
+        _CONST_NAME_INDEX[id(consts_by_import)] = cached
+    return cached[2].get(name, [])
+
+
 def _lookup_const(
     ip: str | None,
     name: str,
@@ -586,10 +611,8 @@ def _lookup_const(
             return found
         suffix_hits = [
             v
-            for (p, n), v in consts_by_import.items()
-            if n == name
-            and v.usable
-            and p not in {"*", ""}
+            for p in _const_paths_named(consts_by_import, name)
+            if (v := consts_by_import[(p, name)]).usable
             and (p.endswith("/" + ip) or ip.endswith("/" + p) or p == ip)
         ]
         if len(suffix_hits) == 1:
@@ -604,9 +627,7 @@ def _lookup_const(
             return dotted
         return None
     named = [
-        v
-        for (p, n), v in consts_by_import.items()
-        if n == name and v.usable and p not in {"*", ""}
+        v for p in _const_paths_named(consts_by_import, name) if (v := consts_by_import[(p, name)]).usable
     ]
     if len(named) == 1:
         return named[0]
@@ -1024,12 +1045,21 @@ def _join_path(*parts: str) -> str:
     return out or "/"
 
 
+def _import_specs(root: Node) -> Iterator[Node]:
+    """`import_spec` nodes: imports are top-level declarations, so only the
+    root's `import_declaration` children are visited, not the whole file."""
+    for decl in root.named_children:
+        if decl.type != "import_declaration":
+            continue
+        for node in walk(decl):
+            if node.type == "import_spec":
+                yield node
+
+
 def _import_paths(root: Node) -> tuple[list[str], dict[str, str]]:
     imports: list[str] = []
     aliases: dict[str, str] = {}
-    for node in walk(root):
-        if node.type != "import_spec":
-            continue
+    for node in _import_specs(root):
         path_node = node.child_by_field_name("path")
         path = _unquote_go_string(text(path_node)) if path_node else ""
         if not path:
@@ -1125,6 +1155,7 @@ class GoAnalyzer:
     ) -> GoAnalysis:
         self._local_types_cache.clear()
         self._file_types_cache.clear()
+        self._file_http_bases: dict[str, dict[tuple[str, str, str], ResolvedString]] = {}
         self._yaml_constants = constants or {}
         infos: list[_FileInfo] = []
         t_parse = time.perf_counter()
@@ -1137,6 +1168,7 @@ class GoAnalyzer:
                 ident = next((c for c in pkg_node.named_children if c.type == "package_identifier"), None)
                 pkg = text(ident) or "main"
             imports, aliases = _import_paths(tree)
+            rel_file = rel(path, root)
             import_path = _import_path_for(path, root, pkg)
             display = _package_display(path, root, pkg)
             structs: dict[str, dict[str, GoType]] = {}
@@ -1156,13 +1188,13 @@ class GoAnalyzer:
                     iface_embeds.update(embs)
                 if node.type in {"function_declaration", "method_declaration"}:
                     functions.append(
-                        self._function(node, display, pkg, import_path, aliases, rel(path, root), source)
+                        self._function(node, display, pkg, import_path, aliases, rel_file, source)
                     )
             consts, const_names = _collect_package_strings(tree, aliases)
             infos.append(
                 _FileInfo(
                     path=path,
-                    rel=rel(path, root),
+                    rel=rel_file,
                     source=source,
                     tree=tree,
                     package=pkg,
@@ -1204,11 +1236,11 @@ class GoAnalyzer:
 
         prefix_by_fn: dict[str, dict[str, str]] = {}
         consts_by_info: dict[str, dict[str, ResolvedString]] = {}
+        consts_by_package: dict[str, dict[str, ResolvedString]] = {}
+        for info in infos:  # file order, as before: later files win on duplicates
+            consts_by_package.setdefault(info.import_path, {}).update(info.consts)
         for info in infos:
-            package_consts: dict[str, ResolvedString] = {}
-            for other in infos:
-                if other.import_path == info.import_path:
-                    package_consts.update(other.consts)
+            package_consts = dict(consts_by_package[info.import_path])
             consts_by_info[info.rel] = package_consts
             for fn in info.functions:
                 prefixes = self._path_prefixes(fn, info, echo_rule, package_consts, idx)
@@ -1216,8 +1248,9 @@ class GoAnalyzer:
                 prefix_by_fn[fn.qualname] = prefixes
         self._propagate_group_prefixes(infos, idx, echo_rule, prefix_by_fn, consts_by_info)
 
-        for info in infos:
+        for done_files, info in enumerate(infos):
             package_consts = consts_by_info[info.rel]
+            progress.status(f"go: {done_files}/{len(infos)} files analysed")
 
             for fn in info.functions:
                 env = dict(package_consts)
@@ -2232,13 +2265,23 @@ class GoAnalyzer:
             return None
         if ip in idx.known_import_paths:
             return ip
+        if ip in idx.import_match_cache:
+            return idx.import_match_cache[ip]
+        if not idx.known_by_last and idx.known_import_paths:
+            for known in idx.known_import_paths:
+                if known:
+                    idx.known_by_last.setdefault(known.rstrip("/").rsplit("/", 1)[-1], []).append(known)
+        # a suffix match in either direction shares the last path segment
+        last = ip.rstrip("/").rsplit("/", 1)[-1]
         hits = [
             p
-            for p in idx.known_import_paths
-            if p and (ip.endswith("/" + p) or p.endswith("/" + ip))
+            for p in idx.known_by_last.get(last, ())
+            if ip.endswith("/" + p) or p.endswith("/" + ip)
         ]
         if len(hits) != 1:
+            idx.import_match_cache[ip] = None
             return None
+        idx.import_match_cache[ip] = hits[0]
         if idx.missing_gomod:
             msg = (
                 f"warning: no go.mod; resolved import {ip!r} via scanned directory {hits[0]!r}"
@@ -2395,30 +2438,27 @@ class GoAnalyzer:
             if inner is not None:
                 return inner, [inner.qualname], Confidence.EXACT
             callee = self._resolve_callee(node, fn, info, idx)
-            name = call_callee_name(node)
-            cands = [f.qualname for f in idx.by_name.get(name, [])]
             if callee:
                 return callee, [callee.qualname], Confidence.EXACT
-            return None, cands, Confidence.UNKNOWN
+            name = call_callee_name(node)
+            return None, [f.qualname for f in idx.by_name.get(name, [])], Confidence.UNKNOWN
         if node.type == "selector_expression":
             local_types = self._local_types(fn, info, idx)
             found = self._resolve_selector(node, fn, info, idx, local_types)
-            field = node.child_by_field_name("field")
-            name = text(field) if field else ""
-            cands = [f.qualname for f in idx.by_name.get(name, [])]
             if found:
                 return found, [found.qualname], Confidence.EXACT
-            return None, cands, Confidence.UNKNOWN
+            field = node.child_by_field_name("field")
+            name = text(field) if field else ""
+            return None, [f.qualname for f in idx.by_name.get(name, [])], Confidence.UNKNOWN
         if node.type == "identifier":
             name = text(node)
             found = idx.by_func.get((info.import_path, name))
-            cands = [f.qualname for f in idx.by_name.get(name, [])]
             if found:
                 return found, [found.qualname], Confidence.EXACT
             same = [f for f in idx.by_name.get(name, []) if f.import_path == info.import_path]
             if len(same) == 1:
                 return same[0], [same[0].qualname], Confidence.EXACT
-            return None, cands, Confidence.UNKNOWN
+            return None, [f.qualname for f in idx.by_name.get(name, [])], Confidence.UNKNOWN
         if node.type == "unary_expression" and node.named_children:
             return self._resolve_handler_node(node.named_children[0], fn, info, idx)
         return None, [], Confidence.UNKNOWN
@@ -2796,7 +2836,10 @@ class GoAnalyzer:
                 gtype = self._type_of_expr(operand, fn, info, local_types, idx) if operand else None
                 if gtype:
                     key = (gtype.import_path or callee.import_path, gtype.name, helper.base_field)
-                    found = self._struct_http_bases([info], idx).get(key)
+                    file_bases = self._file_http_bases.get(info.rel)
+                    if file_bases is None:
+                        file_bases = self._file_http_bases[info.rel] = self._struct_http_bases([info], idx)
+                    found = file_bases.get(key)
                     if found and found.usable:
                         base = found.path_text
             if not base:
