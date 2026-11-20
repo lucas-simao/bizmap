@@ -19,6 +19,15 @@ inputs:
   max-rows:
     description: Max functions listed in the comment (the step summary lists all).
     default: "50"
+  mermaid:
+    description: Include the Mermaid diagram (entrypoint → changed function → table) in the comment.
+    default: "true"
+  shared-services:
+    description: High risk when the PR writes a table that this many services (repos of a joint scan) read or write.
+    default: "3"
+  risk-threshold:
+    description: "Fail the job when the risk is at least this level: low, medium or high. Empty (default) never fails; the comment is posted first."
+    default: ""
   fail-on-error:
     description: Fail the job when BizMap itself fails (the check is advisory by default; the comment always says it failed).
     default: "false"
@@ -35,6 +44,9 @@ outputs:
   status:
     description: ok, skipped or failed.
     value: ${{ steps.impact.outputs.status }}
+  risk:
+    description: none, low, medium or high (empty when BizMap did not produce a report).
+    value: ${{ steps.impact.outputs.risk }}
 runs:
   using: composite
   steps:
@@ -48,7 +60,11 @@ runs:
         SCAN_PATH: ${{ inputs.path }}
         CONFIG: ${{ inputs.config }}
         MAX_ROWS: ${{ inputs.max-rows }}
+        MERMAID: ${{ inputs.mermaid }}
+        SHARED: ${{ inputs.shared-services }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         set -uo pipefail
@@ -65,6 +81,14 @@ runs:
           echo "status=$1" >> "$GITHUB_OUTPUT"
           exit 0
         }
+        case "$MERMAID" in true|false) ;; *)
+          echo "::error::mermaid must be true or false (got '$MERMAID')"
+          finish failed "Failed: input \`mermaid\` must be \`true\` or \`false\`." ;;
+        esac
+        case "$SHARED" in ''|*[!0-9]*|0|1)
+          echo "::error::shared-services must be an integer >= 2 (got '$SHARED')"
+          finish failed "Failed: input \`shared-services\` must be an integer >= 2." ;;
+        esac
         if ! python -m pip install --quiet "$GITHUB_ACTION_PATH"; then
           echo "::error::could not install BizMap"
           finish failed "Failed: BizMap could not be installed."
@@ -101,19 +125,38 @@ runs:
           echo "::error::git diff failed"
           finish failed "Failed: \`git diff\` against the base failed."
         fi
+        # `file:line` links: the PR head commit (permanent) when the scanned
+        # tree has the same content for every changed file, else the commit
+        # actually scanned (the merge commit), so line numbers always match.
+        link_sha="$(git rev-parse HEAD)"
+        if [ -n "${HEAD_SHA:-}" ] && [ "$HEAD_SHA" != "$link_sha" ]; then
+          git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null \
+            || git fetch --no-tags --depth=1 origin "$HEAD_SHA" >/dev/null 2>&1 || true
+          mapfile -t changed < <(git -c core.quotepath=false diff --name-only "$from" HEAD 2>/dev/null)
+          if git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null \
+            && git diff --quiet "$HEAD_SHA" HEAD -- "${changed[@]}" 2>/dev/null; then
+            link_sha="$HEAD_SHA"
+          fi
+        fi
         args=()
         if [ -n "$CONFIG" ]; then args+=(--config "$CONFIG"); fi
         if ! bizmap scan "$SCAN_PATH" "${args[@]}" --out "$out/graph.json"; then
           echo "::error::bizmap scan failed"
           finish failed "Failed: \`bizmap scan\` did not finish."
         fi
-        common=(--graph "$out/graph.json" --diff "$out/pr.diff" --prefix "$SCAN_PATH" --repo-root .)
-        if ! bizmap impact "${common[@]}" --max-rows 100000 --max-chars 900000 > "$out/full.md" \
-          || ! bizmap impact "${common[@]}" --max-rows "$MAX_ROWS" --details-url "$RUN_URL" > "$comment"; then
+        common=(--graph "$out/graph.json" --diff "$out/pr.diff" --prefix "$SCAN_PATH" --repo-root .
+          --blob-url "$REPO_URL/blob/$link_sha" --shared-services "$SHARED")
+        if [ "$MERMAID" = false ]; then common+=(--no-mermaid); fi
+        # one impact computation: the comment on stdout, the uncapped report for
+        # the run summary (kept under its 1 MiB limit, in bytes) in --full-out
+        if ! bizmap impact "${common[@]}" --max-rows "$MAX_ROWS" --details-url "$RUN_URL" \
+          --full-out "$out/full.md" --full-max-bytes 1000000 > "$comment"; then
           echo "::error::bizmap impact failed"
           finish failed "Failed: \`bizmap impact\` did not finish."
         fi
         cat "$out/full.md" >> "$GITHUB_STEP_SUMMARY"
+        risk="$(sed -n 's/^<!-- bizmap-risk: \([a-z]*\) -->$/\1/p' "$comment" | head -n1)"
+        echo "risk=$risk" >> "$GITHUB_OUTPUT"
         finish ok ""
     - name: Comment on the PR
       if: always() && inputs.comment == 'true' && github.event.pull_request.number && steps.impact.outputs.status != 'skipped'
@@ -163,3 +206,21 @@ runs:
           exit 1
         fi
         echo "::warning::BizMap impact failed (advisory; set fail-on-error: true to fail the job)."
+    - name: Risk gate
+      if: always() && inputs.risk-threshold != '' && steps.impact.outputs.status == 'ok'
+      shell: bash
+      env:
+        RISK: ${{ steps.impact.outputs.risk }}
+        THRESHOLD: ${{ inputs.risk-threshold }}
+      run: |
+        rank() { case "$1" in none) echo 0 ;; low) echo 1 ;; medium) echo 2 ;; high) echo 3 ;; *) echo -1 ;; esac; }
+        want="$(rank "$THRESHOLD")"
+        if [ "$want" -lt 1 ]; then
+          echo "::error::risk-threshold must be low, medium or high (got '$THRESHOLD')"
+          exit 1
+        fi
+        if [ "$(rank "$RISK")" -ge "$want" ]; then
+          echo "::error::BizMap risk is $RISK (risk-threshold: $THRESHOLD); see the PR comment."
+          exit 1
+        fi
+        echo "BizMap risk: ${RISK:-unknown} (below $THRESHOLD)."
