@@ -13,6 +13,7 @@ from tree_sitter import Language, Node, Parser
 from bizmap.detect.tsutil import (
     call_args,
     call_callee_name,
+    flatten_plus,
     line_of,
     text,
     unwrap_callee_expr,
@@ -216,25 +217,25 @@ def _resolve_js_string(node: Node | None, consts: dict[str, str]) -> tuple[str |
                     return "{" + key + "}", True
         return None, False
     if node.type == "binary_expression":
-        op_nodes = [c for c in node.children if not c.is_named]
-        op = text(op_nodes[0]) if op_nodes else "+"
-        if op != "+":
+        operands = flatten_plus(node, {"binary_expression"})
+        if not operands:
             return None, False
-        left = node.child_by_field_name("left") or (
-            node.named_children[0] if node.named_children else None
-        )
-        right = node.child_by_field_name("right") or (
-            node.named_children[1] if len(node.named_children) > 1 else None
-        )
-        lv, lu = _resolve_js_string(left, consts)
-        rv, ru = _resolve_js_string(right, consts)
-        if lv is None and left is not None and left.type == "identifier":
-            lv, lu = "{" + text(left) + "}", True
-        if rv is None and right is not None and right.type == "identifier":
-            rv, ru = "{" + text(right) + "}", True
-        if lv is None and rv is None:
-            return None, False
-        return (lv or "") + (rv or ""), lu or ru or lv is None or rv is None
+
+        def leaf(operand: Node) -> tuple[str | None, bool]:
+            value, unresolved = _resolve_js_string(operand, consts)
+            if value is None and operand.type == "identifier":
+                return "{" + text(operand) + "}", True
+            return value, unresolved
+
+        # left fold, same result as the left-associative pairwise evaluation
+        acc, acc_u = leaf(operands[0])
+        for operand in operands[1:]:
+            value, unresolved = leaf(operand)
+            if acc is None and value is None:
+                acc, acc_u = None, False
+            else:
+                acc, acc_u = (acc or "") + (value or ""), acc_u or unresolved or acc is None or value is None
+        return acc, acc_u
     if node.type == "parenthesized_expression" and node.named_children:
         return _resolve_js_string(node.named_children[0], consts)
     if node.type == "call_expression":

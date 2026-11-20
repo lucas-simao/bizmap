@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from tree_sitter import Node
 
-from bizmap.detect.tsutil import call_args, call_callee_name, text, walk
+from bizmap.detect.tsutil import call_args, call_callee_name, flatten_plus, text, walk
 from bizmap.overrides import lookup_yaml_constant
 
 _ENV_SUB = re.compile(
@@ -291,15 +291,13 @@ def resolve_expr(
             acc = _plus(acc, resolve_expr(child, env, module_consts, imap, consts_by_module))
         return acc
     if node.type == "binary_operator":
-        ops = [text(c) for c in node.children if not c.is_named]
-        if ops and ops[0] != "+":
+        operands = flatten_plus(node, {"binary_operator"})
+        if operands is None:
             return _placeholder_for(text(node)[:40])
-        left = node.child_by_field_name("left")
-        right = node.child_by_field_name("right")
-        return _plus(
-            resolve_expr(left, env, module_consts, imap, consts_by_module),
-            resolve_expr(right, env, module_consts, imap, consts_by_module),
-        )
+        acc = resolve_expr(operands[0], env, module_consts, imap, consts_by_module)
+        for operand in operands[1:]:
+            acc = _plus(acc, resolve_expr(operand, env, module_consts, imap, consts_by_module))
+        return acc
     if node.type == "identifier":
         name = text(node)
         if name in env:

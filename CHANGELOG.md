@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Long `+` chains no longer crash the scan** (`RecursionError` from about 990
+  terms): string concatenation is resolved iteratively in the Go, JS/TS and
+  Python detectors (constants, `var`, parenthesized chains, SQL built in a
+  function body).
+- **A detector crash on one file no longer aborts the scan**: the files that
+  make it fail are found, skipped and reported in the graph's `warnings`; the
+  rest of the repo is analysed as usual.
+
 ### Added
 
 - **`bizmap mcp`**: a read-only MCP server over stdio for coding agents. It reads

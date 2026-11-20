@@ -111,3 +111,37 @@ def selector_root_and_field(node: Node) -> tuple[str, str]:
         head, tail = raw.rsplit(".", 1)
         return head, tail
     return raw, raw
+
+
+def flatten_plus(node: Node, binary_types: set[str], paren_types: set[str] = frozenset({"parenthesized_expression"})) -> list[Node] | None:
+    """Operands of a `+` chain (`"a" + b + ("c" + d)`), left to right,
+    iteratively: a generated chain of thousands of terms must not hit the
+    recursion limit. Returns None when ``node`` is not a `+` expression."""
+
+    def is_plus(n: Node) -> bool:
+        if n.type not in binary_types:
+            return False
+        ops = [c for c in n.children if not c.is_named]
+        return bool(ops) and text(ops[0]) == "+"
+
+    def unwrap(n: Node) -> Node:
+        while n.type in paren_types and len(n.named_children) == 1 and is_plus(n.named_children[0]):
+            n = n.named_children[0]
+        return n
+
+    if not is_plus(node):
+        return None
+    operands: list[Node] = []
+    stack = [node]
+    while stack:
+        cur = unwrap(stack.pop())
+        if is_plus(cur):
+            left = cur.child_by_field_name("left") or (cur.named_children[0] if cur.named_children else None)
+            right = cur.child_by_field_name("right") or (cur.named_children[-1] if cur.named_children else None)
+            if right is not None:
+                stack.append(right)
+            if left is not None:
+                stack.append(left)
+        else:
+            operands.append(cur)
+    return operands
