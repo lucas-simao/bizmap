@@ -14,7 +14,22 @@
   that declares them (also through `extends`), each alias applies only under
   its config's directory (two apps can each have `@/*`), and simple Vite
   `resolve.alias` entries (`'@': path.resolve(__dirname, './src')`,
-  `fileURLToPath(new URL('./src', import.meta.url))`) are read.
+  `fileURLToPath(new URL('./src', import.meta.url))`) are read, including the
+  array form `alias: [{ find: '@', replacement: path.resolve(__dirname, 'src') }]`.
+  With several targets (`"~/*": ["src/*", "generated/*"]`) the first one that
+  exists is used, like TypeScript.
+- **Named re-exports** (`export { a } from './x'`, `export { a as b } from`,
+  directory barrels, mixed with `export *`) resolve again (regressed in the
+  ambiguous-`export *` change: the barrel's own export map shadowed the
+  re-export).
+- **`const f = function () {...}`** is a function node like a const arrow.
+
+### Known limitations
+
+- Webpack `resolve.alias` is not read (tsconfig `paths` and Vite aliases are).
+- Two sibling anonymous callbacks that each declare a local `const tick = () =>`
+  share the id `<module>.tick`: only one node is kept, so calls to the other
+  get no edge (no false edge).
 
 ## 0.3.3 — 2026-11-20
 

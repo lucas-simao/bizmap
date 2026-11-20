@@ -214,6 +214,10 @@ and marks those links `inferred`. Details: [docs/how-it-works.md](docs/how-it-wo
   hash seeds; every bundled example has a golden snapshot.
 - **Static means static.** SQL rewritten at runtime (`sql.replace(...)`,
   `.format()` with runtime values) is read as written in the source.
+- **JS/TS import resolution** follows relative paths, `index` barrels,
+  `export … from`, tsconfig `paths` and Vite `resolve.alias`; Webpack aliases are
+  not read. Same-named local helpers in two sibling anonymous callbacks share one
+  id (only one is kept).
 - **No AI in the core, ever.** Models are welcome as *clients* of the graph (MCP is on
   the roadmap), not as its authors.
 
