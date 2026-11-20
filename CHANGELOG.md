@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.2 — 2026-11-20
+
+### Fixed
+
+- **Go interfaces are matched by signature, not just by method names**: an
+  implementer needs the same number of parameters and results and the same
+  parameter type names (`OrderStatus(echo.Context) error` no longer
+  implements `OrderStatus(context.Context, string) (string, error)`). The
+  false call from a service to the same-named controller method (a cycle) is
+  gone, and the route correctly stops at an unresolved call.
+- **Handler factories keep the data their arguments bring**:
+  `e.GET("/events", streamEvents(hub, visibleTo(pool)))` routes to
+  `streamEvents` and also triggers `visibleTo` (inferred,
+  `via: handler_factory`), so the route reaches what `visibleTo` reads.
+- **Go phase**: the nodes each detector pass looks for (calls, assignments,
+  literals…) are collected once per function instead of re-walking the
+  syntax tree in every pass, and the garbage collector's thresholds are
+  raised (parsed files frozen) during the phase. `scripts/bench_go.py
+  --heavy --all-files` (bigger files, many standard-library calls, tests and
+  generated code analysed) is part of `pytest -m perf`.
+- README: the `scan:` defaults (what is skipped, including Go tests, mocks
+  and generated code, and how to bring it back).
+
 ## 0.4.1 — 2026-11-20
 
 ### Fixed

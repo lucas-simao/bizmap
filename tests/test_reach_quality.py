@@ -188,8 +188,15 @@ def test_factory_with_call_argument_and_method_values(tmp_path: Path) -> None:
     _w(tmp_path, "api/api.go", NODATA)
     graph = scan_path(tmp_path)
     route = graph.nodes["entrypoint:http:GET:/carts"]
-    trig = [e.to_id for e in graph.edges.values() if e.type == "triggers" and e.from_id == route.id]
-    assert trig == ["function:api.listCarts"], trig
+    trig = {
+        e.to_id: (e.confidence.value, e.attrs.get("via"))
+        for e in graph.edges.values()
+        if e.type == "triggers" and e.from_id == route.id
+    }
+    assert trig == {
+        "function:api.listCarts": ("exact", None),
+        "function:api.newCartRepo": ("inferred", "handler_factory"),
+    }, trig
     calls = {(e.from_id, e.to_id): e.confidence.value for e in graph.edges.values() if e.type == "calls"}
     assert calls.get(("function:api.Controller.Submit", "function:api.Service.SubmitMarks")) == "inferred"
     reached = {e.to_id for e in graph.edges.values() if e.from_id == "entrypoint:http:POST:/marks" and e.type == "writes"}
@@ -279,3 +286,81 @@ def test_report_explains_entrypoints_without_data(tmp_path: Path) -> None:
     assert ep["reaching_data_via_http"] == 1
     assert rep["data_links"] == {"direct": {"exact": 1}, "derived_call": 1, "db_trigger": 0}
     assert rep["unresolved_calls"] == 1
+
+
+SAME_NAME = """package shop
+
+import (
+	"context"
+
+	"github.com/labstack/echo/v4"
+)
+
+type orderReader interface {
+	OrderStatus(ctx context.Context, id string) (string, error)
+}
+
+type OrderService struct{ repo orderReader }
+
+func (s *OrderService) OrderStatus(ctx context.Context, id string) (string, error) {
+	return s.repo.OrderStatus(ctx, id)
+}
+
+type Controller struct{ svc *OrderService }
+
+func (c *Controller) OrderStatus(ctx echo.Context) error {
+	_, err := c.svc.OrderStatus(ctx.Request().Context(), ctx.Param("id"))
+	return err
+}
+"""
+
+
+def test_interface_needs_matching_signatures(tmp_path: Path) -> None:
+    """Round 39: the controller's OrderStatus(echo.Context) is not an
+    implementer of orderReader just because the method name matches."""
+    _w(tmp_path, "go.mod", GO_MOD)
+    _w(tmp_path, "shop/shop.go", SAME_NAME)
+    graph = scan_path(tmp_path)
+    bad = "calls:function:shop.OrderService.OrderStatus->function:shop.Controller.OrderStatus"
+    assert bad not in graph.edges
+    svc = graph.nodes["function:shop.OrderService.OrderStatus"]
+    assert svc.attrs.get("unresolved_calls") == ["orderReader.OrderStatus"]
+
+
+STREAM = """package api
+
+import (
+	"database/sql"
+
+	"github.com/labstack/echo/v4"
+)
+
+type Hub struct{}
+
+func visibleTo(db *sql.DB) func() error {
+	return func() error {
+		_, err := db.Query("SELECT id FROM events")
+		return err
+	}
+}
+
+func streamEvents(h *Hub, all bool, filter func() error) echo.HandlerFunc {
+	return func(c echo.Context) error { return filter() }
+}
+
+func Register(e *echo.Echo, h *Hub, db *sql.DB) {
+	e.GET("/events", streamEvents(h, false, visibleTo(db)))
+}
+"""
+
+
+def test_factory_arguments_bring_their_data(tmp_path: Path) -> None:
+    _w(tmp_path, "go.mod", GO_MOD)
+    _w(tmp_path, "schema.sql", "CREATE TABLE events (id INT);\n")
+    _w(tmp_path, "api/api.go", STREAM)
+    graph = scan_path(tmp_path)
+    route = "entrypoint:http:GET:/events"
+    handlers = {e.to_id for e in graph.edges.values() if e.type == "triggers" and e.from_id == route}
+    assert handlers == {"function:api.streamEvents", "function:api.visibleTo"}, handlers
+    reads = {e.to_id for e in graph.edges.values() if e.type == "reads" and e.from_id == route}
+    assert any("events" in t for t in reads), reads

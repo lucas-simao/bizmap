@@ -37,3 +37,18 @@ def test_http_client_with_many_methods(tmp_path: Path) -> None:
     bench_go.build(tmp_path, 0, client=800)
     elapsed = _time(tmp_path)
     assert elapsed < 5, elapsed  # was ~25 s: the client's file was re-analysed per call
+
+
+def test_heavy_repo_all_files_stays_linear(tmp_path: Path) -> None:
+    """Bigger files, many standard-library calls, tests and generated code
+    analysed too (round 39)."""
+    small, big = tmp_path / "small", tmp_path / "big"
+    n_small = bench_go.build(small, 1000, heavy=True)
+    n_big = bench_go.build(big, 4000, heavy=True)
+    for root in (small, big):
+        (root / "bizmap.yaml").write_text("scan:\n  skip_generated: false\n", encoding="utf-8")
+    t_small, t_big = _time(small), _time(big)
+    ratio = (t_big / t_small) / (n_big / n_small)
+    print(f"heavy 1k: {t_small:.1f}s  4k: {t_big:.1f}s  normalized ratio {ratio:.2f}")
+    assert ratio <= 1.25, (t_small, t_big)
+    assert t_big < 120, t_big

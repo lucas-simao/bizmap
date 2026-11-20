@@ -77,6 +77,45 @@ def walk(node: Node) -> Iterator[Node]:
             stack.extend(reversed(named))
 
 
+# Node types the Go detector looks for again and again in each function
+# (calls, assignments, literals…). `typed_walk` walks a scope once, keeps
+# only these, and serves later walks from that list.
+TYPED_WALK_TYPES = frozenset(
+    {
+        "call_expression",
+        "short_var_declaration",
+        "assignment_statement",
+        "var_declaration",
+        "return_statement",
+        "range_clause",
+        "composite_literal",
+        "unary_expression",
+        "type_spec",
+        "go_statement",
+    }
+)
+_TYPED: dict[tuple[int, int, int], list[Node]] = {}
+
+
+def typed_walk(scope: Node, types: frozenset[str] | set[str]) -> list[Node]:
+    """The nodes of ``types`` under ``scope`` (itself included), in the same
+    preorder as `walk`. Every type must be in TYPED_WALK_TYPES. Cached per
+    scope until `clear_typed_walks()`."""
+    key = (scope.id, scope.start_byte, scope.end_byte)
+    nodes = _TYPED.get(key)
+    if nodes is None:
+        nodes = [n for n in walk(scope) if n.type in TYPED_WALK_TYPES]
+        _TYPED[key] = nodes
+    if len(types) == 1:
+        (only,) = tuple(types)
+        return [n for n in nodes if n.type == only]
+    return [n for n in nodes if n.type in types]
+
+
+def clear_typed_walks() -> None:
+    _TYPED.clear()
+
+
 def first_child(node: Node, type_name: str) -> Node | None:
     for child in node.named_children:
         if child.type == type_name:

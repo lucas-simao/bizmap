@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import codecs
+import gc
 import re
 import time
 from collections import defaultdict
@@ -17,9 +18,11 @@ from bizmap.detect.rules import Rule, import_matches, method_matches
 from bizmap.detect.tsutil import (
     call_args,
     call_callee_name,
+    clear_typed_walks,
     flatten_plus,
     line_of,
     text,
+    typed_walk,
     walk,
 )
 from bizmap.files import rel
@@ -154,6 +157,9 @@ class RouteHit:
     line: int
     evidence: Evidence
     path_unresolved: bool = False
+    # `streamEvents(hub, visibleTo(pool))`: functions called to build the
+    # handler a factory returns (they shape what the route does)
+    factory_parts: list[GoFunction] = field(default_factory=list)
 
 
 @dataclass
@@ -232,6 +238,7 @@ class _FileInfo:
     struct_func_fields: dict[str, set[str]] = field(default_factory=set)
     interfaces: dict[str, set[str]] = field(default_factory=dict)
     iface_embeds: dict[str, list[GoType]] = field(default_factory=dict)
+    iface_sigs: dict[str, dict[str, GoSig | None]] = field(default_factory=dict)
 
 
 @dataclass
@@ -498,12 +505,70 @@ def _func_type_names(type_decl: Node) -> set[str]:
     return names
 
 
+GoSig = tuple[tuple[str, ...], int]  # (parameter type leaves, number of results)
+
+
+def _type_leaf(node: Node | None) -> str:
+    """`*pkg.Order` / `[]pkg.Order` / `pkg.Order` → `Order`; `string` → `string`."""
+    raw = text(node).strip() if node is not None else ""
+    raw = raw.lstrip("*&").removeprefix("[]").lstrip("*")
+    raw = raw.split("[", 1)[0]  # generic instantiation
+    return raw.rsplit(".", 1)[-1] if raw else ""
+
+
+def _signature(node: Node) -> GoSig | None:
+    """Parameter type leaves and result count of a method / method_elem."""
+    params = node.child_by_field_name("parameters")
+    if params is None:
+        return None
+    leaves: list[str] = []
+    for decl in params.named_children:
+        if decl.type not in {"parameter_declaration", "variadic_parameter_declaration"}:
+            continue
+        typ = decl.child_by_field_name("type")
+        leaf = ("..." if decl.type == "variadic_parameter_declaration" else "") + _type_leaf(typ)
+        names = [c for c in decl.named_children if c.type == "identifier"]
+        leaves.extend([leaf] * max(1, len(names)))
+    result = node.child_by_field_name("result")
+    if result is None:
+        n_results = 0
+    elif result.type == "parameter_list":
+        n_results = 0
+        for decl in result.named_children:
+            if decl.type == "parameter_declaration":
+                names = [c for c in decl.named_children if c.type == "identifier"]
+                n_results += max(1, len(names))
+    else:
+        n_results = 1
+    return tuple(leaves), n_results
+
+
+def _signatures_match(want: GoSig | None, have: GoSig | None) -> bool:
+    """Same number of parameters and results, and the same parameter type
+    names (a one-letter type parameter, `any` or `interface{}` matches anything)."""
+    if want is None or have is None:
+        return True
+    (wp, wr), (hp, hr) = want, have
+    if wr != hr or len(wp) != len(hp):
+        return False
+    loose = {"any", "interface{}", ""}
+    for a, b in zip(wp, hp, strict=True):
+        a0, b0 = a.removeprefix("..."), b.removeprefix("...")
+        if a0 in loose or b0 in loose or len(a0) == 1 or len(b0) == 1:
+            continue
+        if a0 != b0:
+            return False
+    return True
+
+
 def _interface_specs(
     type_decl: Node, pkg: str, import_path: str, aliases: dict[str, str]
-) -> tuple[dict[str, set[str]], dict[str, list[GoType]]]:
-    """Named interfaces → method names and embedded interface types."""
+) -> tuple[dict[str, set[str]], dict[str, list[GoType]], dict[str, dict[str, GoSig | None]]]:
+    """Named interfaces → method names, embedded interface types, and the
+    signature of each method."""
     methods: dict[str, set[str]] = {}
     embeds: dict[str, list[GoType]] = {}
+    sigs: dict[str, dict[str, GoSig | None]] = {}
     for spec in type_decl.named_children:
         if spec.type != "type_spec":
             continue
@@ -513,6 +578,7 @@ def _interface_specs(
             continue
         meths: set[str] = set()
         embs: list[GoType] = []
+        msigs: dict[str, GoSig | None] = {}
         for elem in typ.named_children:
             if elem.type == "method_elem":
                 ident = elem.child_by_field_name("name") or next(
@@ -521,6 +587,7 @@ def _interface_specs(
                 )
                 if ident is not None:
                     meths.add(text(ident))
+                    msigs[text(ident)] = _signature(elem)
             elif elem.type == "type_elem":
                 inner = elem.named_children[0] if elem.named_children else elem
                 parsed = _parse_type(inner, pkg, import_path, aliases)
@@ -532,7 +599,8 @@ def _interface_specs(
                     embs.append(parsed)
         methods[name] = meths
         embeds[name] = embs
-    return methods, embeds
+        sigs[name] = msigs
+    return methods, embeds, sigs
 
 
 def _direct_func_fields(type_decl: Node) -> dict[str, set[str]]:
@@ -1046,6 +1114,17 @@ def _join_path(*parts: str) -> str:
     return out or "/"
 
 
+_CALL = frozenset({"call_expression"})
+_ASSIGN = frozenset({"short_var_declaration", "assignment_statement"})
+_ASSIGN_VAR = frozenset({"short_var_declaration", "assignment_statement", "var_declaration"})
+_RETURN = frozenset({"return_statement"})
+_TYPE_SPEC = frozenset({"type_spec"})
+_COMPOSITE = frozenset({"composite_literal"})
+_LITERALS = frozenset({"unary_expression", "composite_literal"})
+_GO_STMT = frozenset({"go_statement"})
+_ENV_NODES = frozenset({"range_clause", "short_var_declaration", "assignment_statement"})
+
+
 def _same_project(a: str, b: str) -> bool:
     """Two import paths of one project: same host and owner
     (`example.com/acme/...`), never the standard library."""
@@ -1163,8 +1242,29 @@ class GoAnalyzer:
         profile: object | None = None,
         constants: dict[str, str] | None = None,
     ) -> GoAnalysis:
+        """Analyse the files. The garbage collector's thresholds are raised
+        meanwhile: the phase allocates millions of short-lived objects next to
+        a large live set (the syntax trees), and the default thresholds made
+        full collections a growing share of the time on large repos."""
+        old = gc.get_threshold()
+        gc.set_threshold(max(old[0], 50_000), max(old[1], 50), max(old[2], 100))
+        try:
+            return self._analyze(files, root, profile, constants)
+        finally:
+            clear_typed_walks()
+            gc.unfreeze()
+            gc.set_threshold(*old)
+
+    def _analyze(
+        self,
+        files: list[Path],
+        root: Path,
+        profile: object | None,
+        constants: dict[str, str] | None,
+    ) -> GoAnalysis:
         self._local_types_cache.clear()
         self._file_types_cache.clear()
+        clear_typed_walks()
         self._file_http_bases: dict[str, dict[tuple[str, str, str], ResolvedString]] = {}
         self._yaml_constants = constants or {}
         infos: list[_FileInfo] = []
@@ -1187,15 +1287,17 @@ class GoAnalyzer:
             struct_func_fields: dict[str, set[str]] = {}
             interfaces: dict[str, set[str]] = {}
             iface_embeds: dict[str, list[GoType]] = {}
+            iface_sigs: dict[str, dict[str, GoSig | None]] = {}
             for node in tree.named_children:
                 if node.type == "type_declaration":
                     structs.update(_struct_fields(node, pkg, import_path, aliases))
                     func_type_names.update(_func_type_names(node))
                     for sname, fnames in _direct_func_fields(node).items():
                         struct_func_fields.setdefault(sname, set()).update(fnames)
-                    meths, embs = _interface_specs(node, pkg, import_path, aliases)
+                    meths, embs, isigs = _interface_specs(node, pkg, import_path, aliases)
                     interfaces.update(meths)
                     iface_embeds.update(embs)
+                    iface_sigs.update(isigs)
                 if node.type in {"function_declaration", "method_declaration"}:
                     functions.append(
                         self._function(node, display, pkg, import_path, aliases, rel_file, source)
@@ -1220,11 +1322,15 @@ class GoAnalyzer:
                     struct_func_fields=struct_func_fields,
                     interfaces=interfaces,
                     iface_embeds=iface_embeds,
+                    iface_sigs=iface_sigs,
                 )
             )
 
         if profile is not None:
             profile.parse += time.perf_counter() - t_parse
+        # the parsed files live until the end of the phase: keep the collector
+        # from re-scanning them on every collection
+        gc.freeze()
 
         t_resolve = time.perf_counter()
         _resolve_cross_package_consts(infos, getattr(self, "_yaml_constants", None))
@@ -1267,9 +1373,7 @@ class GoAnalyzer:
                 self._scan_function_env(fn, env, package_consts, info, idx)
                 prefix_map = prefix_by_fn.get(fn.qualname) or {}
                 req_vars: dict[str, tuple[str, str, bool]] = {}
-                for node in walk(fn.node):
-                    if node.type != "call_expression":
-                        continue
+                for node in typed_walk(fn.node, _CALL):
                     method = call_callee_name(node)
                     args = call_args(node)
                     evidence = Evidence(file=info.rel, line=line_of(node), symbol=fn.qualname)
@@ -1381,6 +1485,7 @@ class GoAnalyzer:
                                 route_method = "ANY" if method == "Any" else (
                                     "MATCH" if method == "Match" else method
                                 )
+                                parts = self._factory_parts(handler_node, handler, fn, info, idx)
                                 routes.append(
                                     RouteHit(
                                         method=route_method,
@@ -1398,6 +1503,7 @@ class GoAnalyzer:
                                             symbol=text(handler_node),
                                         ),
                                         path_unresolved=path_unresolved,
+                                        factory_parts=parts,
                                     )
                                 )
 
@@ -1458,11 +1564,13 @@ class GoAnalyzer:
         func_fields: dict[tuple[str, str], set[str]] = defaultdict(set)
         interfaces: dict[tuple[str, str], set[str]] = {}
         iface_embeds: dict[tuple[str, str], list[GoType]] = {}
+        iface_sigs: dict[tuple[str, str], dict[str, GoSig | None]] = {}
         for info in infos:
             for n in info.func_type_names:
                 func_aliases.add((info.import_path, n))
             for iname, meths in info.interfaces.items():
                 interfaces[(info.import_path, iname)] = set(meths)
+                iface_sigs[(info.import_path, iname)] = dict(info.iface_sigs.get(iname) or {})
             for iname, embs in info.iface_embeds.items():
                 iface_embeds[(info.import_path, iname)] = list(embs)
         # Flatten embedded interface method sets.
@@ -1472,10 +1580,14 @@ class GoAnalyzer:
             for key, embs in iface_embeds.items():
                 cur = interfaces.setdefault(key, set())
                 for g in embs:
-                    extra = interfaces.get((g.import_path or key[0], g.name), set())
+                    ekey = (g.import_path or key[0], g.name)
+                    extra = interfaces.get(ekey, set())
                     if extra - cur:
                         cur |= extra
                         changed = True
+                    own = iface_sigs.setdefault(key, {})
+                    for meth, sig in (iface_sigs.get(ekey) or {}).items():
+                        own.setdefault(meth, sig)
         for info in infos:
             for sname, fields in info.structs.items():
                 all_structs[(info.import_path, sname)] = fields
@@ -1498,6 +1610,15 @@ class GoAnalyzer:
         methods_of: dict[tuple[str, str], set[str]] = defaultdict(set)
         for ip, typ, meth in by_method:
             methods_of[(ip, typ)].add(meth)
+        sig_cache: dict[tuple[str, str, str], GoSig | None] = {}
+
+        def method_sig(type_key: tuple[str, str], meth: str) -> GoSig | None:
+            key = (type_key[0], type_key[1], meth)
+            if key not in sig_cache:
+                fn = by_method.get(key)
+                sig_cache[key] = _signature(fn.node) if fn is not None and fn.node is not None else None
+            return sig_cache[key]
+
         implementers: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
         for iface_key, iface_meths in interfaces.items():
             if not iface_meths:
@@ -1508,7 +1629,13 @@ class GoAnalyzer:
                     continue
                 if unexported and type_key[0] != iface_key[0]:
                     continue
-                if iface_meths <= type_meths:
+                if iface_meths <= type_meths and all(
+                    _signatures_match(
+                        (iface_sigs.get(iface_key) or {}).get(m),
+                        method_sig(type_key, m),
+                    )
+                    for m in iface_meths
+                ):
                     implementers[iface_key].append(type_key)
         for key in implementers:
             implementers[key] = sorted(implementers[key])
@@ -1595,7 +1722,7 @@ class GoAnalyzer:
         info: _FileInfo,
         idx: _Indexes,
     ) -> None:
-        for node in walk(fn.node):
+        for node in typed_walk(fn.node, _ENV_NODES):
             if node.type == "range_clause":
                 left = node.child_by_field_name("left")
                 right = node.child_by_field_name("right")
@@ -1840,9 +1967,7 @@ class GoAnalyzer:
 
     def _group_assignments(self, fn: GoFunction) -> list[tuple[str, Node]]:
         assignments: list[tuple[str, Node]] = []
-        for node in walk(fn.node):
-            if node.type not in {"short_var_declaration", "assignment_statement"}:
-                continue
+        for node in typed_walk(fn.node, _ASSIGN):
             lists = [c for c in node.named_children if c.type == "expression_list"]
             if len(lists) < 2:
                 continue
@@ -1898,9 +2023,7 @@ class GoAnalyzer:
         if not (fn.return_type and fn.return_type.name == "Group"):
             return None
         found: list[str] = []
-        for node in walk(fn.node):
-            if node.type != "return_statement":
-                continue
+        for node in typed_walk(fn.node, _RETURN):
             expr_list = next((c for c in node.named_children if c.type == "expression_list"), None)
             expr = None
             if expr_list is not None and expr_list.named_children:
@@ -1982,9 +2105,7 @@ class GoAnalyzer:
                         if prefixes.get(ident) != rp:
                             prefixes[ident] = rp
                             changed = True
-                    for node in walk(fn.node):
-                        if node.type != "call_expression":
-                            continue
+                    for node in typed_walk(fn.node, _CALL):
                         hits = self._resolve_callees(node, fn, info, idx)
                         if not hits:
                             continue
@@ -2187,9 +2308,7 @@ class GoAnalyzer:
             return cached
         types = dict(self._file_types(info, idx))
         types.update(fn.params)
-        for node in walk(fn.node):
-            if node.type not in {"short_var_declaration", "assignment_statement", "var_declaration"}:
-                continue
+        for node in typed_walk(fn.node, _ASSIGN_VAR):
             targets = []
             if node.type == "var_declaration":
                 for spec in node.named_children:
@@ -2536,6 +2655,31 @@ class GoAnalyzer:
             return self._resolve_handler_node(node.named_children[0], fn, info, idx)
         return None, [], Confidence.UNKNOWN
 
+    def _factory_parts(
+        self,
+        handler_node: Node,
+        handler: GoFunction | None,
+        fn: GoFunction,
+        info: _FileInfo,
+        idx: _Indexes,
+    ) -> list[GoFunction]:
+        """Functions called in the arguments of a handler factory
+        (`listCarts(newCartRepo(db))` → newCartRepo)."""
+        call = _unwrap_literal(handler_node) or handler_node
+        if handler is None or call.type != "call_expression":
+            return []
+        if self._resolve_callee(call, fn, info, idx) is not handler:
+            return []  # a wrapper unwrapped to an inner handler, not a factory
+        out: list[GoFunction] = []
+        for arg in call_args(call):
+            inner = _unwrap_literal(arg) or arg
+            if inner.type != "call_expression":
+                continue
+            part = self._resolve_callee(inner, fn, info, idx)
+            if part is not None and part is not handler and part not in out:
+                out.append(part)
+        return out
+
     def _unwrap_wrapped_handler(
         self,
         call: Node,
@@ -2650,18 +2794,14 @@ class GoAnalyzer:
                     None,
                 )
                 path_names = {path_param}
-                for node in walk(fn.node):
-                    if node.type not in {"short_var_declaration", "assignment_statement"}:
-                        continue
+                for node in typed_walk(fn.node, _ASSIGN):
                     pairs = self._assignment_pairs(node)
                     for lhs, rhs in pairs:
                         raw = text(rhs)
                         if path_param in raw or any(n in raw for n in path_names):
                             path_names.add(lhs)
                 base_field = ""
-                for node in walk(fn.node):
-                    if node.type != "call_expression":
-                        continue
+                for node in typed_walk(fn.node, _CALL):
                     method = call_callee_name(node)
                     args = call_args(node)
                     url_node = None
@@ -2678,9 +2818,7 @@ class GoAnalyzer:
                         continue
                     field = self._base_field_in_expr(url_node, fn.receiver_var)
                     if not field:
-                        for n2 in walk(fn.node):
-                            if n2.type not in {"short_var_declaration", "assignment_statement"}:
-                                continue
+                        for n2 in typed_walk(fn.node, _ASSIGN):
                             for lhs, rhs in self._assignment_pairs(n2):
                                 if lhs == raw or lhs in path_names:
                                     field = self._base_field_in_expr(rhs, fn.receiver_var)
@@ -2727,9 +2865,7 @@ class GoAnalyzer:
         out: dict[tuple[str, str, str], str] = {}
         tag_re = re.compile(r'(?:env|envconfig)\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)')
         for info in infos:
-            for spec in walk(info.tree):
-                if spec.type != "type_spec":
-                    continue
+            for spec in typed_walk(info.tree, _TYPE_SPEC):
                 sname = text(spec.child_by_field_name("name"))
                 typ = spec.child_by_field_name("type")
                 if not sname or typ is None or typ.type != "struct_type":
@@ -2744,9 +2880,7 @@ class GoAnalyzer:
                     for ident in fd.named_children:
                         if ident.type in {"field_identifier", "identifier"}:
                             out[(info.import_path, sname, text(ident))] = m.group(1)
-            for node in walk(info.tree):
-                if node.type != "composite_literal":
-                    continue
+            for node in typed_walk(info.tree, _COMPOSITE):
                 gtype = _parse_type(
                     node.child_by_field_name("type"), info.package, info.import_path, info.import_aliases
                 )
@@ -2802,9 +2936,7 @@ class GoAnalyzer:
 
         for info in infos:
             dummy = self._synthetic_func(info, info.tree, "_http_base")
-            for node in walk(info.tree):
-                if node.type != "composite_literal":
-                    continue
+            for node in typed_walk(info.tree, _COMPOSITE):
                 gtype = _parse_type(
                     node.child_by_field_name("type"),
                     info.package,
@@ -2844,9 +2976,7 @@ class GoAnalyzer:
             values: dict[tuple[str, str, str], ResolvedString] = {}
             for info in infos:
                 for fn in info.functions:
-                    for node in walk(fn.node):
-                        if node.type != "call_expression":
-                            continue
+                    for node in typed_walk(fn.node, _CALL):
                         callee = self._resolve_callee(node, fn, info, idx)
                         if callee is None:
                             continue
@@ -2999,7 +3129,7 @@ class GoAnalyzer:
     def _collect_func_field_bindings(self, infos: list[_FileInfo], idx: _Indexes) -> None:
         for info in infos:
             for fn in info.functions:
-                for node in walk(fn.node):
+                for node in typed_walk(fn.node, _LITERALS):
                     lit = node
                     if node.type == "unary_expression":
                         inner = node.child_by_field_name("operand") or (
@@ -3011,9 +3141,8 @@ class GoAnalyzer:
                         self._bind_composite(lit, fn, info, idx)
         for info in infos:
             for fn in info.functions:
-                for node in walk(fn.node):
-                    if node.type == "call_expression":
-                        self._bind_constructor_call(node, fn, info, idx)
+                for node in typed_walk(fn.node, _CALL):
+                    self._bind_constructor_call(node, fn, info, idx)
 
     def _bind_composite(
         self, lit: Node, fn: GoFunction, info: _FileInfo, idx: _Indexes
@@ -3143,9 +3272,7 @@ class GoAnalyzer:
         jobs: list[JobHit] = []
         seen_handlers: set[str] = set()
         for info in infos:
-            for node in walk(info.tree):
-                if node.type != "go_statement":
-                    continue
+            for node in typed_walk(info.tree, _GO_STMT):
                 call = next((c for c in node.named_children if c.type == "call_expression"), None)
                 if call is None:
                     continue
@@ -3196,9 +3323,7 @@ class GoAnalyzer:
                 continue
             seen.add(cur.qualname)
             cur_info = info_by_ip.get(cur.import_path, info)
-            for node in walk(cur.node):
-                if node.type != "call_expression":
-                    continue
+            for node in typed_walk(cur.node, _CALL):
                 if _is_scheduler_call(node, cur_info):
                     return True
             for qn in callees_of.get(cur.qualname, ()):
@@ -3207,9 +3332,7 @@ class GoAnalyzer:
                     stack.append(nxt)
             # Closures / composite-literal bodies: resolve callees inside this node too.
             dummy_info = cur_info
-            for node in walk(cur.node):
-                if node.type != "call_expression":
-                    continue
+            for node in typed_walk(cur.node, _CALL):
                 parent = node.parent
                 if parent is not None and parent.type == "go_statement":
                     continue

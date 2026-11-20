@@ -210,7 +210,36 @@ def http_client(root: Path, methods: int) -> None:
     _w(root, "internal/client/client.go", "\n".join(body))
 
 
-def build(root: Path, files: int, client: int = 0) -> int:
+def heavy_util(root: Path, name: str, i: int) -> None:
+    """A bigger file: 30 functions, each with stdlib calls and a branch."""
+    funcs = []
+    for k in range(30):
+        funcs.append(f'''
+func step{i}_{k}(ctx context.Context, in []string) (string, error) {{
+	out := make([]string, 0, len(in))
+	for _, v := range in {{
+		if strings.HasPrefix(v, "x") {{
+			out = append(out, strings.TrimSpace(fmt.Sprintf("%s-%d", v, {k})))
+		}} else if len(v) > {k} {{
+			out = append(out, strconv.Itoa(len(v)))
+		}}
+	}}
+	if len(out) == 0 {{
+		return "", errors.New("empty")
+	}}
+	_ = time.Now().Add(time.Duration({k}) * time.Second)
+	b, err := json.Marshal(out)
+	if err != nil {{
+		return "", fmt.Errorf("marshal: %w", err)
+	}}
+	return string(b), ctx.Err()
+}}
+''')
+    _w(root, f"internal/{name}/service/heavy{i}.go", "package service\n\nimport (\n\t\"context\"\n\t\"encoding/json\"\n"
+       "\t\"errors\"\n\t\"fmt\"\n\t\"strconv\"\n\t\"strings\"\n\t\"time\"\n)\n" + "".join(funcs))
+
+
+def build(root: Path, files: int, client: int = 0, heavy: bool = False) -> int:
     _w(root, "go.mod", f"module {MOD}\n\ngo 1.22\n")
     _w(root, "schema.sql", "".join(
         f"CREATE TABLE orders{d} (id int primary key, status text, total int);\n" for d in range(max(1, files // 25))
@@ -219,18 +248,24 @@ def build(root: Path, files: int, client: int = 0) -> int:
     d = 0
     while made < files:
         made += domain(root, d, extra=9)
+        if heavy:
+            for i in range(4):
+                heavy_util(root, f"orders{d}", i)
+            made += 4
         d += 1
     if client:
         http_client(root, client)
     return made
 
 
-def run(n: int, client: int, profile: bool) -> None:
+def run(n: int, client: int, profile: bool, heavy: bool = False, all_files: bool = False) -> None:
     from bizmap.scan import scan_path
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        made = build(root, n, client)
+        made = build(root, n, client, heavy=heavy)
+        if all_files:
+            (root / "bizmap.yaml").write_text("scan:\n  skip_generated: false\n", encoding="utf-8")
         pr = cProfile.Profile() if profile else None
         t0 = time.perf_counter()
         if pr:
@@ -244,7 +279,8 @@ def run(n: int, client: int, profile: bool) -> None:
               f"({1000 * dt / max(made, 1):.1f} ms/file)", flush=True)
         if pr:
             out = io.StringIO()
-            pstats.Stats(pr, stream=out).sort_stats("tottime").print_stats(25)
+            pstats.Stats(pr, stream=out).sort_stats("tottime").print_stats(30)
+            pstats.Stats(pr, stream=out).sort_stats("cumulative").print_stats(40)
             print(out.getvalue())
 
 
@@ -253,10 +289,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("sizes", nargs="*", type=int)
     ap.add_argument("--client", type=int, default=0, help="also add one HTTP client with this many methods")
     ap.add_argument("--profile", action="store_true")
+    ap.add_argument("--heavy", action="store_true", help="add bigger files with many standard-library calls")
+    ap.add_argument("--all-files", action="store_true", help="also analyse tests, mocks and generated code")
     args = ap.parse_args(argv)
     sizes = args.sizes or ([0] if args.client else [500, 1000, 2000])
     for n in sizes:
-        run(n, args.client, args.profile)
+        run(n, args.client, args.profile, heavy=args.heavy, all_files=args.all_files)
     return 0
 
 

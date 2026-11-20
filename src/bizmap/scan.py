@@ -475,6 +475,17 @@ def _apply_go(
                 evidence=route.evidence,
             )
             entrypoints_by_handler[handler.qualname].append(eid)
+            for part in getattr(route, "factory_parts", None) or []:
+                graph.add_edge(
+                    "triggers",
+                    eid,
+                    function_id(part.qualname),
+                    confidence=Confidence.INFERRED,
+                    evidence=route.evidence,
+                    via="handler_factory",
+                )
+                if eid not in entrypoints_by_handler[part.qualname]:
+                    entrypoints_by_handler[part.qualname].append(eid)
 
     for job in analysis.jobs:
         handler = job.handler
