@@ -12,8 +12,10 @@ from bizmap.graph import Confidence
 PLACEHOLDER_N = re.compile(r"\$(\d+)")
 NAMED_PARAM = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 PY_PERCENT = re.compile(r"%s")
+# Leading `-- comment` lines and `/* … */` blocks are allowed: sqlc puts
+# `-- name: GetOrder :one` before every query.
 SQL_START = re.compile(
-    r"^\s*\(?\s*(WITH|SELECT|INSERT|UPDATE|DELETE|MERGE|EXECUTE)\b",
+    r"^\s*(?:(?:--[^\n]*(?:\n|$)|/\*[\s\S]*?\*/)\s*)*\(?\s*(WITH|SELECT|INSERT|UPDATE|DELETE|MERGE|EXECUTE)\b",
     re.IGNORECASE,
 )
 # Bare or quoted identifier, optionally schema-qualified (pg_dump style).
