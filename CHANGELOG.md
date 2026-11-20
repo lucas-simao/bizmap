@@ -29,8 +29,7 @@
   and `UPDATE OF col` needs a write to one of those columns. The effect is
   table-level (`via: db_trigger:NAME`) on the firing function, its callers
   and entrypoints; triggers whose function writes another table with
-  triggers are followed (up to 4 levels). The round-38 repro went from 432
-  links to the expected 24.
+  triggers are followed (up to 4 levels).
 - **Data links say where they come from**: copies of a read/write up the call
   graph carry `derived: "call"`, direct writes carry `ops` (the SQL
   operations). `bizmap report` shows `data links: direct (exact …, inferred
