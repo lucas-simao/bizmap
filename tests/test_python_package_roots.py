@@ -116,14 +116,14 @@ def stock(conn):
 
 
 def test_py_namespace_package_partial_init(tmp_path: Path) -> None:
-    """Evaluation repro: src/extractor/ has NO __init__.py (PEP 420), but
-    src/extractor/synthesis/ has one. `from extractor.synthesis._utils import
+    """Evaluation repro: src/pipeline/ has NO __init__.py (PEP 420), but
+    src/pipeline/render/ has one. `from pipeline.render._utils import
     build_body` must resolve (no pyproject needed: `src/` is a source root)."""
     _write(tmp_path, "schema.sql", "CREATE TABLE bodies (id text, body text);\n")
-    _write(tmp_path, "services/extract/src/extractor/synthesis/__init__.py")
+    _write(tmp_path, "services/render/src/pipeline/render/__init__.py")
     _write(
         tmp_path,
-        "services/extract/src/extractor/synthesis/_utils.py",
+        "services/render/src/pipeline/render/_utils.py",
         """
 from sqlalchemy import text
 
@@ -134,11 +134,11 @@ def build_body(conn, body_id):
     )
     _write(
         tmp_path,
-        "services/extract/src/extractor/api.py",
+        "services/render/src/pipeline/api.py",
         """
 from fastapi import FastAPI
 
-from extractor.synthesis._utils import build_body
+from pipeline.render._utils import build_body
 
 app = FastAPI()
 
@@ -149,9 +149,9 @@ def get_body(body_id: str, conn=None):
 """,
     )
     graph = scan_path(tmp_path)
-    assert function_id("extractor.synthesis._utils.build_body") in graph.nodes
+    assert function_id("pipeline.render._utils.build_body") in graph.nodes
     assert "table:bodies" in _reach(graph, "entrypoint:http:GET:/bodies/{body_id}")
-    node = graph.get(function_id("extractor.api.get_body"))
+    node = graph.get(function_id("pipeline.api.get_body"))
     assert not (node.attrs.get("unresolved_calls") or []), node.attrs.get("unresolved_calls")
 
 
@@ -198,23 +198,23 @@ def notes2(conn=None):
 
 
 def test_py_barrel_reexport_call(tmp_path: Path) -> None:
-    """`pkg/image_utils/__init__.py` re-exports from `.crop`; callers import the
+    """`pkg/media_utils/__init__.py` re-exports from `.encode`; callers import the
     name from the package. Also `import *` re-exports, two-level barrels and
-    `import image_utils; image_utils.fn()`."""
+    `import media_utils; media_utils.fn()`."""
     _write(tmp_path, "schema.sql", "CREATE TABLE thumbs (id text);\n")
     _write(
         tmp_path,
-        "pkg/image_utils/__init__.py",
-        "from .crop import crop_to_data_uri, normalize_bytes\nfrom .resize import *\n",
+        "pkg/media_utils/__init__.py",
+        "from .encode import to_data_uri, normalize_bytes\nfrom .resize import *\n",
     )
     _write(
         tmp_path,
-        "pkg/image_utils/crop.py",
+        "pkg/media_utils/encode.py",
         """
 from sqlalchemy import text
 
 
-def crop_to_data_uri(conn, img):
+def to_data_uri(conn, img):
     conn.execute(text("INSERT INTO thumbs (id) VALUES ('x')"))
 
 
@@ -222,22 +222,22 @@ def normalize_bytes(b):
     return b
 """,
     )
-    _write(tmp_path, "pkg/image_utils/resize.py", "def shrink(img):\n    return img\n")
-    _write(tmp_path, "pkg/media/__init__.py", "from image_utils import crop_to_data_uri\n")
+    _write(tmp_path, "pkg/media_utils/resize.py", "def shrink(img):\n    return img\n")
+    _write(tmp_path, "pkg/media/__init__.py", "from media_utils import to_data_uri\n")
     _write(
         tmp_path,
         "pkg/api.py",
         """
-import image_utils
-from image_utils import crop_to_data_uri, shrink
-from media import crop_to_data_uri as crop2
+import media_utils
+from media_utils import to_data_uri, shrink
+from media import to_data_uri as encode2
 
 
 def upload(conn, img):
-    crop_to_data_uri(conn, img)
+    to_data_uri(conn, img)
     shrink(img)
-    crop2(conn, img)
-    return image_utils.normalize_bytes(img)
+    encode2(conn, img)
+    return media_utils.normalize_bytes(img)
 """,
     )
     graph = scan_path(tmp_path)
@@ -245,9 +245,9 @@ def upload(conn, img):
         e.to_id for e in graph.edges.values() if e.type == "calls" and e.from_id == function_id("pkg.api.upload")
     }
     assert {
-        function_id("image_utils.crop.crop_to_data_uri"),
-        function_id("image_utils.resize.shrink"),
-        function_id("image_utils.crop.normalize_bytes"),
+        function_id("media_utils.encode.to_data_uri"),
+        function_id("media_utils.resize.shrink"),
+        function_id("media_utils.encode.normalize_bytes"),
     } <= callees, callees
     node = graph.get(function_id("pkg.api.upload"))
     assert not (node.attrs.get("unresolved_calls") or []), node.attrs.get("unresolved_calls")

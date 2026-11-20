@@ -349,7 +349,7 @@ _CONFIG_ARG_INDEX = {"get": 1, "delete": 1, "head": 1, "options": 1, "post": 2, 
 
 
 def _per_call_base(method: str, args: list[Node], consts: dict[str, str]) -> str | None:
-    """`http.post(url, body, { baseURL: V2 })` / `http.get(url, { baseURL })` /
+    """`http.post(url, body, { baseURL: NEXT })` / `http.get(url, { baseURL })` /
     `http.request({ baseURL, url })` → the call's own base (unknown → `{baseURL}`)."""
     candidates: list[Node] = []
     idx = _CONFIG_ARG_INDEX.get(method)
@@ -1010,7 +1010,7 @@ class JsAnalyzer:
                 consts = consts_by_mod.get(module) or {}
                 for key, value in _collect_path_helpers(tree, consts).items():
                     # later rounds see imported helpers: their value is more
-                    # complete (`{base()}/x` → `{VITE_API_URL}/api/v1/client/x`)
+                    # complete (`{base()}/x` → `{VITE_API_URL}/api/v1/shop/x`)
                     consts[key] = value
             _import_path_helpers(consts_by_mod, import_specs_by_mod)
         for _path, _rel_file, module, tree, _src in parsed:
@@ -2263,7 +2263,7 @@ def _propagate_client_bases(
             if i >= len(params):
                 continue
             if arg.type == "call_expression" and call_callee_name(arg) == "create":
-                # createOrgClient(axios.create({ baseURL: ... }))
+                # createShopClient(axios.create({ baseURL: ... }))
                 base = _create_call_base(arg, consts_by_mod.get(module) or {})
                 if base is None:
                     continue
@@ -2867,7 +2867,7 @@ def _concrete_base(value: str | None) -> str | None:
 
 
 def _object_member_owner(top: Node) -> str | None:
-    """`paths.pdfReport` when ``top`` is returned by an arrow/method stored as a
+    """`paths.summary` when ``top`` is returned by an arrow/method stored as a
     property of a top-level `const paths = { ... }` (nested objects allowed)."""
     keys: list[str] = []
     cur = top.parent
@@ -2961,7 +2961,7 @@ def _call_target_qual(call: Node, module: str, imports: dict[str, str], function
             if target and target.endswith(".*"):
                 return f"{target[:-2]}.{text(prop)}"
             if target:
-                # `import { paths } from './paths'` → paths.pdfReport(id)
+                # `import { paths } from './paths'` → paths.summary(id)
                 return f"{target}.{text(prop)}"
             # local object helper: `const paths = { site: (id) => ... }`
             return f"{module}.{text(obj)}.{text(prop)}"
@@ -3083,7 +3083,7 @@ def _collect_route_literals(
         elif is_helper and symbol.endswith(".module"):
             owner = _object_member_owner(top)
             if owner:
-                # `export const paths = { pdfReport: (id) => `/items/${id}/...` }`
+                # `export const paths = { summary: (id) => `/items/${id}/...` }`
                 symbol = f"{module}.{owner}"
                 member = True
         # The base context is part of the key: two members of one object can

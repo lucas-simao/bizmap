@@ -30,49 +30,49 @@
   (`c.http.Get(url)`, `http.DefaultClient.Get`) are detected.
 
 - **Python package re-exports**: names re-exported by a package's
-  `__init__.py` (`from .crop import f`, `from .resize import *`, chained
+  `__init__.py` (`from .encode import f`, `from .resize import *`, chained
   barrels) resolve to the defining module, for `from pkg import f` and
   `import pkg; pkg.f()`. Found on the way: in an `__init__.py`, a relative
-  import (`from .crop import …`) was resolved from the package's *parent*
-  (`crop` instead of `image_utils.crop`); `.` now means the package itself.
+  import (`from .encode import …`) was resolved from the package's *parent*
+  (`encode` instead of `media_utils.encode`); `.` now means the package itself.
 
 - **Per-call `baseURL` overrides the instance base**: `http.post(url, body,
-  { baseURL: V2 })`, `http.get(url, { baseURL })` and
+  { baseURL: NEXT })`, `http.get(url, { baseURL })` and
   `http.request({ baseURL, url })` use the call's own base (axios/ky config
   position only; `baseURL`/`baseUrl`/`prefixUrl`). An unresolvable override is
   an unknown explicit base, so the URL must match whole — the
-  `/api/v2/items/:id/pdf-report` false link to `/api/v1/client/...` is gone.
+  `/api/next/items/:id/summary` false link to `/api/v1/shop/...` is gone.
 
 - **Silent drop of calls into unscanned submodules of scanned packages**:
-  with an `__init__.py` chain, `pkg.store.lens.counts.tenant_counts` was
+  with an `__init__.py` chain, `pkg.store.views.counts.shop_counts` was
   skipped because `pkg` / `pkg.store` are scanned (their `__init__.py`). Now
   only the longest scanned prefix decides: a package means an unscanned
   submodule → `target_not_scanned`; a regular module means our own class /
   constant → left alone.
 
 - **False link from object-member path helpers**: a helper stored as an
-  object property (`export const paths = { pdfReport: (id) => … }`) had no
+  object property (`export const paths = { summary: (id) => … }`) had no
   symbol of its own, so its literal stayed on `<module>.module` without the
-  caller's base and was suffix-matched (`${API_BASE_URL}/api/v2${paths.pdfReport(id)}`
-  linked to `/api/v1/client/items/:id/pdf-report`). Member helpers now get
-  their own symbol (`paths.pdfReport`), `obj.key(...)` calls on local objects
+  caller's base and was suffix-matched (`${API_BASE_URL}/api/next${paths.summary(id)}`
+  linked to `/api/v1/shop/items/:id/summary`). Member helpers now get
+  their own symbol (`paths.summary`), `obj.key(...)` calls on local objects
   and named imports are their call sites, and a literal left on a
   helper/const with no caller found is matched whole only.
 
 - **axios/ky instances through barrels and inline**: imports are resolved to
   the module that actually defines the name (`index` files,
   `export { a as b } from`, `export * from`) before client bases propagate, so
-  `import { portalApi } from '../http'` re-exported from `http/index.ts` keeps
-  its `baseURL`; `createOrgClient(axios.create({ baseURL }))` binds the inline
+  `import { shopApi } from '../http'` re-exported from `http/index.ts` keeps
+  its `baseURL`; `createShopClient(axios.create({ baseURL }))` binds the inline
   instance. The factory may return an object literal or a variable, and may be
   called inside a hook/function. Go clients whose base arrives as a
   constructor parameter / struct field and are used through a service field
   are covered by tests (already resolved).
 
 - **Go Echo groups nested inside a function that receives the group**
-  (regression exposed by whole-path matching): `s := g.Group("/org/settings")`
+  (regression exposed by whole-path matching): `s := g.Group("/settings")`
   where `g` is a `*echo.Group` parameter now keeps the caller's prefix
-  (`/api/v1/client/org/settings/...`), at any depth and across packages; local
+  (`/api/v1/shop/settings/...`), at any depth and across packages; local
   groups are recomputed whenever a parameter prefix arrives from a caller.
   `examples/checkout` registers its order routes this way, and a test names
   every expected cross-service link that goes missing.
@@ -91,8 +91,8 @@
   - a literal covered by a traced call of the same function is matched with
     that call's full path; a URL with an explicit base (placeholder or
     absolute, even unknown) must match whole — no suffix match
-    (`${API_BASE_URL}/api/v2/items/:id/pdf-report` no longer links to
-    `/api/v1/client/items/:id/pdf-report`);
+    (`${API_BASE_URL}/api/next/items/:id/summary` no longer links to
+    `/api/v1/shop/items/:id/summary`);
   - a helper call is the request path only when it is the whole argument
     (`http.get(itemPath(id))`); inside a larger URL (`${base(id)}/photos`) the
     composed URL is the literal, never the intermediate `base(id)`;
@@ -104,9 +104,9 @@
 - **Namespace packages under `src/` (regression from the package-roots
   change)**: a source root now wins over a partial `__init__.py` chain, and
   any `src/` directory counts as a source root even without a `pyproject`. With
-  `src/extractor/` lacking `__init__.py` and `src/extractor/synthesis/` having
-  one, the module is `extractor.synthesis._utils` (it was
-  `synthesis._utils`), so `from extractor.synthesis._utils import …` resolves.
+  `src/pipeline/` lacking `__init__.py` and `src/pipeline/render/` having
+  one, the module is `pipeline.render._utils` (it was
+  `render._utils`), so `from pipeline.render._utils import …` resolves.
   **Node ids change**: Python modules under `src/` lose the `src.` prefix.
 - **Import suffix fallback**: an imported module that is not a scanned module
   name is remapped to the unique scanned module sharing a 2+ segment suffix
@@ -166,7 +166,7 @@
   `unresolved_http`.
 
 - **TS base helpers and namespace imports**: helpers whose template starts
-  with an env/base placeholder (`base = () => `${API_URL}/api/v1/client``)
+  with an env/base placeholder (`base = () => `${API_URL}/api/v1/shop``)
   are evaluated, so `` `${base()}${site(id)}/orders` `` composes the full URL;
   `import * as P from '@/lib/paths'` + `P.site(id)` resolves; helpers built
   from imported helpers (`siteStock = (id) => `${base()}/sites/${id}/stock``)
@@ -308,7 +308,7 @@
   concatenation (`const site = (id) => `/sites/${id}``,
   `function seg(id) { return '/teams/' + id }`), in the same file or
   imported, are evaluated inside client URLs with the caller's argument names:
-  `` `/client${site(siteId)}/orders` `` → `/client/sites/:siteId/orders`.
+  `` `/shop${site(siteId)}/orders` `` → `/shop/sites/:siteId/orders`.
   A call segment that cannot be evaluated makes the unresolved reason
   `path_dynamic` instead of `base_unknown`.
 

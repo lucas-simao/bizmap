@@ -131,8 +131,8 @@ def _python_module_names(files: list[Path], root: Path) -> dict[Path, str]:
         full = path.resolve()
         fallback = _module_name(rel(path, root))
         # 1. a source root wins over a partial `__init__.py` chain (PEP 420
-        #    namespace packages: `src/extractor/` without `__init__.py`,
-        #    `src/extractor/synthesis/` with one → `extractor.synthesis`)
+        #    namespace packages: `src/pipeline/` without `__init__.py`,
+        #    `src/pipeline/render/` with one → `pipeline.render`)
         hit = next((sr for sr in src_roots if sr in full.parents), None)
         if hit is None:
             hit = next(
@@ -3614,7 +3614,7 @@ def _fn_ref(
             if mod and f"{mod}.{aname}" in functions:
                 return f"{mod}.{aname}"
             if mod and _PY_REEXPORTS.get(f"{mod}.{aname}") in functions:
-                # `import image_utils; image_utils.crop(...)` re-exported by __init__
+                # `import media_utils; media_utils.encode(...)` re-exported by __init__
                 return _PY_REEXPORTS[f"{mod}.{aname}"]
             # `from pkg import module` + `module.fn`
             if oname in imap.from_names:
@@ -4473,7 +4473,7 @@ def _link_unscanned_sinks(
                 # means our own code that is just not a plain function (class,
                 # instance, constant) → leave it. A *package* (`__init__.py`)
                 # means the next segment is a submodule that was not scanned →
-                # report it (`pkg.store.lens.counts.tenant_counts`).
+                # report it (`pkg.store.views.counts.shop_counts`).
                 if qual in scanned_modules:
                     continue
                 parts = qual.split(".")
@@ -4535,7 +4535,7 @@ def _link_unscanned_sinks(
 
 
 def _suffix_module(name: str, scanned: set[str], cache: dict[str, str | None]) -> str | None:
-    """`extractor.synthesis._utils` ↔ `synthesis._utils`, `backend.app.x` ↔
+    """`pipeline.render._utils` ↔ `render._utils`, `backend.app.x` ↔
     `app.x`: the unique scanned module that shares a 2+ segment suffix."""
     if name in scanned:
         return name
@@ -4582,9 +4582,9 @@ def _remap_imports_by_suffix(imaps: dict[str, ImportMap], scanned: set[str]) -> 
 
 
 # ---------------------------------------------------------------------------
-# Re-exports: `pkg/image_utils/__init__.py` does `from .crop import crop_to_data_uri`
-# (or `from .crop import *`); `from image_utils import crop_to_data_uri` must
-# reach `image_utils.crop.crop_to_data_uri`.
+# Re-exports: `pkg/media_utils/__init__.py` does `from .encode import to_data_uri`
+# (or `from .encode import *`); `from media_utils import to_data_uri` must
+# reach `media_utils.encode.to_data_uri`.
 # ---------------------------------------------------------------------------
 
 _PY_REEXPORTS: dict[str, str] = {}
