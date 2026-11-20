@@ -1257,3 +1257,96 @@ def test_js_why_keeps_comments_that_mention_license(tmp_path: Path) -> None:
         "export async function licenseRule(id: number) { return id }\n"
     )
     assert _why_of(tmp_path, src, "licenseRule") == "License checks for resellers happen here: only active licences may order."
+
+
+def _schema_md(tmp_path: Path, files: dict[str, str], diff: str):
+    graph = _scan(tmp_path, files)
+    imp = compute_impact(graph, diff, repo_root=tmp_path)
+    return graph, imp, render_markdown(graph, imp)
+
+
+def _replace(path: str, line: int, old: str, new: str) -> str:
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -{line} +{line} @@\n-{old}\n+{new}\n"
+
+
+SCHEMA_APP = {
+    "shop/schema.sql": (
+        "CREATE TABLE customers (\n"            # 1
+        "  id int primary key,\n"               # 2
+        "  name text,\n"                        # 3
+        "  email TEXT NOT NULL,\n"              # 4
+        "  updated_at timestamptz\n"            # 5
+        ");\n"                                  # 6
+        "CREATE TABLE orders (id int primary key, status text);\n"  # 7
+        "ALTER TABLE orders ADD COLUMN gift_note TEXT, ADD COLUMN gift_wrap BOOLEAN;\n"  # 8
+        "ALTER TABLE public.\"customers\" DROP COLUMN updated_at;\n"  # 9
+        "ALTER TABLE customers RENAME COLUMN name TO full_name;\n"   # 10
+        "CREATE TABLE shipments (\n"            # 11
+        "  id int primary key,\n"               # 12
+        "  order_id int,\n"                     # 13
+        "  carrier text\n"                      # 14
+        ");\n"                                  # 15
+    ),
+    "shop/src/db.ts": "export const db = { query: async (q: string, a?: unknown[]) => [] };\n",
+    "shop/src/customers.ts": (
+        "import { db } from './db';\n"
+        "export async function touch(id: number) {\n"
+        "  await db.query('UPDATE customers SET updated_at = now(), name = $2 WHERE id = $1', [id, 'x']);\n"
+        "}\n"
+    ),
+    "shop/src/server.ts": (
+        "import express from 'express';\nimport { touch } from './customers';\n"
+        "const app = express();\napp.post('/customers/:id/touch', async (req, res) => { await touch(1); res.end(); });\n"
+    ),
+}
+
+
+def test_schema_ops_multi_alter_drop_rename_and_new_table(tmp_path: Path) -> None:
+    diff = (
+        _added("shop/schema.sql", 8) + _added("shop/schema.sql", 9) + _added("shop/schema.sql", 10)
+        + "".join(_added("shop/schema.sql", n) for n in range(11, 16))
+    )
+    graph, imp, md = _schema_md(tmp_path, SCHEMA_APP, diff)
+    got = sorted((c.op, c.table, c.name, c.detail) for c in imp.schema_changes)
+    assert ("added", "orders", "gift_note", "") in got and ("added", "orders", "gift_wrap", "") in got, got
+    assert ("dropped", "customers", "updated_at", "") in got, got
+    assert ("renamed", "customers", "name", "full_name") in got, got
+    assert ("new table", "shipments", "", "3 columns") in got, got
+    assert sum(1 for c in imp.schema_changes if c.table == "shipments") == 1
+    dropped = next(c for c in imp.schema_changes if c.op == "dropped")
+    assert dropped.risky and any(e.endswith("POST:/customers/:id/touch") for e in dropped.entrypoints), dropped
+    assert "⚠️ `customers.updated_at` **dropped** — still used" in md, md
+    assert "renamed → `full_name`" in md and "new table `shipments` (3 columns)" in md, md
+
+
+def test_rename_column_applies_to_schema(tmp_path: Path) -> None:
+    graph = _scan(tmp_path, SCHEMA_APP)
+    cols = graph.schema["tables"]["customers"]["columns"]
+    names = set(cols) if isinstance(cols, dict) else {c["name"] for c in cols}
+    assert "full_name" in names and "name" not in names and "updated_at" not in names, sorted(names)
+
+
+def test_punctuation_only_line_is_not_a_change(tmp_path: Path) -> None:
+    files = dict(SCHEMA_APP)
+    files["shop/schema.sql"] = files["shop/schema.sql"].replace("  updated_at timestamptz\n", "  updated_at timestamptz,\n  phone text\n")
+    diff = (
+        "diff --git a/shop/schema.sql b/shop/schema.sql\n--- a/shop/schema.sql\n+++ b/shop/schema.sql\n"
+        "@@ -5 +5,2 @@\n-  updated_at timestamptz\n+  updated_at timestamptz,\n+  phone text\n"
+    )
+    _graph, imp, _md = _schema_md(tmp_path, files, diff)
+    assert [(c.op, c.name) for c in imp.schema_changes] == [("changed", "phone")], imp.schema_changes
+
+
+def test_sql_only_diff_has_no_roots_hint_and_missing_file_warns(tmp_path: Path) -> None:
+    graph = _scan(tmp_path, SCHEMA_APP)
+    imp = compute_impact(graph, _added("shop/schema.sql", 8), repo_root=tmp_path)
+    assert imp.hint is None and imp.schema_changes
+    imp2 = compute_impact(graph, _added("shop/schema.sql", 8), repo_root=tmp_path / "nowhere")
+    assert imp2.schema_changes == [] and imp2.warnings and "not found under --repo-root" in imp2.warnings[0]
+    assert "not found under --repo-root" in render_markdown(graph, imp2)
+
+
+def test_header_counts_folded_rows(tmp_path: Path) -> None:
+    graph = _scan(tmp_path, SHOP)
+    md = render_markdown(graph, compute_impact(graph, _added("shop/src/orders.ts", 3) + _added("shop/src/server.ts", 6)))
+    assert "**2** changed functions (1 folded into another row)" in md, md

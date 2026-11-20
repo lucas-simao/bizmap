@@ -11,6 +11,18 @@
   (`import listHandler from`, `h.cancelHandler` with `import * as h`) resolve to
   the scanned function: the route gets its tables and `why`, and no empty
   `<module>.default` / `<module>.h.cancelHandler` nodes are left.
+- **Schema changes in the comment** name the operation — added, altered,
+  **dropped**, **renamed → new**, changed — and flag (⚠️, listed first) a
+  dropped or renamed column that code still uses. Every column of a multi-column
+  `ALTER TABLE … ADD …, ADD …` is listed; a new table is one row
+  ("new table `shipments` (4 columns)"); a line whose change is only
+  punctuation/spacing (a comma added for the next column) is ignored.
+- **`ALTER TABLE … RENAME COLUMN a TO b`** is applied to the reconstructed
+  schema.
+- The header says how many changed functions were folded into another row; a
+  `.sql`-only diff no longer prints the "not under a scanned root" hint; a
+  changed `.sql` file missing under `--repo-root` is reported instead of the
+  schema section silently disappearing.
 - **`why` license filter** only drops real license text (`Copyright`, `SPDX`,
   "licensed under", "all rights reserved", `(c) 2024`, `/*!`); a comment that
   merely starts with "License …" is kept.

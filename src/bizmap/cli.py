@@ -348,6 +348,8 @@ def impact_cmd(
     result = compute_impact(graph, diff_text, prefix=prefix, repo_root=repo_root)
     if result.hint:
         click.echo(f"warning: {result.hint}", err=True)
+    for warning in result.warnings:
+        click.echo(f"warning: {warning}", err=True)
     if as_json:
         click.echo(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     else:
