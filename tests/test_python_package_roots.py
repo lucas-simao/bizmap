@@ -242,13 +242,13 @@ def upload(conn, img):
     )
     graph = scan_path(tmp_path)
     callees = {
-        e.to_id for e in graph.edges.values() if e.type == "calls" and e.from_id == function_id("api.upload")
+        e.to_id for e in graph.edges.values() if e.type == "calls" and e.from_id == function_id("pkg.api.upload")
     }
     assert {
         function_id("image_utils.crop.crop_to_data_uri"),
         function_id("image_utils.resize.shrink"),
         function_id("image_utils.crop.normalize_bytes"),
     } <= callees, callees
-    node = graph.get(function_id("api.upload"))
+    node = graph.get(function_id("pkg.api.upload"))
     assert not (node.attrs.get("unresolved_calls") or []), node.attrs.get("unresolved_calls")
-    assert "table:thumbs" in _reach(graph, function_id("api.upload"))
+    assert "table:thumbs" in _reach(graph, function_id("pkg.api.upload"))
