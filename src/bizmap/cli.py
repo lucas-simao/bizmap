@@ -6,7 +6,7 @@ from pathlib import Path
 
 import click
 
-from bizmap import __version__
+from bizmap import __version__, progress
 from bizmap.graph import Graph
 from bizmap.impact import compute_impact, render_markdown
 from bizmap.mermaid import DEFAULT_LIMIT, render_mermaid
@@ -23,6 +23,56 @@ def main() -> None:
 
     No AI, no tokens, no accounts. SQL, routes, jobs, and comments only.
     """
+
+
+TOP_N = 10
+
+
+def _short(text: str, width: int = 100) -> str:
+    """One line, at most ``width`` characters (minified code can be huge)."""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= width else flat[: width - 1] + "…"
+
+
+def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
+    """What `bizmap scan` prints after the graph: skipped paths, warnings and
+    unresolved HTTP calls as counts plus the top 10 (all with ``verbose``)."""
+    lines: list[str] = []
+    skipped = graph.attrs.get("skipped") or {}
+    if skipped:
+        labels = {"generated_dirs": "generated dirs", "generated_files": "generated/minified files", "gitignored": ".gitignored paths"}
+        bits = [f"{n} {labels.get(k, k)}" for k, n in sorted(skipped.items())]
+        lines.append("skipped: " + ", ".join(bits) + "  (scan: include / gitignore / skip_generated in bizmap.yaml)")
+    warnings = [str(w) for w in graph.attrs.get("warnings") or []]
+    shown = warnings if verbose else warnings[:TOP_N]
+    for warning in shown:
+        lines.append("warning: " + (warning if verbose else _short(warning, 160)))
+    if len(warnings) > len(shown):
+        lines.append(f"… {len(warnings) - len(shown)} more warnings (use --verbose, or see `warnings` in the JSON)")
+    unresolved = graph.attrs.get("unresolved_http") or []
+    if not unresolved:
+        return lines
+    reason_counts: dict[str, int] = {}
+    target_counts: dict[str, int] = {}
+    for item in unresolved:
+        reason = str(item.get("reason") or "target_not_scanned")
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        target = f"{str(item.get('method') or '').upper()} {item.get('url') or ''}".strip()
+        target_counts[target] = target_counts.get(target, 0) + 1
+    order = ("target_not_scanned", "base_unknown", "path_dynamic", "client_unknown")
+    bits = [f"{name}={reason_counts[name]}" for name in order if name in reason_counts]
+    bits += [f"{n}={c}" for n, c in sorted(reason_counts.items()) if n not in order]
+    lines.append(f"{len(unresolved)} unresolved HTTP calls: " + ", ".join(bits))
+    ranked = sorted(target_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    top = ranked if verbose else ranked[:TOP_N]
+    for target, count in top:
+        times = f" ×{count}" if count > 1 else ""
+        lines.append("  " + (target if verbose else _short(target)) + times)
+    if len(ranked) > len(top):
+        lines.append(
+            f"  … {len(ranked) - len(top)} more distinct calls (use --verbose, or see `unresolved_http` in the JSON)"
+        )
+    return lines
 
 
 @main.command("scan")
@@ -87,6 +137,20 @@ def main() -> None:
     is_flag=True,
     help="Print phase timings (parse, resolve, sql, propagate) to stderr.",
 )
+@click.option(
+    "-v",
+    "--verbose",
+    "verbose",
+    is_flag=True,
+    help="List every unresolved HTTP call and warning (default: counts and the top 10).",
+)
+@click.option(
+    "-q",
+    "--quiet",
+    "quiet",
+    is_flag=True,
+    help="No progress lines on stderr (they appear only for scans longer than a few seconds).",
+)
 def scan_cmd(
     path: Path,
     out_path: Path,
@@ -98,11 +162,15 @@ def scan_cmd(
     config_path: Path | None,
     exclude_globs: tuple[str, ...],
     profile_flag: bool,
+    verbose: bool,
+    quiet: bool,
 ) -> None:
     """Scan one or more codebases and write bizmap.graph.json."""
     if not path:
         raise click.UsageError("missing scan path")
     roots = [Path(p) for p in path]
+    if not quiet:
+        progress.start()
     if len(roots) == 1:
         graph = scan_path(
             roots[0],
@@ -124,32 +192,12 @@ def scan_cmd(
     payload = graph.to_dict()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    progress.stop()
     click.echo(
         f"wrote {out_path}  ({len(payload['nodes'])} nodes, {len(payload['edges'])} edges)"
     )
-    for warning in graph.attrs.get("warnings") or []:
-        click.echo(warning)
-    unresolved = graph.attrs.get("unresolved_http") or []
-    if unresolved:
-        keys: list[str] = []
-        seen: set[str] = set()
-        reason_counts: dict[str, int] = {}
-        for item in unresolved:
-            reason = str(item.get("reason") or "target_not_scanned")
-            reason_counts[reason] = reason_counts.get(reason, 0) + 1
-            for key in item.get("keys") or []:
-                if key not in seen:
-                    seen.add(key)
-                    keys.append(str(key))
-        order = ("target_not_scanned", "base_unknown", "path_dynamic", "client_unknown")
-        reason_bits = [f"{name}={reason_counts[name]}" for name in order if name in reason_counts]
-        for name, count in sorted(reason_counts.items()):
-            if name not in order:
-                reason_bits.append(f"{name}={count}")
-        if reason_bits:
-            click.echo("HTTP unmatched by reason: " + ", ".join(reason_bits))
-        suffix = f" ({', '.join(keys)})" if keys else ""
-        click.echo(f"{len(unresolved)} unresolved HTTP calls{suffix}")
+    for line in scan_summary(graph, verbose=verbose):
+        click.echo(line)
     if mermaid_flag or mermaid_focus:
         mmd_path = out_path.with_suffix(".mmd")
         mmd_path.write_text(

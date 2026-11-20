@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from bizmap import progress
 from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
 from bizmap.detect.js_lang import JsAnalysis, JsAnalyzer
 from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer
@@ -1821,6 +1822,7 @@ def scan_paths(
             )
         )
         roots_by_repo[str(graphs[-1].repo)] = Path(os.path.relpath(root, base_dir)).as_posix()
+    t_merge = time.perf_counter()
     merged = merge_graphs(graphs)
     if merged.attrs.get("repo_roots_base") != "git":
         merged.attrs["repo_roots"] = roots_by_repo
@@ -1829,6 +1831,7 @@ def scan_paths(
     services.update(parent_cfg.services)
     merged.attrs["services"] = services
     _relink_from_graph(merged, services)
+    progress.done(f"merge + cross-service links ({len(roots)} repos)", t_merge)
     if profile:
         sys.stderr.write(f"bizmap profile: merged {len(roots)} repos nodes={len(merged.nodes)}\n")
         sys.stderr.flush()
@@ -2103,6 +2106,12 @@ def _scan_one(
         # how much was left out (generated dirs/files, .gitignore), for `scan` output
         graph.attrs["skipped"] = dict(sorted(walk.stats.items()))
     timings.parse += time.perf_counter() - t0
+    progress.done(
+        f"{graph.repo}: files ({len(go_files)} go, {len(py_files)} py, {len(js_files)} js/ts, "
+        f"{len(sql_files)} sql)",
+        t0,
+    )
+    t_go = time.perf_counter()
 
     failures: list[str] = []
     go_analysis = _analyze_safely(
@@ -2112,6 +2121,8 @@ def _scan_one(
         root,
         failures,
     )
+    if go_files:
+        progress.done(f"{graph.repo}: go", t_go)
     warnings = list(getattr(go_analysis, "warnings", None) or []) + failures
     if warnings:
         existing = list(graph.attrs.get("warnings") or [])
@@ -2129,6 +2140,9 @@ def _scan_one(
         py_failures,
     )
     timings.resolve += time.perf_counter() - t_py
+    if py_files:
+        progress.done(f"{graph.repo}: python", t_py)
+    t_js = time.perf_counter()
     js_failures: list[str] = []
     js_analysis = _analyze_safely(
         "JS/TS",
@@ -2137,6 +2151,9 @@ def _scan_one(
         root,
         js_failures,
     )
+    if js_files:
+        progress.done(f"{graph.repo}: js/ts", t_js)
+    t_graph = time.perf_counter()
     if py_failures or js_failures:
         existing = list(graph.attrs.get("warnings") or [])
         for item in py_failures + js_failures:
@@ -2265,6 +2282,7 @@ def _scan_one(
     split_go_route_closures(graph, root, span_cache)  # its own edge index: after the JS moves
     split_js_inline_handlers(graph)
     timings.propagate += go_prop + py_prop + (time.perf_counter() - t_prop)
+    progress.done(f"{graph.repo}: graph", t_graph)
 
     if profile:
         sys.stderr.write(timings.format_line() + "\n")
