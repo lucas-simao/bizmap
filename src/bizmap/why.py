@@ -88,6 +88,30 @@ def _entrypoints_for(graph: Graph, node_id: str) -> list[str]:
     return found
 
 
+MAX_HTTP_HOPS = 5
+
+
+def _http_upstream(graph: Graph, ep: str, lines: list[str], indent: str, depth: int, seen: set[str]) -> None:
+    """Who calls ``ep`` over HTTP, and who calls *them*, across services:
+    `invoked via HTTP from gateway/… ← edge/… ← web/…` (cycles skipped,
+    at most MAX_HTTP_HOPS)."""
+    for http_edge in sorted(graph.incoming(ep, "calls_http"), key=lambda e: e.from_id):
+        caller = http_edge.from_id
+        caller_eps = sorted(e for e in _entrypoints_for(graph, caller) if e not in seen)
+        where = ""
+        if caller_eps:
+            shown = ", ".join(_label(graph, e) for e in caller_eps[:3])
+            more = f" +{len(caller_eps) - 3}" if len(caller_eps) > 3 else ""
+            where = f" (behind {shown}{more})"
+        prefix = "invoked via HTTP from" if depth == 0 else "← via HTTP from"
+        lines.append(f"{indent}{prefix} {_label(graph, caller)}{where}")
+        if depth + 1 >= MAX_HTTP_HOPS:
+            continue
+        for cep in caller_eps:
+            seen.add(cep)
+            _http_upstream(graph, cep, lines, indent + "  ", depth + 1, seen)
+
+
 def _heading_for(graph: Graph, nid: str, table: str = "", column: str = "") -> tuple[str, str] | None:
     node = graph.get(nid)
     if node is None:
@@ -324,8 +348,7 @@ def format_why(graph: Graph, table_dot_column: str) -> str:
                 if ep_node and ep_node.attrs.get("why"):
                     ep_why = f" — {ep_node.attrs['why']}"
                 lines.append(f"      triggered by {_label(graph, ep)}{ep_why}")
-                for http_edge in graph.incoming(ep, "calls_http"):
-                    lines.append(f"      invoked via HTTP from {_label(graph, http_edge.from_id)}")
+                _http_upstream(graph, ep, lines, "      ", 0, {ep})
 
     runtime_w, schema_w = split_schema(writers)
     runtime_r, schema_r = split_schema(readers)
