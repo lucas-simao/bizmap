@@ -17,6 +17,10 @@
   `ALTER TABLE … ADD …, ADD …` is listed; a new table is one row
   ("new table `shipments` (4 columns)"); a line whose change is only
   punctuation/spacing (a comma added for the next column) is ignored.
+- A column definition added inside an existing `CREATE TABLE` is "added" (no
+  removed line names it), not "changed"; a changed function that runs SQL itself
+  is never folded into a helper's row, even with the same reach; an inline
+  handler keeps only its column-level edges (as a named handler does).
 - **`ALTER TABLE … RENAME COLUMN a TO b`** is applied to the reconstructed
   schema.
 - The header says how many changed functions were folded into another row; a

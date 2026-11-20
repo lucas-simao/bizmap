@@ -1334,7 +1334,7 @@ def test_punctuation_only_line_is_not_a_change(tmp_path: Path) -> None:
         "@@ -5 +5,2 @@\n-  updated_at timestamptz\n+  updated_at timestamptz,\n+  phone text\n"
     )
     _graph, imp, _md = _schema_md(tmp_path, files, diff)
-    assert [(c.op, c.name) for c in imp.schema_changes] == [("changed", "phone")], imp.schema_changes
+    assert [(c.op, c.name) for c in imp.schema_changes] == [("added", "phone")], imp.schema_changes
 
 
 def test_sql_only_diff_has_no_roots_hint_and_missing_file_warns(tmp_path: Path) -> None:
@@ -1350,3 +1350,54 @@ def test_header_counts_folded_rows(tmp_path: Path) -> None:
     graph = _scan(tmp_path, SHOP)
     md = render_markdown(graph, compute_impact(graph, _added("shop/src/orders.ts", 3) + _added("shop/src/server.ts", 6)))
     assert "**2** changed functions (1 folded into another row)" in md, md
+
+
+def test_new_column_in_existing_create_table_is_added(tmp_path: Path) -> None:
+    files = dict(SCHEMA_APP)
+    files["shop/schema.sql"] = files["shop/schema.sql"].replace("  email TEXT NOT NULL,\n", "  email TEXT NOT NULL,\n  phone TEXT,\n")
+    _g, imp, md = _schema_md(tmp_path, files, _added("shop/schema.sql", 5))
+    assert [(c.op, c.name) for c in imp.schema_changes] == [("added", "phone")], imp.schema_changes
+    # a real edit of an existing definition stays "changed"
+    files2 = dict(SCHEMA_APP)
+    files2["shop/schema.sql"] = files2["shop/schema.sql"].replace("  email TEXT NOT NULL,\n", "  email VARCHAR(320) NOT NULL,\n")
+    _g2, imp2, _ = _schema_md(tmp_path, files2, _replace("shop/schema.sql", 4, "  email TEXT NOT NULL,", "  email VARCHAR(320) NOT NULL,"))
+    assert [(c.op, c.name) for c in imp2.schema_changes] == [("changed", "email")], imp2.schema_changes
+
+
+def test_handler_with_own_sql_is_not_folded(tmp_path: Path) -> None:
+    files = dict(SHOP)
+    files["shop/src/server.ts"] = (
+        "import express from 'express';\nimport { Pool } from 'pg';\nimport { cancelOrder } from './orders';\n"  # 1-3
+        "const pool = new Pool();\nconst app = express();\n"                                                      # 4-5
+        "app.post('/orders/:id/cancel', async (req, res) => {\n"                                                  # 6
+        "  await cancelOrder(1);\n"                                                                               # 7
+        "  await pool.query(\"UPDATE orders SET status = 'cancelled' WHERE id = $1\", [1]);\n"                   # 8
+        "  res.end();\n"                                                                                          # 9
+        "});\n"                                                                                                   # 10
+    )
+    graph = _scan(tmp_path, files)
+    md = render_markdown(graph, compute_impact(graph, _added("shop/src/orders.ts", 3) + _added("shop/src/server.ts", 9)))
+    rows = [line for line in md.splitlines() if line.startswith("| `")]
+    assert len(rows) == 2 and "folded" not in md, md
+
+
+def test_inline_handler_has_column_edges_without_table_copies(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/schema.sql": "CREATE TABLE customers (id int primary key, email text);\n",
+            "svc/server.ts": (
+                "import express from 'express';\nimport { Pool } from 'pg';\n"
+                "const pool = new Pool();\nconst app = express();\n"
+                "app.post('/local/:id', async (req, res) => {\n"
+                "  await pool.query('UPDATE customers SET email = lower(email) WHERE id = $1', [req.params.id]);\n"
+                "  res.end();\n"
+                "});\n"
+            ),
+        },
+    )
+    ep = "entrypoint:http:POST:/local/:id"
+    handler = next(e.to_id for e in graph.edges.values() if e.type == "triggers" and e.from_id == ep)
+    targets = {(e.type, e.to_id) for e in graph.edges.values() if e.from_id == handler and e.type in {"reads", "writes"}}
+    assert ("writes", "column:customers.email") in targets, targets
+    assert not [t for t in targets if t[1] == "table:customers"], targets
