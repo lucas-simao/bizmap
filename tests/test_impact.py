@@ -597,3 +597,76 @@ def test_literal_route_beats_param_route(tmp_path: Path) -> None:
     assert _http_targets(graph, "function:web.c.points") == {"/shops/points"}
     assert _http_targets(graph, "function:web.c.one") == {"/shops/:shop_id"}
     assert _http_targets(graph, "function:web.c.other") == {"/shops/:shop_id"}
+
+
+def _calls_from(graph, prefix: str) -> set[tuple[str, str]]:
+    return {(e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls" and e.from_id.startswith(prefix)}
+
+
+SHADOW_BASE = "function formatLabel(x) { return x }\nfunction pick() { return null }\n"
+
+
+def _shadow_calls(tmp_path: Path, body: str) -> set[tuple[str, str]]:
+    graph = _scan(tmp_path, {"svc/util.ts": SHADOW_BASE + body})
+    return {c for c in _calls_from(graph, "function:svc.util.render") if c[1].endswith("formatLabel")}
+
+
+def test_param_shadows_module_function(tmp_path: Path) -> None:
+    assert _shadow_calls(tmp_path, "export function render(formatLabel) { return formatLabel(1) }\n") == set()
+
+
+def test_let_shadows_module_function(tmp_path: Path) -> None:
+    body = "export function render() { let formatLabel = pick(); return formatLabel(1) }\n"
+    assert _shadow_calls(tmp_path, body) == set()
+
+
+def test_var_in_block_shadows_module_function(tmp_path: Path) -> None:
+    body = "export function render() { if (1) { var formatLabel = pick(); } return formatLabel(1) }\n"
+    assert _shadow_calls(tmp_path, body) == set()
+
+
+def test_arrow_param_shadows_module_function(tmp_path: Path) -> None:
+    body = "export function render(list) { return list.map(formatLabel => formatLabel(1)) }\n"
+    assert _shadow_calls(tmp_path, body) == set()
+
+
+def test_destructured_param_shadows_module_function(tmp_path: Path) -> None:
+    body = "export function render({ formatLabel }) { return formatLabel(1) }\n"
+    assert _shadow_calls(tmp_path, body) == set()
+
+
+def test_catch_param_shadows_module_function(tmp_path: Path) -> None:
+    body = "export function render() { try { return 1 } catch (formatLabel) { return formatLabel(1) } }\n"
+    assert _shadow_calls(tmp_path, body) == set()
+
+
+def test_unshadowed_module_function_still_links(tmp_path: Path) -> None:
+    body = "export function render(other) { return formatLabel(other) }\n"
+    assert _shadow_calls(tmp_path, body) == {("function:svc.util.render", "function:svc.util.formatLabel")}
+
+
+def test_imports_through_barrels_namespace_default_and_require(tmp_path: Path) -> None:
+    graph = _scan(
+        tmp_path,
+        {
+            "svc/lib/top.ts": "export function top() { return 1 }\n",
+            "svc/lib/other.ts": "export function other() { return 2 }\n",
+            "svc/lib/index.ts": "export { top } from './top';\nexport * from './other';\n",
+            "svc/handler.ts": "const handler = () => 3;\nexport default handler;\n",
+            "svc/cjs.js": "function a() { return 4 }\nfunction b() { return 5 }\nmodule.exports = { a, b };\n",
+            "svc/app.ts": (
+                "import { top, other } from './lib';\n"
+                "import * as ns from './lib/top';\n"
+                "import h from './handler';\n"
+                "const { a } = require('./cjs');\n"
+                "export function useAll() { top(); other(); ns.top(); h(); a(); }\n"
+            ),
+        },
+    )
+    got = {t for f, t in _calls_from(graph, "function:svc.app.useAll")}
+    assert got == {
+        "function:svc.lib.top.top",
+        "function:svc.lib.other.other",
+        "function:svc.handler.handler",
+        "function:svc.cjs.a",
+    }, got

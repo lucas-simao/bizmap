@@ -964,7 +964,7 @@ class JsAnalyzer:
         class_ctors_by_mod: dict[str, dict[str, list[str]]] = {}
         trees_by_mod: dict[str, Node] = {}
         mounts: list[tuple[str, str, str, str, str]] = []
-        pending_import_calls: list[JsCall] = []
+        pending_import_calls: list[tuple[str, tuple[str, str], str, int]] = []
 
         for _path, rel_file, module, tree, _src in parsed:
             consts = _collect_consts(tree)
@@ -1029,6 +1029,20 @@ class JsAnalyzer:
                 if node.type != "call_expression":
                     continue
                 fn_n = node.child_by_field_name("function")
+                if fn_n is not None and fn_n.type == "member_expression":
+                    # `import * as lib from './lib'; lib.top()`
+                    obj, prop = fn_n.child_by_field_name("object"), fn_n.child_by_field_name("property")
+                    if obj is not None and prop is not None and obj.type == "identifier":
+                        spec = specs.get(text(obj))
+                        caller = _enclosing_symbol(node, module)
+                        if (
+                            spec
+                            and spec[1] in {"*", "require"}
+                            and not caller.endswith(".module")
+                            and not _locally_shadowed(node, text(obj))
+                        ):
+                            pending_import_calls.append((caller, (spec[0], text(prop)), rel_file, line_of(node)))
+                    continue
                 if fn_n is None or fn_n.type != "identifier":
                     continue
                 caller = _enclosing_symbol(node, module)
@@ -1036,29 +1050,26 @@ class JsAnalyzer:
                     continue
                 name = text(fn_n)
                 callee = _scoped_callee(caller, name, module, fn_nodes)
+                if callee is None and _locally_shadowed(node, name):
+                    continue  # a parameter / local variable, not the module's function
                 if callee is None and f"{module}.{name}" in fn_nodes and f"{module}.{name}" != caller:
                     callee = f"{module}.{name}"  # module-level function
                 if callee:
                     analysis.calls.append(
                         JsCall(caller=caller, callee=callee, file=rel_file, line=line_of(node))
                     )
-                elif name in imports:
+                elif name in specs:
                     # resolved once every file is indexed (target may come later)
-                    pending_import_calls.append(
-                        JsCall(caller=caller, callee=imports[name], file=rel_file, line=line_of(node))
-                    )
+                    pending_import_calls.append((caller, specs[name], rel_file, line_of(node)))
             wrappers_by_mod[module] = _collect_wrappers(tree, consts, clients)
 
         # imported functions: keep calls whose target is a scanned function
         # (`import { helperTop } from './a'`, default exports via `exports`)
-        for call in pending_import_calls:
-            target = call.callee
-            if target not in fn_nodes:
-                src_mod, _dot, exported = target.rpartition(".")
-                local = (exports_by_mod.get(src_mod) or {}).get(exported)
-                target = f"{src_mod}.{local}" if local else ""
-            if target and target in fn_nodes and target != call.caller:
-                analysis.calls.append(JsCall(caller=call.caller, callee=target, file=call.file, line=call.line))
+        known_mods = set(trees_by_mod)
+        for caller, (src_mod, orig), call_file, call_line in pending_import_calls:
+            target = _imported_function(src_mod, orig, exports_by_mod, known_mods, fn_nodes)
+            if target and target != caller:
+                analysis.calls.append(JsCall(caller=caller, callee=target, file=call_file, line=call_line))
 
         _import_path_helpers(consts_by_mod, import_specs_by_mod)
         # Helpers built from imported helpers (`site = (id) => `${base()}/sites/${id}``)
@@ -1716,6 +1727,83 @@ def _enclosing_symbol(node: Node, module: str) -> str:
     return f"{module}.module"
 
 
+_FN_SCOPE_TYPES = {
+    "function_declaration",
+    "generator_function_declaration",
+    "function",
+    "function_expression",
+    "generator_function",
+    "arrow_function",
+    "method_definition",
+}
+
+
+def _pattern_names(node: Node | None, out: set[str]) -> None:
+    """Names bound by a parameter / declarator pattern (`a`, `{ a, b: c }`,
+    `[a, ...b]`, `a = 1`), not the default values."""
+    if node is None:
+        return
+    t = node.type
+    if t in {"identifier", "shorthand_property_identifier_pattern"}:
+        out.add(text(node))
+    elif t == "pair_pattern":
+        _pattern_names(node.child_by_field_name("value"), out)
+    elif t in {"assignment_pattern", "object_assignment_pattern"}:
+        _pattern_names(node.child_by_field_name("left"), out)
+    elif t in {"required_parameter", "optional_parameter"}:
+        _pattern_names(node.child_by_field_name("pattern"), out)
+    elif t in {
+        "object_pattern",
+        "array_pattern",
+        "rest_pattern",
+        "formal_parameters",
+    }:
+        for child in node.named_children:
+            _pattern_names(child, out)
+
+
+def _scope_bindings(scope: Node) -> set[str]:
+    """Names a function (or catch clause) binds itself: parameters and the
+    `let`/`var`/`const` declarations in its body, nested functions excluded."""
+    names: set[str] = set()
+    if scope.type == "catch_clause":
+        _pattern_names(scope.child_by_field_name("parameter"), names)
+        return names
+    params = scope.child_by_field_name("parameters")
+    if params is not None:
+        _pattern_names(params, names)
+    else:
+        single = scope.child_by_field_name("parameter")  # `x => ...`
+        _pattern_names(single, names)
+    body = scope.child_by_field_name("body")
+    if body is None:
+        return names
+    stack = list(body.named_children) if body.type == "statement_block" else []
+    while stack:
+        cur = stack.pop()
+        if cur.type in _FN_SCOPE_TYPES or cur.type == "class_declaration":
+            continue
+        if cur.type == "variable_declarator":
+            _pattern_names(cur.child_by_field_name("name"), names)
+        elif cur.type in {"for_in_statement"}:
+            _pattern_names(cur.child_by_field_name("left"), names)
+        stack.extend(cur.named_children)
+    return names
+
+
+def _locally_shadowed(call: Node, name: str) -> bool:
+    """`name` is bound between the call and module scope by a parameter,
+    `let`/`var`/`const` or a `catch (name)`; a module-level or imported
+    function of that name is not the callee."""
+    cur = call.parent
+    while cur is not None and cur.type != "program":
+        if cur.type in _FN_SCOPE_TYPES or cur.type == "catch_clause":
+            if name in _scope_bindings(cur):
+                return True
+        cur = cur.parent
+    return False
+
+
 def _scoped_callee(caller: str, callee: str, module: str, fn_nodes: dict[str, Node]) -> str | None:
     """`build(id)` inside `<module>.createA.one`: the nearest enclosing scope
     that declares `build` (`<module>.createA.build`), nested scopes only."""
@@ -2056,6 +2144,17 @@ def _collect_imports(
                     specs[orig] = (src_mod, orig)
                     out[orig] = f"{src_mod}.{orig}"
         if "require(" in raw:
+            mdes = re.search(r"(?:const|let|var)\s*\{([^}]+)\}\s*=\s*require\(", raw)
+            if mdes:
+                # const { a, b: c } = require('./lib')
+                for part in mdes.group(1).split(","):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    orig, _colon, alias = part.partition(":")
+                    orig, alias = orig.strip(), (alias.strip() or orig.strip())
+                    specs[alias] = (src_mod, orig)
+                    out[alias] = f"{src_mod}.{orig}"
             mreq = re.search(r"(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=", raw)
             if mreq:
                 local = mreq.group(1)
@@ -2072,7 +2171,10 @@ def _collect_exports(tree: Node) -> dict[str, str]:
         if node.type not in {"export_statement", "expression_statement", "lexical_declaration"}:
             if not raw.strip().startswith("export ") and "module.exports" not in raw:
                 continue
-        m = re.search(r"export\s+default\s+([A-Za-z_][A-Za-z0-9_]*)", raw)
+        m = re.search(
+            r"export\s+default\s+(?:async\s+)?(?:function\*?\s+(?=[A-Za-z_])|class\s+(?=[A-Za-z_]))?([A-Za-z_][A-Za-z0-9_]*)",
+            raw,
+        )
         if m:
             out["default"] = m.group(1)
             out.setdefault(m.group(1), m.group(1))
@@ -2093,6 +2195,19 @@ def _collect_exports(tree: Node) -> dict[str, str]:
                     out[alias.strip()] = orig.strip()
                 else:
                     out[part] = part
+        m = re.search(r"module\.exports\s*=\s*\{([^}]*)\}", raw)
+        if m:
+            # module.exports = { a, b: c }
+            for part in m.group(1).split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                key, _colon, value = part.partition(":")
+                key, value = key.strip(), (value.strip() or key.strip())
+                if key.isidentifier() and value.isidentifier():
+                    out[key] = value
+        for mm in re.finditer(r"(?:module\.)?exports\.([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)", raw):
+            out[mm.group(1)] = mm.group(2)
         m = re.search(r"module\.exports\s*=\s*([A-Za-z_][A-Za-z0-9_]*)", raw)
         if m:
             out["default"] = m.group(1)
@@ -2309,6 +2424,27 @@ def _final_source(
             if hit and name in (exports_by_mod.get(hit[0]) or {}):
                 return hit
         return cand, name
+    return None
+
+
+def _imported_function(
+    src_mod: str,
+    orig: str,
+    exports_by_mod: dict[str, dict[str, str]],
+    known: set[str],
+    fn_nodes: dict[str, Node],
+) -> str | None:
+    """Scanned function an import names: through `index` barrels,
+    `export { a } from` / `export * from`, `export default <identifier>` and
+    CommonJS exports."""
+    if orig == "require":
+        orig = "default"
+    hit = _final_source(src_mod, orig, exports_by_mod, known) or (src_mod, orig)
+    for mod, name in (hit, (src_mod, orig), (f"{src_mod}.index", orig)):
+        exports = exports_by_mod.get(mod) or {}
+        local = exports.get(name) or name
+        if f"{mod}.{local}" in fn_nodes:
+            return f"{mod}.{local}"
     return None
 
 
