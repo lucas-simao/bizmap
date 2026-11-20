@@ -82,7 +82,15 @@ def _entry_label(node: dict[str, Any]) -> str:
     return f"{kind} {node.get('symbol') or node.get('path') or node.get('id')}"
 
 
-def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") -> dict[str, Any]:
+MAX_HTTP_HOPS = 5
+
+
+def build_report(
+    data: dict[str, Any], *, redact: bool = False, salt: str = "", cross_service: bool = False
+) -> dict[str, Any]:
+    """``cross_service`` counts entrypoints that reach data only through
+    other scanned services (resolved `calls_http`, up to MAX_HTTP_HOPS) in
+    `reaching_data` too; they are always reported as `reaching_data_via_http`."""
     r = Redactor(redact, salt)
     nodes = {n["id"]: n for n in data.get("nodes", [])}
     edges = data.get("edges", [])
@@ -123,21 +131,55 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
             stack.extend(forward.get(cur, []))
         return seen
 
-    def why_no_data(n: dict[str, Any]) -> tuple[str, bool]:
-        """(reason, reaches data in another service through HTTP)."""
+    http_memo: dict[str, tuple[int | None, str | None]] = {}
+
+    def http_reach(ep_id: str, stack: frozenset[str] = frozenset()) -> tuple[int | None, str | None]:
+        """(hops to the first service with data, None if none; why it stops):
+        follows resolved `calls_http` from everything the entrypoint reaches,
+        across services, without cycles, up to MAX_HTTP_HOPS."""
+        if ep_id in http_memo:
+            return http_memo[ep_id]
+        fns = reached_functions(ep_id)
+        targets = sorted({t for f in fns for t in http_out.get(f, [])} - stack - {ep_id})
+        unresolved = any(f in unresolved_http_from for f in fns)
+        if not targets:
+            result: tuple[int | None, str | None] = (None, "http_unresolved" if unresolved else None)
+        elif any(reach.get(t) for t in targets):
+            result = (1, None)
+        elif len(stack) + 1 >= MAX_HTTP_HOPS:
+            result = (None, "hop_limit")
+        else:
+            best: int | None = None
+            reasons: list[str] = []
+            for t in targets:
+                hops, why = http_reach(t, stack | {ep_id})
+                if hops is not None and (best is None or hops + 1 < best):
+                    best = hops + 1
+                elif why:
+                    reasons.append(why)
+            if best is not None:
+                result = (best, None)
+            elif "hop_limit" in reasons:
+                result = (None, "hop_limit")
+            elif "http_unresolved" in reasons or unresolved:
+                result = (None, "http_unresolved")
+            else:
+                result = (None, "target_without_data")
+        if not stack:  # a result inside a cycle depends on the path: memoize only from the top
+            http_memo[ep_id] = result
+        return result
+
+    def why_no_data(n: dict[str, Any]) -> tuple[str, int | None, str | None]:
+        """(reason, hops to data through other services, why the HTTP chain stops)."""
         if not handlers.get(n["id"]):
-            return "handler_not_resolved", False
+            return "handler_not_resolved", None, None
         fns = reached_functions(n["id"])
-        via_http = False
-        for f in fns:
-            for target in http_out.get(f, []):
-                if reach.get(target):
-                    via_http = True
+        hops, stop = http_reach(n["id"])
         if any((nodes.get(f) or {}).get("unresolved_calls") for f in fns) or n.get("unresolved_calls"):
-            return "unresolved_call", via_http
+            return "unresolved_call", hops, stop
         if any(f in http_out or f in unresolved_http_from or _strip_repo(f)[1] in unresolved_http_from for f in fns):
-            return "only_http", via_http
-        return "no_data_access", via_http
+            return "only_http", hops, stop
+        return "no_data_access", hops, stop
 
     by_kind: Counter[str] = Counter()
     reaching: Counter[str] = Counter()
@@ -151,19 +193,26 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
             reaching[kind] += 1
         else:
             repo, _ = _strip_repo(n["id"])
-            reason, via_http = why_no_data(n)
-            no_data_reasons[reason] += 1
+            reason, hops, stop = why_no_data(n)
+            via_http = hops is not None
             reaching_via_http += int(via_http)
-            no_data.append(
-                {
-                    "repo": r(repo or str(n.get("repo") or data.get("repo") or "")),
-                    "entrypoint": r(_entry_label(n)),
-                    "reason": reason,
-                    "reaches_data_via_http": via_http,
-                    "dynamic_table": bool(n.get("dynamic_table")),
-                    "unresolved_calls": len(n.get("unresolved_calls") or []),
-                }
-            )
+            if via_http and cross_service:
+                reaching[kind] += 1
+                continue
+            no_data_reasons[reason] += 1
+            row: dict[str, Any] = {
+                "repo": r(repo or str(n.get("repo") or data.get("repo") or "")),
+                "entrypoint": r(_entry_label(n)),
+                "reason": reason,
+                "reaches_data_via_http": via_http,
+                "dynamic_table": bool(n.get("dynamic_table")),
+                "unresolved_calls": len(n.get("unresolved_calls") or []),
+            }
+            if via_http:
+                row["http_hops"] = hops
+            elif reason == "only_http" and stop:
+                row["http_stop"] = stop
+            no_data.append(row)
 
     calls_http = [e for e in edges if e.get("type") == "calls_http"]
     via: Counter[str] = Counter(r.via(str(e.get("via") or "traced_client")) for e in calls_http)
@@ -227,6 +276,7 @@ def build_report(data: dict[str, Any], *, redact: bool = False, salt: str = "") 
             "without_data": sorted(no_data, key=lambda x: (x["repo"], x["entrypoint"])),
             "without_data_by_reason": dict(sorted(no_data_reasons.items())),
             "reaching_data_via_http": reaching_via_http,
+            "cross_service": cross_service,
         },
         "http": {
             "calls_http": len(calls_http),
@@ -257,6 +307,12 @@ _NO_DATA_LABELS = {
     "no_data_access": "no data access found",
 }
 
+_HTTP_STOP_LABELS = {
+    "http_unresolved": "its HTTP calls have no resolved target",
+    "target_without_data": "the services it calls reach no data either",
+    "hop_limit": f"no data within {MAX_HTTP_HOPS} HTTP hops",
+}
+
 _REASON_HINTS = {
     "target_not_scanned": "URL composed, but no scanned route matches — scan that service or ignore",
     "base_unknown": "path known, base URL not — map the env var under `services:` in bizmap.yaml",
@@ -281,12 +337,19 @@ def format_report(rep: dict[str, Any], *, limit: int = 20) -> str:
         out.append(f"  + {ep['reaching_only_unknown']} reaching only table:unknown (dynamic SQL / unscanned models)")
     for kind, row in ep["by_kind"].items():
         out.append(f"  {kind:<14} {row['reaching_data']:>5} / {row['total']}")
+    if ep.get("reaching_data_via_http"):
+        n_via = ep["reaching_data_via_http"]
+        if ep.get("cross_service"):
+            out.append(f"  ({n_via} of those reach data only through other services over HTTP; --cross-service)")
+        else:
+            out.append(
+                f"  + {n_via} reaching data through other scanned services over HTTP "
+                "(counted with --cross-service)"
+            )
     if ep["without_data"]:
         reasons = ep.get("without_data_by_reason") or {}
         detail = ", ".join(f"{_NO_DATA_LABELS.get(k, k)} {v}" for k, v in reasons.items())
         out.append(f"  without data ({len(ep['without_data'])}): {detail}")
-        if ep.get("reaching_data_via_http"):
-            out.append(f"    {ep['reaching_data_via_http']} of them reach data in another scanned service through HTTP")
         for row in ep["without_data"][:limit]:
             flags = []
             if row["dynamic_table"]:
@@ -294,7 +357,9 @@ def format_report(rep: dict[str, Any], *, limit: int = 20) -> str:
             if row.get("reason"):
                 flags.append(_NO_DATA_LABELS.get(row["reason"], row["reason"]))
             if row.get("reaches_data_via_http"):
-                flags.append("data via HTTP")
+                flags.append(f"data via HTTP, {row.get('http_hops')} hop(s)")
+            elif row.get("http_stop"):
+                flags.append(_HTTP_STOP_LABELS.get(row["http_stop"], row["http_stop"]))
             if row["unresolved_calls"]:
                 flags.append(f"{row['unresolved_calls']} unresolved calls")
             suffix = f"  ({', '.join(flags)})" if flags else ""

@@ -403,6 +403,12 @@ def why_cmd(column: str, graph_path: Path) -> None:
 @click.option("--json", "as_json", is_flag=True, help="Print the report as JSON.")
 @click.option("--limit", type=int, default=20, show_default=True, help="Max rows per list.")
 @click.option(
+    "--cross-service",
+    "cross_service",
+    is_flag=True,
+    help="Count entrypoints that reach data only through other scanned services (calls_http) as reaching data.",
+)
+@click.option(
     "--config",
     "config_path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -418,6 +424,7 @@ def report_cmd(
     as_json: bool,
     limit: int,
     config_path: Path | None,
+    cross_service: bool,
 ) -> None:
     """Coverage report: entrypoints reaching data, HTTP links, unresolved reasons.
 
@@ -467,7 +474,7 @@ def report_cmd(
             "use --salt-file PATH (or --salt / BIZMAP_REDACT_SALT) to compare runs",
             err=True,
         )
-    rep = build_report(data, redact=redact, salt=salt or "")
+    rep = build_report(data, redact=redact, salt=salt or "", cross_service=cross_service)
     if as_json:
         click.echo(json.dumps(rep, indent=2, sort_keys=True))
     else:
