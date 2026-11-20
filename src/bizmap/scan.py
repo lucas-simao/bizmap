@@ -611,13 +611,16 @@ def _apply_py_access(graph: Graph, schema: Schema, access: PyAccess, fid: str) -
     target = _ensure_access_target(graph, schema, rolled)
     if not target:
         return None
-    graph.add_edge(
+    edge = graph.add_edge(
         _kind_edge(access.kind),
         fid,
         target,
         confidence=access.confidence,
         evidence=access.evidence,
     )
+    op = getattr(access, "op", None)
+    if op and edge.type == "writes":
+        edge.attrs["ops"] = sorted(set(edge.attrs.get("ops") or []) | {op})
     return rolled
 
 

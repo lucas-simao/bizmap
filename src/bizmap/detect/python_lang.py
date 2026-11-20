@@ -832,6 +832,7 @@ class PyAccess:
     confidence: Confidence
     evidence: Evidence
     target_kind: str = "table"
+    op: str | None = None  # INSERT / UPDATE / DELETE when the ORM call says so
 
 
 @dataclass
@@ -1843,12 +1844,22 @@ class PythonAnalyzer:
                 return
             if method == "delete":
                 t = cols[0][0]
-                analysis.accesses.append(PyAccess(fn, "write", t, None, Confidence.EXACT, evidence))
+                analysis.accesses.append(
+                    PyAccess(fn, "write", t, None, Confidence.EXACT, evidence, op="DELETE")
+                )
                 return
             # insert/update table-level; columns come from .values
             t, c = cols[0]
             analysis.accesses.append(
-                PyAccess(fn, "write", t, c, Confidence.INFERRED if not c else Confidence.EXACT, evidence)
+                PyAccess(
+                    fn,
+                    "write",
+                    t,
+                    c,
+                    Confidence.INFERRED if not c else Confidence.EXACT,
+                    evidence,
+                    op=method.upper(),
+                )
             )
             return
         if method == "values":
@@ -1880,11 +1891,16 @@ class PythonAnalyzer:
                 table, _ = _resolve_table_ref(arg, bindings, models)
             if table:
                 kind = "write"
+                op = "INSERT" if method == "add" else "DELETE"
                 if cols and method == "add":
                     for c in cols:
-                        analysis.accesses.append(PyAccess(fn, kind, table, c, Confidence.EXACT, evidence))
+                        analysis.accesses.append(
+                            PyAccess(fn, kind, table, c, Confidence.EXACT, evidence, op=op)
+                        )
                 else:
-                    analysis.accesses.append(PyAccess(fn, kind, table, None, Confidence.INFERRED, evidence))
+                    analysis.accesses.append(
+                        PyAccess(fn, kind, table, None, Confidence.INFERRED, evidence, op=op)
+                    )
             return
         if method == "query" and pos:
             table, col = _resolve_table_ref(pos[0], bindings, models)
