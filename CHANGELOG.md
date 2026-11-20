@@ -19,6 +19,10 @@
   changed path is under a scanned root (`--prefix` hint without git).
 - **PR comment size**: rows ranked by reach and capped (`--max-rows`), functions
   with no route/table summarized, hard cap `--max-chars 60000`, `--details-url`.
+- **Action hardening**: a failed comment listing skips posting instead of
+  creating a duplicate; install/setup failures still produce a failure
+  comment; `ref: <head>` checkouts diff from the merge base; the job fails on
+  BizMap errors only with `fail-on-error: "true"` (advisory by default).
 - **Action robustness**: fork PRs write only the step summary; only the
   bot's own marker comment is updated; base commit fetched with a clear error;
   non-PR events are skipped; non-ASCII paths (`core.quotepath=false` and
