@@ -23,13 +23,13 @@ jobs:
             "py_body": ("orders.py", lambda n: 'def f(cur):\n    q = "SELECT id FROM orders" + ' + chain(n, '" "') + "\n    cur.execute(q)\n"),
           }
           for name, (fname, gen) in cases.items():
-              for n in (250, 500, 1000):
+              for n in (1000, 5000):
                   with tempfile.TemporaryDirectory() as d:
                       root = Path(d)
                       (root / "go.mod").write_text("module example.com/shop\n\ngo 1.22\n")
                       (root / "schema.sql").write_text("CREATE TABLE orders (id int primary key, status text);\n")
                       (root / fname).write_text(gen(n))
-                      pr = cProfile.Profile() if n == 1000 else None
+                      pr = cProfile.Profile() if n == 5000 else None
                       t = time.perf_counter()
                       if pr: pr.enable()
                       scan_path(root)
