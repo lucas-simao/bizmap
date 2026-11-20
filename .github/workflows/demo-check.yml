@@ -1,0 +1,42 @@
+# Temporary (branch scratch/demo-check, never merged): runs BizMap on the new bizmap-demo.
+name: demo-check
+on: push
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bizmap: ["bizmap==0.4.1", "git+https://github.com/lucas-simao/bizmap@main"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install "${{ matrix.bizmap }}" && bizmap --version
+      - name: demo
+        run: |
+          set -x
+          git clone -q -b demo/v0.4 demo.bundle demo
+          cd demo
+          for b in order-discount schema-only migration-multi extra-handler; do git branch -q pr/$b origin/pr/$b; done
+          echo "::group::scan"; COLUMNS=100 bizmap scan . --mermaid; echo "::endgroup::"
+          echo "::group::mmd"; cat bizmap.graph.mmd; echo "::endgroup::"
+          echo "::group::report"; bizmap report; echo "::endgroup::"
+          echo "::group::report-paths"; bizmap report .; echo "::endgroup::"
+          echo "::group::why-status"; bizmap why orders.status; echo "::endgroup::"
+          echo "::group::why-payments"; bizmap why payments.status; echo "::endgroup::"
+          echo "::group::why-history"; bizmap why order_status_history.new_status; echo "::endgroup::"
+          echo "::group::why-email"; bizmap why customers.email; echo "::endgroup::"
+          for b in order-discount schema-only migration-multi extra-handler; do
+            git checkout -q pr/$b
+            bizmap scan . --out /tmp/$b.json -q > /dev/null
+            echo "::group::impact-$b"
+            git diff --unified=0 demo/v0.4...pr/$b | bizmap impact --graph /tmp/$b.json --prefix .
+            echo "::endgroup::"
+          done
+          git checkout -q demo/v0.4
+          cd ..
+          mkdir work && git clone -q demo work/bizmap-demo
+          echo "::group::discover"; bizmap scan --discover work --list; echo "::endgroup::"
+          echo "::group::shop-only"; cd demo && bizmap scan shop --out /tmp/shop.json; echo "::endgroup::"
+          echo "::group::json-head"; python -c "import json;d=json.load(open('bizmap.graph.json'));print(d['version'],d.get('repos'),d.get('services'),len(d['nodes']),len(d['edges']))"; echo "::endgroup::"
