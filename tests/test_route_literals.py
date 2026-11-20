@@ -765,3 +765,69 @@ app.get('/v1/reports/latest', h);
     assert module_edges == [], module_edges
     assert _calls_http_from(graph, function_id("src.index.handle")) == {"api/entrypoint:http:GET:/v1/report-video"}
     assert _calls_http_from(graph, function_id("src.index.latest")) == {"api/entrypoint:http:GET:/v1/reports/latest"}
+
+
+def test_object_member_helper_is_attributed_and_never_suffix_matched(tmp_path: Path) -> None:
+    """Problem 3: `paths.pdfReport(id)` is an object-member helper. Used inside
+    `${API_BASE_URL}/api/v2${...}` it must not link to /api/v1/client/...; an
+    uncalled member helper is kept but matched whole only."""
+    web, api = _two_repos(
+        tmp_path,
+        {
+            "src/paths.ts": """
+export const paths = {
+  pdfReport: (id: string) => `/items/${id}/pdf-report`,
+  nested: { orphan: (id: string) => `/items/${id}/pdf-report` },
+};
+""",
+            "src/pdf.ts": """
+import { paths } from './paths';
+import { container } from './c';
+
+const API_BASE_URL = window.__cfg.base;
+
+export const makePdf = (id: string) =>
+  fetch(`${API_BASE_URL}/api/v2${paths.pdfReport(id)}`, { method: 'POST' });
+
+export const exportZ = (id: string) => container.resolve('http').get(paths.zed(id));
+""",
+            "src/zed.ts": "",
+        },
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.post('/api/v1/client/items/:id/pdf-report', h);
+""",
+    )
+    graph = scan_paths([web, api])
+    web_links = [
+        (e.from_id, e.to_id, e.confidence.value)
+        for e in graph.edges.values()
+        if e.type == "calls_http" and e.from_id.startswith("web/")
+    ]
+    assert web_links == [], web_links
+
+
+def test_object_member_helper_direct_call_moves_to_caller(tmp_path: Path) -> None:
+    web, api = _two_repos(
+        tmp_path,
+        {
+            "src/paths.ts": "export const paths = { report: (id: string) => `/v9/reports/${id}` };\n",
+            "src/screens.ts": """
+import { paths } from './paths';
+import { container } from './c';
+
+export const loadReport = (id: string) => container.resolve('http').get(paths.report(id));
+""",
+        },
+        """
+import express from 'express';
+const app = express();
+export function h(req: any, res: any) { res.json({}); }
+app.get('/v9/reports/:id', h);
+""",
+    )
+    graph = scan_paths([web, api])
+    assert _calls_http_from(graph, function_id("src.screens.loadReport")) == {"api/entrypoint:http:GET:/v9/reports/:id"}
+    assert not [e for e in graph.edges.values() if e.type == "calls_http" and ".module" in e.from_id]

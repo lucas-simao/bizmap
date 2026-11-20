@@ -860,6 +860,8 @@ class JsRouteLiteral:
     base_hole: str | None = None
     # concrete base every caller passes for `base_hole` (see _bind_param_bases)
     bound_base: str | None = None
+    # helper defined as an object property (`paths.site`), called as obj.key()
+    member_helper: bool = False
 
 
 @dataclass
@@ -2826,6 +2828,29 @@ def _clean_route_literal(value: str | None) -> str | None:
     return "/" + "/".join(parts)
 
 
+def _object_member_owner(top: Node) -> str | None:
+    """`paths.pdfReport` when ``top`` is returned by an arrow/method stored as a
+    property of a top-level `const paths = { ... }` (nested objects allowed)."""
+    keys: list[str] = []
+    cur = top.parent
+    while cur is not None:
+        if cur.type == "pair":
+            key = cur.child_by_field_name("key")
+            if key is not None:
+                keys.append(_unquote(text(key)))
+        elif cur.type == "method_definition":
+            name = cur.child_by_field_name("name")
+            if name is not None:
+                keys.append(text(name))
+        elif cur.type == "variable_declarator":
+            name = _declarator_name(cur)
+            return ".".join([name, *reversed(keys)]) if name and keys else None
+        elif cur.type in {"function_declaration", "class_declaration", "program"}:
+            return None
+        cur = cur.parent
+    return None
+
+
 def _module_level_literal_consts(tree: Node) -> set[str]:
     """Names of top-level `const X = '<string/template/concat>'` declarations."""
     out: set[str] = set()
@@ -2897,6 +2922,11 @@ def _call_target_qual(call: Node, module: str, imports: dict[str, str], function
             target = imports.get(text(obj))
             if target and target.endswith(".*"):
                 return f"{target[:-2]}.{text(prop)}"
+            if target:
+                # `import { paths } from './paths'` → paths.pdfReport(id)
+                return f"{target}.{text(prop)}"
+            # local object helper: `const paths = { site: (id) => ... }`
+            return f"{module}.{text(obj)}.{text(prop)}"
     return None
 
 
@@ -2998,9 +3028,16 @@ def _collect_route_literals(
             and call_callee_name(top.parent.parent).lower() == "fetch"
         )
         symbol = _enclosing_symbol(top, module)
+        member = False
         if const_name and symbol.endswith(".module"):
             symbol = f"{module}.{const_name}"
             is_helper = True
+        elif is_helper and symbol.endswith(".module"):
+            owner = _object_member_owner(top)
+            if owner:
+                # `export const paths = { pdfReport: (id) => `/items/${id}/...` }`
+                symbol = f"{module}.{owner}"
+                member = True
         dedupe = (symbol, path, method)
         if dedupe in seen:
             continue
@@ -3016,6 +3053,7 @@ def _collect_route_literals(
                 helper=is_helper,
                 explicit_base=bool(value) and (value.startswith("{") or "://" in value),
                 base_hole=(_HOLE.match(value).group(1) if value and _HOLE.match(value) else None),
+                member_helper=member,
             )
         )
 

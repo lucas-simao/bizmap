@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **False link from object-member path helpers**: a helper stored as an
+  object property (`export const paths = { pdfReport: (id) => … }`) had no
+  symbol of its own, so its literal stayed on `<module>.module` without the
+  caller's base and was suffix-matched (`${API_BASE_URL}/api/v2${paths.pdfReport(id)}`
+  linked to `/api/v1/client/items/:id/pdf-report`). Member helpers now get
+  their own symbol (`paths.pdfReport`), `obj.key(...)` calls on local objects
+  and named imports are their call sites, and a literal left on a
+  helper/const with no caller found is matched whole only.
+
 - **axios/ky instances through barrels and inline**: imports are resolved to
   the module that actually defines the name (`index` files,
   `export { a as b } from`, `export * from`) before client bases propagate, so

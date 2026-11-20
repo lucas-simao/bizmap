@@ -2071,7 +2071,7 @@ def _scan_one(
         }
         base_item["explicit_base"] = True if getattr(lit, "explicit_base", False) else None
         base_item["bound_base"] = getattr(lit, "bound_base", None)
-        is_fn = lit.symbol in js_analysis.functions
+        is_fn = lit.symbol in js_analysis.functions or getattr(lit, "member_helper", False)
         wanted = "call" if is_fn else "ref"
         all_sites = (
             [hc for hc in callers_of.get(lit.symbol) or [] if getattr(hc, "kind", "call") == wanted]
@@ -2097,6 +2097,8 @@ def _scan_one(
             continue
         if getattr(lit, "helper", False):
             base_item["origin"] = "path_helper" if is_fn else "module_const"
+            # nobody was found sending it: its base is unknown, match whole only
+            base_item["explicit_base"] = True
         _stash_route_literal(
             graph,
             function_id(lit.symbol),
