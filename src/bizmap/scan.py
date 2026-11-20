@@ -1112,12 +1112,18 @@ def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
             kwargs["confidence"] = Confidence.UNKNOWN.value
         graph.add_node(eid, "entrypoint", **kwargs)
         hid = function_id(route.handler)
+        span_attrs: dict = {}
+        if getattr(route, "span", None):
+            # the inline handler's own lines: in a chain
+            # (`new Hono().post(a).post(b)`) the call starts where the chain does
+            span_attrs = {"start_line": route.span[0], "end_line": route.span[1]}
         graph.add_node(
             hid,
             "function",
             name=route.handler,
             language="javascript",
             evidence={"file": route.file, "line": route.line, "symbol": route.handler},
+            **span_attrs,
         )
         graph.add_edge(
             "triggers",
