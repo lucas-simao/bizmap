@@ -250,7 +250,8 @@ def _commit_time(repo: Path, git_dir: Path, common: Path, branch: str | None) ->
     candidates = []
     if branch:
         candidates.append(common / "refs" / "heads" / branch)
-    candidates += [git_dir / "HEAD", common / "packed-refs"]
+    # a packed branch ref was last written with packed-refs, not with HEAD
+    candidates += [common / "packed-refs", git_dir / "HEAD"] if branch else [git_dir / "HEAD", common / "packed-refs"]
     for path in candidates:
         try:
             return int(path.stat().st_mtime), "ref-mtime"
