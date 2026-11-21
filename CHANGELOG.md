@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.13.1 — 2026-11-21
+
 ### Fixed
 
 - **Firestore names built at runtime are counted** in Go and JS/TS:

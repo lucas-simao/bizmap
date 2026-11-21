@@ -55,7 +55,7 @@ def _url_blob(graph) -> str:
 
 
 def test_graph_version() -> None:
-    assert GRAPH_VERSION == "0.13.0"
+    assert GRAPH_VERSION == "0.13.1"
 
 
 def test_ts_factory_returned_axios_instance(tmp_path: Path) -> None:
