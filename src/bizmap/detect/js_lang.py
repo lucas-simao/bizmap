@@ -598,6 +598,10 @@ def _object_prop(obj: Node | None, keys: tuple[str, ...], consts: dict[str, str]
     val_n = _object_prop_node(obj, keys)
     if val_n is None:
         return None, False
+    if val_n.type in {"shorthand_property_identifier", "shorthand_property_identifier_pattern"}:
+        # `{ baseURL }`: the variable of that name
+        name = text(val_n)
+        return (consts[name], "{" in consts[name]) if name in consts else (None, False)
     return _resolve_js_string(val_n, consts)
 
 
@@ -1011,6 +1015,7 @@ class JsAnalyzer:
         _LITERAL_TOP.clear()
         _SCOPE_BINDINGS.clear()
         _ENCLOSING_SYMBOL.clear()
+        _CLIENT_BASES.clear()
         clear_typed_walks()
         clear_parent_index()
         yaml_constants = constants or {}
@@ -1029,6 +1034,8 @@ class JsAnalyzer:
             parsed.append((path, rel_file, module, tree, source))
         _KNOWN_MODULES.clear()
         _KNOWN_MODULES.update(_path_to_module(p[1]) for p in parsed)
+        _MODULE_DIRS.clear()
+        _MODULE_DIRS.update({p[2]: tuple(b for b in p[1].split("/")[:-1] if b and b != ".") for p in parsed})
 
         consts_by_mod: dict[str, dict[str, str]] = {}
         routers_by_mod: dict[str, dict[str, str]] = {}
@@ -1044,6 +1051,12 @@ class JsAnalyzer:
         trees_by_mod: dict[str, Node] = {}
         mounts: list[tuple[str, str, str, str, str]] = []
         pending_import_calls: list[tuple[str, tuple[str, str], str, int]] = []
+        # `X.m(...)` on an object (or factory instance) declared here or imported:
+        # (caller, module the name lives in, name, member, file, line)
+        pending_member_calls: list[tuple[str, str, str, str, str, int]] = []
+        # imported functions passed by reference (`queryFn: listWidgets`): inferred
+        pending_ref_imports: list[tuple[str, tuple[str, str], str, int]] = []
+        instances_by_mod: dict[str, dict[str, str]] = {}
 
         for _path, rel_file, module, tree, _src in parsed:
             consts = _collect_consts(tree)
@@ -1062,6 +1075,7 @@ class JsAnalyzer:
             factories_by_mod[module] = _collect_client_factories(tree, consts)
             class_ctors_by_mod[module] = _collect_class_ctors(tree)
             trees_by_mod[module] = tree
+            instances_by_mod[module] = _collect_instances(tree)
             file_quals: list[str] = []  # functions this file declares (fn_nodes keeps growing)
             for node in typed_walk(tree, _DECL_TYPES, JS_TYPES):
                 # declarations only: a named function *expression* is registered
@@ -1113,7 +1127,16 @@ class JsAnalyzer:
                     }:
                         qual = _fn_qual(value, module)
                         parent_qual = qual.rsplit(".", 1)[0] if qual else None
-                        if qual and parent_qual and parent_qual != module and _returned_member_key(value):
+                        if qual and _object_member_key(value) and not _returned_member_key(value):
+                            # `export const X = { m: (..) => .. }`: X.m is a function
+                            analysis.functions[qual] = (rel_file, line_of(value))
+                            analysis.function_ends[qual] = value.end_point[0] + 1
+                            fn_nodes[qual] = value
+                            file_quals.append(qual)
+                            why = _js_why(value)
+                            if why:
+                                analysis.function_why[qual] = why
+                        elif qual and parent_qual and parent_qual != module and _returned_member_key(value):
                             analysis.functions[qual] = (rel_file, line_of(value))
                             analysis.function_ends[qual] = value.end_point[0] + 1
                             fn_nodes[qual] = value
@@ -1131,48 +1154,41 @@ class JsAnalyzer:
                 for q in file_quals
                 if q.startswith(module + ".") and analysis.functions.get(q, ("",))[0] == rel_file
             }
-            for node in typed_walk(tree, frozenset({"call_expression"}), JS_TYPES):
+            linker = _CallLinker(
+                module, rel_file, specs, fn_nodes, fn_by_span, analysis.calls,
+                pending_import_calls, pending_ref_imports, pending_member_calls,
+            )
+            for node in typed_walk(tree, frozenset({"call_expression", "jsx_attribute"}), JS_TYPES):
+                if node.type == "jsx_attribute":
+                    # `onClick={rename}` / `onSubmit={form.save}`
+                    attr = node.named_children[0] if node.named_children else None
+                    value = node.named_children[-1] if len(node.named_children) > 1 else None
+                    if attr is not None and text(attr).startswith("on") and value is not None:
+                        if value.type == "jsx_expression" and value.named_children:
+                            linker.ref(value.named_children[0], node)
+                    continue
+                args = node.child_by_field_name("arguments")
+                for arg in args.named_children if args is not None else ():
+                    if arg.type in {"identifier", "member_expression"}:
+                        linker.ref(arg, node)
+                    elif arg.type == "object":
+                        for pair in arg.named_children:
+                            if pair.type == "pair":
+                                linker.ref(pair.child_by_field_name("value"), node)
                 fn_n = node.child_by_field_name("function")
                 if fn_n is not None and fn_n.type == "member_expression":
-                    # `import * as lib from './lib'; lib.top()`
                     obj, prop = fn_n.child_by_field_name("object"), fn_n.child_by_field_name("property")
                     if obj is not None and prop is not None and obj.type == "identifier":
-                        spec = specs.get(text(obj))
                         caller = _enclosing_symbol(node, module)
-                        if (
-                            spec
-                            and spec[1] in {"*", "require"}
-                            and not caller.endswith(".module")
-                            and not _locally_shadowed(node, text(obj))
-                        ):
-                            pending_import_calls.append((caller, (spec[0], text(prop)), rel_file, line_of(node)))
+                        if not caller.endswith(".module"):
+                            linker.member(node, obj, prop, caller)
                     continue
                 if fn_n is None or fn_n.type != "identifier":
                     continue
                 caller = _enclosing_symbol(node, module)
                 if caller.endswith(".module"):
                     continue
-                name = text(fn_n)
-                callee = _scoped_callee(caller, name, module, fn_nodes)
-                if callee is None:
-                    scope = _binding_scope(node, name)
-                    if scope is not None:
-                        # `const report = (m) => ...` in an anonymous callback or
-                        # an object-literal method: that local function is the
-                        # callee; a parameter / plain variable is not a function
-                        bound = _bound_function(scope, name)
-                        callee = fn_by_span.get((bound.start_byte, bound.end_byte)) if bound is not None else None
-                        if callee is None or callee == caller:
-                            continue
-                if callee is None and f"{module}.{name}" in fn_nodes and f"{module}.{name}" != caller:
-                    callee = f"{module}.{name}"  # module-level function
-                if callee:
-                    analysis.calls.append(
-                        JsCall(caller=caller, callee=callee, file=rel_file, line=line_of(node), exact=True)
-                    )
-                elif name in specs:
-                    # resolved once every file is indexed (target may come later)
-                    pending_import_calls.append((caller, specs[name], rel_file, line_of(node)))
+                linker.name(node, text(fn_n), caller, exact=True)
             wrappers_by_mod[module] = _collect_wrappers(tree, consts, clients)
 
         # imported functions: keep calls whose target is a scanned function
@@ -1183,6 +1199,19 @@ class JsAnalyzer:
             if target and target != caller:
                 analysis.calls.append(
                     JsCall(caller=caller, callee=target, file=call_file, line=call_line, exact=True)
+                )
+
+        for caller, (src_mod, orig), call_file, call_line in pending_ref_imports:
+            target = _imported_function(src_mod, orig, exports_by_mod, known_mods, fn_nodes)
+            if target and target != caller:
+                analysis.calls.append(JsCall(caller=caller, callee=target, file=call_file, line=call_line))
+        for caller, src_mod, name, member, call_file, call_line in pending_member_calls:
+            target = _member_function(
+                src_mod, name, member, exports_by_mod, known_mods, fn_nodes, instances_by_mod, import_specs_by_mod
+            )
+            if target and target != caller:
+                analysis.calls.append(
+                    JsCall(caller=caller, callee=target, file=call_file, line=call_line, exact=False)
                 )
 
         _import_path_helpers(consts_by_mod, import_specs_by_mod)
@@ -1622,6 +1651,23 @@ class JsAnalyzer:
                 client_unknown=client_unknown,
             )
         )
+        if override is None and path_val and base and base == clients.get(recv):
+            # the same client parameter given another base elsewhere: the
+            # call goes out through that base too
+            for other in _other_client_bases(module, recv, base):
+                url = _normalize_http_url(_join_route(other, path_val))
+                if url != composed and _looks_like_http_path(url):
+                    analysis.http_calls.append(
+                        JsHttpCall(
+                            method=http_method,
+                            url=url,
+                            file=rel_file,
+                            line=line_of(node),
+                            symbol=enclosing,
+                            unresolved=path_unresolved or ("{" in url),
+                            client_unknown=False,
+                        )
+                    )
         return True
 
     def _handler_symbol(
@@ -1887,7 +1933,7 @@ def _fn_own_name(cur: Node) -> str | None:
         parent = parent_of(cur)
         if parent is not None and parent.type == "variable_declarator":
             return _declarator_name(parent) or None
-        key = _returned_member_key(cur)
+        key = _returned_member_key(cur) or _object_member_key(cur)
         if key:
             return key
     if cur.type in _NAMED_FN_TYPES:
@@ -1898,10 +1944,55 @@ def _fn_own_name(cur: Node) -> str | None:
         parent = parent_of(cur)
         if parent is not None and parent.type == "variable_declarator":
             return _declarator_name(parent) or None
-        key = _returned_member_key(cur)
+        key = _returned_member_key(cur) or _object_member_key(cur)
         if key:
             return key
     return None
+
+
+_OBJECT_WRAPPERS = frozenset({"parenthesized_expression", "as_expression", "satisfies_expression"})
+
+
+def _declared_object_name(obj: Node | None) -> str | None:
+    """`X` for the object of a module-level `[export] const X = { ... }`
+    (also `{ ... } as const` / `satisfies T`): an object of methods, as an
+    API client module is (`export const widgetsHttpClient = { list: ... }`)."""
+    if obj is None or obj.type != "object":
+        return None
+    up = parent_of(obj)
+    while up is not None and up.type in _OBJECT_WRAPPERS:
+        up = parent_of(up)
+    if up is None or up.type != "variable_declarator":
+        return None
+    decl = parent_of(up)
+    if decl is None or decl.type not in {"lexical_declaration", "variable_declaration"}:
+        return None
+    top = parent_of(decl)
+    if top is not None and top.type == "export_statement":
+        top = parent_of(top)
+    if top is None or top.type != "program":
+        return None
+    name = _declarator_name(up)
+    return name if name and name.isidentifier() else None
+
+
+def _object_member_key(fn: Node) -> str | None:
+    """`list` for the function in `const X = { list: (p) => ... }` at module
+    level (also `list() {}` / `list: function () {}`): a member of an object of
+    methods, known as `X.list`."""
+    if fn.type == "method_definition":
+        obj = parent_of(fn)
+        key = fn.child_by_field_name("name")
+    else:
+        pair = parent_of(fn)
+        if pair is None or pair.type != "pair" or pair.child_by_field_name("value") != fn:
+            return None
+        obj = parent_of(pair)
+        key = pair.child_by_field_name("key")
+    if _declared_object_name(obj) is None:
+        return None
+    name = _unquote(text(key)) if key is not None else ""
+    return name if name.isidentifier() else None
 
 
 def _returned_member_key(fn: Node) -> str | None:
@@ -1945,6 +2036,10 @@ def _fn_qual(fn: Node, module: str) -> str | None:
             name = _fn_own_name(cur)
             if name and cur.type != "method_definition":
                 chain.append(name)
+        elif cur.type == "object":
+            obj_name = _declared_object_name(cur)
+            if obj_name:
+                chain.append(obj_name)  # `const X = { m: ... }` -> X.m
         cur = parent_of(cur)
     return ".".join([module, *reversed(chain)])
 
@@ -2158,11 +2253,12 @@ def _collect_consts(tree: Node) -> dict[str, str]:
                 pval = pair.child_by_field_name("value")
                 if key is None or pval is None:
                     continue
-                v, _u = _resolve_js_string(pval, consts)
+                v, _u = _resolve_js_string(_unwrap_fallback(pval), consts)
                 if v is not None:
                     consts[f"{name}.{_unquote(text(key))}"] = v
             continue
-        val, unresolved = _resolve_js_string(value, consts)
+        # `import.meta.env.X as string | undefined`, `raw ?? ''`: the env
+        val, unresolved = _resolve_js_string(_unwrap_fallback(value), consts)
         if val is not None:
             consts[name] = val
             _ = unresolved
@@ -2642,17 +2738,25 @@ def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, J
             return
         params = _fn_param_names(fn_node)
         local_bases: dict[str, str] = {}
+        # strings built in the body (`const baseURL = `${baseUrl}/api/v1``):
+        # `axios.create({ baseURL })` reads them; parameters stay `{param}` holes
+        scope = dict(consts)
         for node in typed_walk(fn_node, frozenset({"variable_declarator"}), JS_TYPES):
             dname = _declarator_name(node)
             value = node.child_by_field_name("value")
             if not dname or value is None:
                 continue
-            base = _create_call_base(value, consts)
+            if value.type in {"template_string", "string", "binary_expression"}:
+                built, _u = _resolve_js_string(value, scope)
+                if built:
+                    scope[dname] = built
+                continue
+            base = _create_call_base(value, scope)
             if base is not None:
                 local_bases[dname] = base
         body = fn_node.child_by_field_name("body")
         if body is not None:
-            implicit = _create_call_base(body, consts)
+            implicit = _create_call_base(body, scope)
             if implicit:
                 factories[name] = JsClientFactory(base=implicit, params=params)
                 return
@@ -2664,7 +2768,7 @@ def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, J
             if expr is None:
                 continue
             expr = unwrap_callee_expr(expr) or expr
-            base = _create_call_base(expr, consts)
+            base = _create_call_base(expr, scope)
             if base:
                 factories[name] = JsClientFactory(base=base, params=params)
                 return
@@ -2863,6 +2967,148 @@ def _imported_function(
     return None
 
 
+class _CallLinker:
+    """Calls one file makes: by name (`listMembers(id)`), on an object or
+    factory instance (`client.list(p)`), and functions passed by reference
+    (`queryFn: listWidgets`, `mutationFn: client.create`, `onClick={X.m}`),
+    which count as calls by whoever passes them. Imported targets are queued
+    and resolved once every file is indexed."""
+
+    def __init__(
+        self,
+        module: str,
+        rel_file: str,
+        specs: dict[str, tuple[str, str]],
+        fn_nodes: dict[str, Node],
+        fn_by_span: dict[tuple[int, int], str],
+        calls: list[JsCall],
+        pending_import_calls: list[tuple[str, tuple[str, str], str, int]],
+        pending_ref_imports: list[tuple[str, tuple[str, str], str, int]],
+        pending_member_calls: list[tuple[str, str, str, str, str, int]],
+    ) -> None:
+        self.module, self.rel_file, self.specs = module, rel_file, specs
+        self.fn_nodes, self.fn_by_span, self.calls = fn_nodes, fn_by_span, calls
+        self.pending_import_calls = pending_import_calls
+        self.pending_ref_imports = pending_ref_imports
+        self.pending_member_calls = pending_member_calls
+
+    def member(self, at: Node, obj: Node, prop: Node, caller: str) -> None:
+        """`X.m` called or passed at ``at``."""
+        if _locally_shadowed(at, text(obj)):
+            return
+        spec = self.specs.get(text(obj))
+        line = line_of(at)
+        if spec and spec[1] in {"*", "require"}:
+            self.pending_import_calls.append((caller, (spec[0], text(prop)), self.rel_file, line))
+        elif spec:
+            # `import { widgetsHttpClient as client } ...; client.list()`
+            self.pending_member_calls.append((caller, spec[0], spec[1], text(prop), self.rel_file, line))
+        else:
+            # `const X = { m: .. }` / `const X = createY(..)` in this file
+            self.pending_member_calls.append((caller, self.module, text(obj), text(prop), self.rel_file, line))
+
+    def name(self, at: Node, name: str, caller: str, exact: bool) -> None:
+        """A function named ``name`` called (``exact``) or passed at ``at``."""
+        module, fn_nodes = self.module, self.fn_nodes
+        callee = _scoped_callee(caller, name, module, fn_nodes)
+        if callee is None:
+            scope = _binding_scope(at, name)
+            if scope is not None:
+                # `const report = (m) => ...` in an anonymous callback or
+                # an object-literal method: that local function is the
+                # callee; a parameter / plain variable is not a function
+                bound = _bound_function(scope, name)
+                callee = self.fn_by_span.get((bound.start_byte, bound.end_byte)) if bound is not None else None
+                if callee is None or callee == caller:
+                    return
+        if callee is None and f"{module}.{name}" in fn_nodes and f"{module}.{name}" != caller:
+            callee = f"{module}.{name}"  # module-level function
+        if callee:
+            self.calls.append(JsCall(caller=caller, callee=callee, file=self.rel_file, line=line_of(at), exact=exact))
+        elif name in self.specs:
+            entry = (caller, self.specs[name], self.rel_file, line_of(at))
+            if exact:
+                self.pending_import_calls.append(entry)
+            elif self.specs[name][1] not in {"*", "require"}:
+                self.pending_ref_imports.append(entry)
+
+    def ref(self, ref: Node | None, at: Node) -> None:
+        """A function passed by reference at ``at`` (an argument, a value in
+        an object argument, a JSX `on...` attribute)."""
+        if ref is None or ref.type not in {"identifier", "member_expression"}:
+            return
+        caller = _enclosing_symbol(at, self.module)
+        if caller.endswith(".module"):
+            return
+        if ref.type == "identifier":
+            self.name(at, text(ref), caller, exact=False)
+            return
+        obj, prop = ref.child_by_field_name("object"), ref.child_by_field_name("property")
+        if obj is not None and prop is not None and obj.type == "identifier":
+            self.member(at, obj, prop, caller)
+
+
+def _collect_instances(tree: Node) -> dict[str, str]:
+    """`X -> createY` for a module-level `[export] const X = createY(...)`: an
+    object a factory made (its methods are `createY.m`)."""
+    out: dict[str, str] = {}
+    for stmt in tree.named_children:
+        decl = stmt
+        if decl.type == "export_statement":
+            decl = decl.child_by_field_name("declaration") or next(
+                (c for c in decl.named_children if c.type in {"lexical_declaration", "variable_declaration"}), None
+            )
+        if decl is None or decl.type not in {"lexical_declaration", "variable_declaration"}:
+            continue
+        for d in decl.named_children:
+            if d.type != "variable_declarator":
+                continue
+            value = d.child_by_field_name("value")
+            while value is not None and value.type in {"await_expression", "parenthesized_expression"}:
+                value = value.named_children[0] if value.named_children else None
+            if value is None or value.type not in {"call_expression", "new_expression"}:
+                continue
+            fn = value.child_by_field_name("function") or value.child_by_field_name("constructor")
+            name = _declarator_name(d)
+            if fn is not None and fn.type == "identifier" and name:
+                out[name] = text(fn)
+    return out
+
+
+def _member_function(
+    src_mod: str,
+    name: str,
+    member: str,
+    exports_by_mod: dict[str, dict[str, str]],
+    known: set[str],
+    fn_nodes: dict[str, Node],
+    instances_by_mod: dict[str, dict[str, str]],
+    import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
+) -> str | None:
+    """Scanned function `name.member` is, for `name` living in ``src_mod``:
+    a method of an object of methods (`X.m`), or of the object a factory
+    returns when `name = createY(...)` (`createY.m`), through barrels."""
+    sources = _export_sources(src_mod, name, exports_by_mod, known)
+    if not sources:
+        sources = {(mod, name) for mod in (src_mod, f"{src_mod}.index") if mod in known}
+    found: set[str] = set()
+    for mod, local in sources:
+        direct = f"{mod}.{local}.{member}"
+        if direct in fn_nodes:
+            found.add(direct)
+            continue
+        factory = (instances_by_mod.get(mod) or {}).get(local)
+        if not factory:
+            continue
+        fq: str | None = f"{mod}.{factory}" if f"{mod}.{factory}" in fn_nodes else None
+        spec = (import_specs_by_mod.get(mod) or {}).get(factory)
+        if fq is None and spec and spec[1] not in {"*", "require"}:
+            fq = _imported_function(spec[0], spec[1], exports_by_mod, known, fn_nodes)
+        if fq and f"{fq}.{member}" in fn_nodes:
+            found.add(f"{fq}.{member}")
+    return next(iter(found)) if len(found) == 1 else None
+
+
 def _resolve_specs_through_barrels(
     import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
     exports_by_mod: dict[str, dict[str, str]],
@@ -2875,6 +3121,48 @@ def _resolve_specs_through_barrels(
             hit = _final_source(src_mod, orig, exports_by_mod, known)
             if hit and hit != (src_mod, orig):
                 specs[local] = hit
+
+
+# (module, client name) -> every base it was given: one factory instantiated
+# with two clients (`createDelivery(clientApi)`, `createDelivery(portalApi)`)
+# calls through both. Reset per `analyze`.
+_CLIENT_BASES: dict[tuple[str, str], list[str]] = {}
+_PARAM_HOLE = re.compile(r"^\{[a-z_$][A-Za-z0-9_$]*\}")
+
+
+def _is_bound_base(base: str) -> bool:
+    """A base that says where it goes: not empty and not still a factory
+    parameter hole (`{baseUrl}/api`); env placeholders are fine."""
+    return bool(base) and not _PARAM_HOLE.match(base)
+
+
+def _note_client_base(module: str, clients: dict[str, str], key: str, base: str) -> bool:
+    """Record ``base`` for ``key`` in ``module``; ``clients[key]`` keeps the
+    first bound base (stable across rounds). True when anything changed."""
+    seen = _CLIENT_BASES.setdefault((module, key), [])
+    changed = False
+    if base not in seen:
+        # a later round may only complete a base (`{X}/api` -> `{X}/api/v1`):
+        # that is the same base, not a second one
+        grown = [b for b in seen if _is_bound_base(b) and base.startswith(b)]
+        for b in grown:
+            seen[seen.index(b)] = base
+        if not grown:
+            seen.append(base)
+        while seen.count(base) > 1:
+            seen.remove(base)
+        changed = True
+    bound = [b for b in seen if _is_bound_base(b)]
+    pick = bound[0] if bound else seen[0]
+    if clients.get(key) != pick:
+        clients[key] = pick
+        changed = True
+    return changed
+
+
+def _other_client_bases(module: str, recv: str, base: str) -> list[str]:
+    """The other bound bases ``recv`` was given besides ``base``."""
+    return [b for b in _CLIENT_BASES.get((module, recv), []) if _is_bound_base(b) and b != base]
 
 
 def _propagate_client_bases(
@@ -2947,10 +3235,18 @@ def _propagate_client_bases(
         for i, arg in enumerate(args):
             if i >= len(params):
                 continue
+            inline = None
+            if arg.type == "call_expression":
+                inline = (factories_by_mod.get(module) or {}).get(call_callee_name(arg))
             if arg.type == "call_expression" and call_callee_name(arg) == "create":
                 # createShopClient(axios.create({ baseURL: ... }))
                 base = _create_call_base(arg, consts_by_mod.get(module) or {})
                 if base is None:
+                    continue
+            elif inline is not None:
+                # createDeliveryHttpClient(createClientApi(import.meta.env.X))
+                base = _instantiate_factory(inline, arg, consts_by_mod.get(module) or {})
+                if not base:
                     continue
             elif arg.type != "identifier":
                 continue
@@ -2963,11 +3259,9 @@ def _propagate_client_bases(
                     continue
             pname = params[i]
             for key in (pname, f"this.{pname}", f"self.{pname}"):
-                if dest_clients.get(key) != base:
-                    dest_clients[key] = base
+                if _note_client_base(dest_mod, dest_clients, key, base):
                     changed = True
-                if clients.get(key) != base:
-                    clients[key] = base
+                if _note_client_base(module, clients, key, base):
                     changed = True
         return changed
 
@@ -3042,6 +3336,10 @@ def _propagate_client_bases(
 
 
 
+# module -> its file's directory parts (set per `analyze`)
+_MODULE_DIRS: dict[str, tuple[str, ...]] = {}
+
+
 def _spec_to_module(
     spec: str,
     current: str,
@@ -3049,7 +3347,11 @@ def _spec_to_module(
 ) -> str:
     spec = spec.strip()
     if spec.startswith("."):
-        parts = current.split(".")
+        # the importing file's real directory: a dotted file name
+        # (`widgets.queries.ts` -> module `...widgets.widgets.queries`) is not
+        # a folder per dot
+        known_dir = _MODULE_DIRS.get(current)
+        parts = [*known_dir, "_"] if known_dir is not None else current.split(".")
         rest = spec
         while rest.startswith("../"):
             parts = parts[:-1]
@@ -3359,6 +3661,22 @@ def _ts_path_aliases(root: Path) -> list[tuple[str, list[str], str]]:
     return aliases
 
 
+def _unwrap_fallback(node: Node) -> Node:
+    """`X ?? ''` / `X || 'http://localhost'` / `(X as string)` -> `X`: the value
+    a factory gets when the env var is set."""
+    while True:
+        if node.type in {"parenthesized_expression", "as_expression", "non_null_expression"} and node.named_children:
+            node = node.named_children[0]
+            continue
+        if node.type == "binary_expression":
+            op = node.child_by_field_name("operator")
+            left = node.child_by_field_name("left")
+            if op is not None and text(op) in {"??", "||"} and left is not None:
+                node = left
+                continue
+        return node
+
+
 def _instantiate_factory(
     factory: JsClientFactory,
     call: Node,
@@ -3370,7 +3688,7 @@ def _instantiate_factory(
     for i, pname in enumerate(factory.params):
         if i >= len(args):
             break
-        val, _u = _resolve_js_string(args[i], consts)
+        val, _u = _resolve_js_string(_unwrap_fallback(args[i]), consts)
         if not val:
             continue
         hole = "{" + pname + "}"
@@ -3894,9 +4212,11 @@ def _collect_route_literals(
         if const_name and symbol.endswith(".module"):
             symbol = f"{module}.{const_name}"
             is_helper = True
-        elif is_helper and symbol.endswith(".module"):
+        elif is_helper:
             owner = _object_member_owner(top)
-            if owner:
+            # the member may already be a function of its own (`X.m`, a
+            # method of a module-level object): it is still a member helper
+            if owner and (symbol.endswith(".module") or symbol == f"{module}.{owner}"):
                 # `export const paths = { summary: (id) => `/items/${id}/...` }`
                 symbol = f"{module}.{owner}"
                 member = True

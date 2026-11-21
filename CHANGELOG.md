@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — 2026-11-21
 
 ### Added
 
@@ -12,6 +12,37 @@
 - Screens page text has a singular ("1 screen calls the API…").
 - A comment that only restates the route ("List is GET /widgets.") is no
   longer used as a summary.
+- **Front ends link to the API through their client modules.** The chain page
+  → hook → client method → route now reaches the graph for the shapes React /
+  Vite fronts use:
+  - methods of a module-level object (`export const widgetsHttpClient = {
+    list: (p) => api.get(...), async create() {} }`) are functions of their
+    own (`widgetsHttpClient.list`); their HTTP calls no longer sit on the
+    file's `.module` node;
+  - a member call on an imported object (`client.list(p)`, with
+    `import { widgetsHttpClient as client }`, through barrels) or on an
+    instance a factory made (`deliveryHttpClient.getSite(id)` →
+    `createDeliveryHttpClient.getSite`) links to the method;
+  - a function passed by reference (`queryFn: listWidgets`,
+    `mutationFn: client.create`, `useEffect(load)`, `onClick={X.m}`) counts
+    as a call by whoever passes it (`inferred`).
+- A client made by a factory keeps its argument's env:
+  `createClientApi(import.meta.env.X ?? '')`, a base built in a local and
+  passed as `axios.create({ baseURL })`, and an instance passed inline to
+  another factory. Those calls are no longer `base_unknown`. A factory made
+  twice with two clients (the app's and a portal's) calls through both bases;
+  consts follow `as string | undefined` and `?? ''` to the env.
+- Fictional repro `tests/test_web_api_links.py` (two Go/echo APIs and a
+  React/Vite front).
+
+### Fixed
+
+- Relative imports from a dotted file name (`widgets.queries.ts`,
+  `*.service.ts`) resolved from the wrong folder, so its imports linked to
+  nothing.
+- A path in a component (`.tsx`, `.jsx`, `.vue`, `.svelte`) with no request
+  hint (no client method, no `fetch`, no `url` + method) no longer becomes a
+  heuristic `calls_http`: it is navigation or a label.
 
 ## 0.7.0 — 2026-11-20
 

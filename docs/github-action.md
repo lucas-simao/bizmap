@@ -24,13 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4   # the base commit is fetched if missing; fetch-depth: 0 also works
-      - uses: lucas-simao/bizmap@v0.7.0
+      - uses: lucas-simao/bizmap@v0.8.0
         with:
           path: .            # or the workspace dir holding bizmap.yaml with `repos:`
 ```
 
 Pin a release tag (or a commit SHA, for supply-chain hygiene:
-`lucas-simao/bizmap@<sha> # v0.7.0`). The Action installs BizMap from that
+`lucas-simao/bizmap@<sha> # v0.8.0`). The Action installs BizMap from that
 same ref, so the CLI and the Action always match.
 
 ## See it running
