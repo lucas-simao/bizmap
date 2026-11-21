@@ -16,6 +16,13 @@ Scan the **head** of the change (the code after the diff), then pipe the diff
 in. Lines outside any function (imports, docs) are listed as unmapped and
 produce no impact.
 
+When the graph has [`feeds`](../graph-schema.md#data-flow-between-tables-feeds)
+edges and the diff changes the function that copies the data (the sync), or
+code that writes a source column, the output lists the **downstream**
+tables and columns fed from it (up to 3 steps): a `Downstream` section in
+the Markdown, and `downstream` (`from`, `to`, `via`, `confidence`, `because`,
+`hops`) in the JSON. Without `feeds`, the output is unchanged.
+
 ## Options
 
 | Option | Meaning |
