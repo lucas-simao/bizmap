@@ -360,6 +360,94 @@ def test_unknown_map_key_gives_candidates_not_edges(tmp_path: Path) -> None:
     assert ("Ready", "queue:pubsub:invoice-ready") in _enqueues(g)
 
 
+MAIN_WIRING = """package main
+
+func main() {
+\tctx := context.Background()
+\tcfg := config.Load()
+\tvar annPub orders.Publisher
+\tif p, err := pubsub.NewPublisher(ctx, cfg.ProjectID, []string{cfg.OrderTopic}); err != nil {
+\t\tlog.Printf("order publisher unavailable: %v", err)
+\t} else {
+\t\tannPub = p
+\t}
+\tann := orders.NewAnnouncer(fs, db, annPub)
+\tvar invPub interface {
+\t\tPublish(ctx context.Context, data []byte, attrs map[string]string) error
+\t}
+\tif p, err := pubsub.NewPublisher(ctx, cfg.ProjectID, []string{cfg.InvoiceTopic}); err != nil {
+\t\tlog.Printf("invoice publisher unavailable: %v", err)
+\t} else {
+\t\tinvPub = p
+\t}
+\tinv := invoices.New(invPub)
+\t_, _ = ann, inv
+}
+"""
+
+
+def test_publishers_built_in_if_init_and_set_in_else(tmp_path: Path) -> None:
+    g, _ = _go_graph(tmp_path / "wiring", {**FANOUT, "cmd/api/main.go": MAIN_WIRING}, edges=A_EDGES)
+    assert _enqueues(g) == {
+        ("Announce", "queue:pubsub:order-announce"),
+        ("Ready", "queue:pubsub:invoice-ready"),
+        ("PublishRefund", "queue:pubsub:refund-requested"),
+    }
+
+
+MAIN_MAP_IF = MAIN_MAP.replace(
+    """\t\tp, _ := pubsub.NewPublisher(ctx, cfg.ProjectID, []string{topics[k]})
+\t\tpubs[k] = p
+""",
+    """\t\tif p, err := pubsub.NewPublisher(ctx, cfg.ProjectID, []string{topics[k]}); err != nil {
+\t\t\tlog.Printf("publisher %v: %v", k, err)
+\t\t} else {
+\t\t\tpubs[k] = p
+\t\t}
+""",
+)
+
+
+def test_topic_map_in_if_else(tmp_path: Path) -> None:
+    assert "if p, err" in MAIN_MAP_IF
+    g, _ = _go_graph(tmp_path / "mapif", {**FANOUT, "cmd/api/main.go": MAIN_MAP_IF}, edges=A_EDGES)
+    assert _enqueues(g) == {
+        ("Announce", "queue:pubsub:order-announce"),
+        ("Ready", "queue:pubsub:invoice-ready"),
+        ("PublishRefund", "queue:pubsub:refund-requested"),
+    }
+
+
+def test_candidates_only_from_the_same_constructor(tmp_path: Path) -> None:
+    # Announce gets an instance nobody can name; a second wrapper type (another constructor)
+    # with its own topic must not show up among the candidates
+    other = """package audit
+
+import (
+\t"context"
+
+\tgcppubsub "cloud.google.com/go/pubsub/v2"
+)
+
+type Sink struct { pub *gcppubsub.Publisher }
+
+func NewSink(c *gcppubsub.Client, topic string) *Sink { return &Sink{pub: c.Publisher(topic)} }
+
+func (s *Sink) Publish(ctx context.Context, data []byte) error {
+\t_, err := s.pub.Publish(ctx, &gcppubsub.Message{Data: data}).Get(ctx)
+\treturn err
+}
+"""
+    main = MAIN_FANOUT.replace("orders.NewAnnouncer(fs, db, pub)", "orders.NewAnnouncer(fs, db, pickPublisher())") + (
+        '\nfunc wire(c *gcppubsub.Client) { s := audit.NewSink(c, "audit-log"); _ = s }\n'
+    )
+    main = main.replace("pub, _ := pubsub.NewPublisher(ctx, cfg.ProjectID, []string{cfg.OrderTopic})",
+                        "pub, _ := pubsub.NewPublisher(ctx, cfg.ProjectID, []string{cfg.OrderTopic})\n\t_ = pub")
+    g, _ = _go_graph(tmp_path / "cand", {**FANOUT, "cmd/api/main.go": main, "internal/audit/audit.go": other}, edges=A_EDGES)
+    node = g.nodes[f"function:{ORD}Announcer.Announce"]
+    assert [q["candidates"] for q in node.attrs["unresolved_queues"]] == [["invoice-ready", "order-announce"]]
+
+
 def test_env_without_default_takes_the_config_default(tmp_path: Path) -> None:
     worker = """package main
 
@@ -635,6 +723,218 @@ def test_relink_after_merge_adds_a_queue_without_crashing() -> None:
         ])
     relink_merged_graph(g)
     assert {n for n in g.nodes if n.startswith("queue:")} == {"queue:pubsub:topic-0", "queue:pubsub:topic-1", "queue:pubsub:topic-2"}
+
+
+MODELS = """package models
+
+import "context"
+
+type Column struct { Name string; Value any }
+type OrderMirror struct { Columns []Column }
+
+type OrderMirrorTx interface {
+\tWriteOrder(ctx context.Context, id string, m OrderMirror, now int64) error
+}
+"""
+PGSTORE = """package pgstore
+
+import (
+\t"context"
+\t"fmt"
+\t"strings"
+
+\t"github.com/jackc/pgx/v5"
+)
+
+type mirrorTx struct{ tx pgx.Tx }
+
+func upsertOrderSQL(cols []models.Column) string {
+\tnames := make([]string, len(cols))
+\tvalues := make([]string, len(cols))
+\tfor i, c := range cols {
+\t\tnames[i] = c.Name
+\t\tvalues[i] = fmt.Sprintf("$%d", i+1)
+\t}
+\treturn "INSERT INTO orders_mirror (" + strings.Join(names, ", ") + ") VALUES (" + strings.Join(values, ", ") + ") ON CONFLICT (id) DO UPDATE SET total = EXCLUDED.total"
+}
+
+func columnArgs(cols []models.Column) []any {
+\tout := make([]any, len(cols))
+\tfor i, c := range cols {
+\t\tout[i] = c.Value
+\t}
+\treturn out
+}
+
+func (t mirrorTx) WriteOrder(ctx context.Context, id string, m models.OrderMirror, now int64) error {
+\tb := &pgx.Batch{}
+\tb.Queue(upsertOrderSQL(m.Columns), columnArgs(m.Columns)...)
+\tb.Queue(`DELETE FROM order_items WHERE order_id = $1`, id)
+\treturn t.tx.SendBatch(ctx, b).Close()
+}
+
+type Store struct{ pool *pgxpool.Pool }
+
+func (s *Store) WithOrderLock(ctx context.Context, id string, fn func(ctx context.Context, tx models.OrderMirrorTx) error) error {
+\ttx, err := s.pool.Begin(ctx)
+\tif err != nil {
+\t\treturn err
+\t}
+\treturn fn(ctx, mirrorTx{tx: tx})
+}
+"""
+FSREAD = """package fsread
+
+import (
+\t"context"
+
+\t"cloud.google.com/go/firestore"
+)
+
+type Reader struct{ client *firestore.Client }
+
+func (r *Reader) MirrorDocument(ctx context.Context, id string) (map[string]any, bool, error) {
+\tsnap, err := r.client.Collection("orders").Doc(id).Get(ctx)
+\tif err != nil {
+\t\treturn nil, false, err
+\t}
+\treturn snap.Data(), true, nil
+}
+"""
+MIRRORSVC = """package mirror
+
+import (
+\t"context"
+\t"time"
+)
+
+func Map(id string, data map[string]any, now int64) (models.OrderMirror, error) {
+\tcols := []models.Column{{Name: "id", Value: id}}
+\tfor k, v := range data {
+\t\tcols = append(cols, models.Column{Name: k, Value: v})
+\t}
+\treturn models.OrderMirror{Columns: cols}, nil
+}
+
+type Service struct{ store *pgstore.Store; reader *fsread.Reader }
+
+func (s *Service) Sync(ctx context.Context, id string) error {
+\tnow := time.Now().Unix()
+\terr := s.store.WithOrderLock(ctx, id, func(ctx context.Context, tx models.OrderMirrorTx) error {
+\t\tdata, exists, err := s.reader.MirrorDocument(ctx, id)
+\t\tif err != nil || !exists {
+\t\t\treturn err
+\t\t}
+\t\tmapped, err := Map(id, data, now)
+\t\tif err != nil {
+\t\t\treturn err
+\t\t}
+\t\treturn tx.WriteOrder(ctx, id, mapped, now)
+\t})
+\treturn err
+}
+"""
+
+
+def test_mirror_with_built_sql_and_interface_call_in_closure(tmp_path: Path) -> None:
+    files = {"internal/models/models.go": MODELS, "internal/pgstore/store.go": PGSTORE,
+             "internal/fsread/reader.go": FSREAD, "internal/mirror/service.go": MIRRORSVC}
+    edges = (
+        ("calls", "internal/mirror.Service.Sync", "internal/fsread.Reader.MirrorDocument", "internal/mirror/service.go", "MirrorDocument"),
+        ("calls", "internal/mirror.Service.Sync", "internal/mirror.Map", "internal/mirror/service.go", "Map(id"),
+        ("calls", "internal/mirror.Service.Sync", "internal/pgstore.Store.WithOrderLock", "internal/mirror/service.go", "WithOrderLock"),
+    )
+    g, meta = _go_graph(tmp_path / "mirror", files, edges=edges)
+    w = "internal/pgstore.mirrorTx.WriteOrder"
+    assert f"writes:function:{w}->table:orders_mirror" in g.edges
+    assert g.edges[f"writes:function:{w}->table:orders_mirror"].attrs["via"] == "upsertOrderSQL"
+    assert f"writes:function:{w}->table:order_items" in g.edges
+    call = g.edges[f"calls:function:internal/mirror.Service.Sync->function:{w}"]
+    assert call.attrs["via"] == "interface"
+    assert f"reads:function:internal/fsread.Reader.MirrorDocument->collection:orders" in g.edges
+    feed = g.edges["feeds:collection:orders->table:orders_mirror"]
+    assert feed.confidence.value == "heuristic"
+    assert not feed.attrs.get("column_map")  # table level: the columns are built at run time
+
+
+FS_SPLIT = {
+    "internal/customers/customers.go": """package customers
+
+import "cloud.google.com/go/firestore"
+
+type CustomerRepository struct { client *firestore.Client }
+""",
+    "internal/customers/customers_read.go": """package customers
+
+import "context"
+
+func (r *CustomerRepository) Get(ctx context.Context, id string) (map[string]any, error) {
+\tsnap, err := r.client.Collection("customers").Doc(id).Get(ctx)
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\treturn snap.Data(), nil
+}
+""",
+    "internal/customers/helpers.go": """package customers
+
+import (
+\t"context"
+
+\t"cloud.google.com/go/firestore"
+)
+
+func updateFields(ctx context.Context, ref *firestore.DocumentRef, fields map[string]any) error {
+\t_, err := ref.Set(ctx, fields, firestore.MergeAll)
+\treturn err
+}
+
+func rawQuery(ctx context.Context, q firestore.Query) ([]map[string]any, error) {
+\t_, err := q.Documents(ctx).GetAll()
+\treturn nil, err
+}
+
+func arrayUpdate(ctx context.Context, ref *firestore.DocumentRef, field string, add bool, v any) error {
+\t_, err := ref.Update(ctx, []firestore.Update{{Path: field, Value: firestore.ArrayUnion(v)}})
+\treturn err
+}
+
+func (r *CustomerRepository) Rename(ctx context.Context, id, name string) error {
+\treturn updateFields(ctx, r.client.Collection("customers").Doc(id), map[string]any{"name": name})
+}
+
+func (r *CustomerRepository) Active(ctx context.Context) error {
+\t_, err := rawQuery(ctx, r.client.Collection("customers").Where("active", "==", true))
+\treturn err
+}
+
+func (r *CustomerRepository) Tag(ctx context.Context, id, tag string) error {
+\tref := r.client.Collection("tags").Doc(id)
+\treturn arrayUpdate(ctx, ref, "tags", true, tag)
+}
+
+func (r *CustomerRepository) Many(ctx context.Context, ids []string) error {
+\tvar refs []*firestore.DocumentRef
+\tfor _, id := range ids {
+\t\trefs = append(refs, r.client.Collection("profiles").Doc(id))
+\t}
+\t_, err := r.client.GetAll(ctx, refs)
+\treturn err
+}
+""",
+}
+
+
+def test_firestore_split_files_and_helpers() -> None:
+    res = go_cloud.scan_go(FS_SPLIT, _go_functions(FS_SPLIT))
+    got = {(a.symbol.rsplit(".", 1)[-1], a.kind, a.collection) for a in res.accesses}
+    assert {
+        ("Get", "read", "customers"),       # file without the firestore import
+        ("Rename", "write", "customers"),   # the helper sets the ref it gets
+        ("Active", "read", "customers"),    # the helper reads the query it gets
+        ("Tag", "write", "tags"),           # a ref variable passed to a helper
+        ("Many", "read", "profiles"),       # refs = append(refs, …)
+    } <= got
 
 
 # ── whole scan (needs the tree-sitter parsers) ────────────────────────────────
