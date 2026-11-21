@@ -959,3 +959,18 @@ def test_a_type_without_fields_keeps_the_box_header() -> None:
     js = (Path(__file__).resolve().parents[1] / "src/bizmap/export/book.js").read_text()
     line = next(x for x in js.splitlines() if "L.noFields" in x and "schema-box" in x)
     assert 'class="schema-tabs"' in line and "schema-note" in line  # name in the padded bar, note padded
+
+
+def test_function_records_carry_the_signature() -> None:
+    g = react_graph()
+    fn = next(n for n in g["nodes"] if n["id"] == "web/function:src.api.orders.getOrder")
+    fn["params"] = [{"name": "id", "type": "string"}]
+    fn["returns"] = "Promise<Order>"
+    bare = next(n for n in g["nodes"] if n["id"] == "web/function:src.hooks.useOrder")
+    bare["params"] = []
+    index, chunks = _book(g)
+    names = chunks["names"]["l"]
+    recs = {names[int(k)]: rec for c in chunks.values() if isinstance(c, dict) and "fns" in c for k, rec in c["fns"].items()}
+    assert recs["src.api.orders.getOrder"][9] == {"params": [{"name": "id", "type": "string"}], "returns": "Promise<Order>"}
+    assert recs["src.hooks.useOrder"][9] == {"params": []}  # no empty `returns`
+    assert len(recs["src.pages.Orders.OrderPage"]) == 9  # nothing in the graph: no signature slot
