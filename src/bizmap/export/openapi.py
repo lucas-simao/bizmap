@@ -63,22 +63,53 @@ def load_spec(path: Path) -> dict[str, Any]:
     return data
 
 
-def find_specs(root: Path, services: list[str]) -> dict[str, Path]:
-    """Spec files next to the code: `<root>/<service>/docs/swagger.json`…, or
-    `<root>/docs/swagger.json`… for a single-repo graph (key "")."""
-    out: dict[str, Path] = {}
+SPEC_GLOBS = ("openapi/*", "docs/*", "api/*", "spec/*", "specs/*")
+SPEC_EXT = (".json", ".yaml", ".yml")
+MAX_SPEC_BYTES = 30_000_000
+
+
+def looks_like_spec(path: Path) -> bool:
+    """Cheap check before parsing a candidate found by a glob."""
+    try:
+        if path.suffix.lower() not in SPEC_EXT or path.stat().st_size > MAX_SPEC_BYTES:
+            return False
+        head = path.read_text(encoding="utf-8", errors="replace")[:4000]
+    except OSError:
+        return False
+    return bool(re.search(r"""(^|["'\s{])(openapi|swagger)["']?\s*:""", head))
+
+
+def _candidates(folder: Path) -> list[Path]:
+    seen: list[Path] = []
+    for name in SPEC_NAMES:
+        cand = folder / name
+        if cand.is_file() and cand not in seen:
+            seen.append(cand)
+    if seen:
+        return seen[:1]  # one well-known spec per repo
+    for pattern in SPEC_GLOBS:  # else every spec in openapi/, docs/… (one per area)
+        for cand in sorted(folder.glob(pattern)):
+            if cand.is_file() and cand not in seen and looks_like_spec(cand):
+                seen.append(cand)
+    return seen
+
+
+def find_specs(root: Path, services: list[str], repo_dirs: dict[str, str] | None = None) -> list[tuple[str, Path]]:
+    """Spec files next to the code: `<root>/<repo dir>/docs/swagger.json`…,
+    else any spec in `<repo dir>/openapi/`, `docs/`…; the repo dir is the
+    graph's `repo_roots` entry when it has one, else the service name. A
+    single-repo graph looks in `<root>` itself (service "")."""
+    out: list[tuple[str, Path]] = []
     for svc in services:
-        for name in SPEC_NAMES:
-            cand = root / svc / name
-            if cand.is_file():
-                out[svc] = cand
+        dirs = [root / repo_dirs[svc]] if repo_dirs and repo_dirs.get(svc) not in (None, "", ".") else []
+        dirs.append(root / svc)
+        for folder in dirs:
+            found = _candidates(folder) if folder.is_dir() else []
+            if found:
+                out += [(svc, f) for f in found]
                 break
     if not out:
-        for name in SPEC_NAMES:
-            cand = root / name
-            if cand.is_file():
-                out[""] = cand
-                break
+        out = [("", f) for f in _candidates(root)]
     return out
 
 
@@ -151,6 +182,18 @@ def _type_str(p: dict[str, Any]) -> str:
     return str(t) + (f" ({s['format']})" if s.get("format") else "")
 
 
+def _param_desc(p: dict[str, Any]) -> str:
+    s = p.get("schema") if isinstance(p.get("schema"), dict) else p
+    bits = [str(p.get("description") or "")]
+    items = s.get("items") if isinstance(s.get("items"), dict) else {}
+    enum = s.get("enum") or items.get("enum")
+    if enum:
+        bits.append("one of: " + ", ".join(str(v) for v in enum[:20]))
+    if s.get("default") is not None:
+        bits.append(f"default: {s['default']}")
+    return " · ".join(b for b in bits if b)
+
+
 def operations_from_spec(spec: dict[str, Any], table: SchemaTable) -> list[dict[str, Any]]:
     """Spec -> [operation] with `m` (METHOD) and `p` (full path, normalized)."""
     v3 = str(spec.get("openapi", "")).startswith("3")
@@ -182,7 +225,7 @@ def operations_from_spec(spec: dict[str, Any], table: SchemaTable) -> list[dict[
                     body = table.convert(p.get("schema"))
                     continue
                 params.append([str(p.get("name")), str(p.get("in")), _type_str(p), 1 if p.get("required") else 0,
-                               str(p.get("description") or "")])
+                               _param_desc(p)])
             if v3 and isinstance(op.get("requestBody"), dict):
                 content = op["requestBody"].get("content") or {}
                 media = content.get("application/json") or next(iter(content.values()), {})
@@ -275,6 +318,14 @@ def parse_swag(text: str) -> dict[str, Any] | None:
     if not op["sum"]:
         op["sum"] = plain_summary(lead)
     return _clean(op)
+
+
+def comment_text(text: str) -> str:
+    """A comment without its swag annotations (and without a leading
+    `Name godoc` / `Name handles GET /x` line marker when that is all it says)."""
+    lead, _parts = _swag_parts(text)
+    lead = " ".join(lead.split())
+    return "" if re.fullmatch(r"\w+( godoc| handles \w+ \S+)?", lead) else lead
 
 
 def plain_summary(text: str) -> str:

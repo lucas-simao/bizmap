@@ -1,6 +1,6 @@
 # `bizmap export`
 
-*Requires bizmap 0.5.0+; the reading layout below (domains, call trees, screens) since 0.6.0.*
+*Requires bizmap 0.5.0+; the reading layout (domains, call trees, screens) since 0.6.0; API docs since 0.7.0.*
 
 ![bizmap export --format html: system, a domain, a route's call tree, screens](../img/export-html.gif)
 
@@ -31,7 +31,13 @@ The docs come from, best first:
    fields of every request and response. `bizmap export` finds it next to each
    repo — `<repo>/docs/swagger.json`, `<repo>/docs/openapi.json`,
    `<repo>/openapi.json`, `<repo>/swagger.json`, `<repo>/api/openapi.json` (or
-   `.yaml`) under the current directory — or take it explicitly:
+   `.yaml`) under the current directory, else every spec in the repo's
+   `openapi/`, `docs/`, `api/`, `spec/` or `specs/` folder (one per area). The
+   repo folder is the graph's `repo_roots` entry when it has one, else the
+   service name. A spec found this way that cannot be read is skipped with a
+   note; `bizmap export` prints the specs it used (`API docs: 2 specs (…)`).
+   Or give them explicitly (repeatable; a bad file or an unknown service is
+   then an error):
 
     ```bash
     bizmap export --openapi api=../api/docs/swagger.json --openapi billing=openapi.json
@@ -43,6 +49,10 @@ The docs come from, best first:
         api: ../api/docs/swagger.json     # relative to bizmap.yaml
     ```
 
+   When the spec has no description, the handler's comment or docstring is
+   used (FastAPI's automatic summary comes from the function name; the
+   docstring has the text). Query parameters show their enum and default.
+
 2. **swag comments** above a Go handler (`@Summary`, `@Description`, `@Tags`,
    `@Param`, `@Success`, `@Failure`, `@Router`) — already in the graph. They
    give the summary, parameters and the *names* of the request and response
@@ -51,8 +61,9 @@ The docs come from, best first:
 
 Routes are matched by method and path (`{id}`, `:id` and `<id>` alike), with the
 spec's base path (`basePath`, `servers[0].url`). Domains follow the API's own
-**tags** (`@Tags`, OpenAPI `tags`); routes without docs whose path starts with a
-tag's name join it, and a tag with more than 80 routes is split into sections
+**tags** (`@Tags`, OpenAPI `tags`); routes without docs join the tag named
+like the first matching segment of their path (`/api/v1/products/:id` →
+`products`), and a tag with more than 80 routes is split into sections
 (`client · delivery`).
 
 ## Reading the page

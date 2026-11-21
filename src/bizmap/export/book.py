@@ -33,6 +33,7 @@ from typing import Any
 from bizmap.export.domains import group_entrypoints
 from bizmap.export.openapi import (
     SchemaTable,
+    comment_text,
     norm_path,
     operations_from_spec,
     parse_swag,
@@ -358,7 +359,14 @@ def build_book(
                 hits = [r for (m, p), rs in routes_by_key.items() if m == op["m"] and p.endswith(op["p"]) and op["p"] != "/"
                         for r in rs if target is None or nsvc[r] == target]
             if len(hits) == 1:
-                docs[hits[0]] = {k: v for k, v in op.items() if k not in ("m", "p")}
+                doc = {k: v for k, v in op.items() if k not in ("m", "p")}
+                if not doc.get("desc"):  # FastAPI: the docstring has the useful text
+                    r = hits[0]
+                    texts = [str(nodes[r].get("why") or "")] + [str(nodes[h].get("why") or "") for h in out_calls[r] if ntype[h] == T_FUNC]
+                    desc = next((d for d in (comment_text(t) for t in texts) if d), "")
+                    if desc and desc != doc.get("sum"):
+                        doc["desc"] = desc
+                docs[hits[0]] = doc
     for i in range(n_nodes):
         if ntype[i] != T_ENTRY or i in docs or nodes[i].get("kind") != "http":
             continue

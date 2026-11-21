@@ -212,14 +212,15 @@ def group_entrypoints(
         out[idx] = (name, OTHER if name == OTHER else rule)
     # a path group named like a tag joins it (`/projects` routes without docs go with tag `projects`)
     tag_names = {t.lower(): t for t in tagged}
-    for idx, (name, rule_) in list(out.items()):
+    by_idx = {idx: node for idx, node, _f in routes}
+    for idx, (_name, rule_) in list(out.items()):
         if rule_ in ("path", "folder", OTHER) and idx in auto_http:
-            segs = auto_http[idx]
-            head = name.strip("/").split("/")[0].lower() if rule_ != OTHER else (segs[0] if segs else "")
-            if head in tag_names:
+            # the first path segment named like a tag, after any prefix (/api/v1, /billing…)
+            segs = path_segments(str(by_idx[idx].get("path") or "")) if by == "folder" else auto_http[idx]
+            head = next((seg for seg in segs if seg in tag_names), None)
+            if head:
                 tagged[tag_names[head]].append(idx)
                 del out[idx]
-    by_idx = {idx: node for idx, node, _f in routes}
     for tag, idxs in tagged.items():
         if len(idxs) <= BIG_GROUP:
             for idx in idxs:

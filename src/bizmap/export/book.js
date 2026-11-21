@@ -644,7 +644,8 @@
     var h = "<h2>" + (/^[A-Z]+$/.test(r.m) ? methodHtml(r.m) + pathHtml(r.p) : esc(r.m + " " + r.p)) + "</h2>";
     h += '<p class="muted">' + esc(SV[dm.svc].name) + " › " + esc(dm.name === "other" ? L.other : dm.name) + "</p>";
     if (r.h.length) h += "<h3>" + esc(L.handler) + "</h3><ul>" + r.h.map(function (f) { var rec = ch.fns[f]; return "<li>" + fnLink(f) + (rec ? ' <div class="ev">' + esc(rec[1]) + "</div>" : "") + "</li>"; }).join("") + "</ul>";
-    if (r.why && !(r.doc && r.doc.src === "swag")) h += '<div class="why">' + esc(r.why) + "</div>";
+    // the raw comment only when the route has no docs (it would repeat them, annotations included)
+    if (r.why && !(r.doc && (r.doc.src === "swag" || r.doc.src === "spec"))) h += '<div class="why">' + esc(r.why.split(/\s@(?=[A-Z]\w+\b)/)[0]) + "</div>";
     h += "<h3>" + esc(L.consumers) + " (" + num(r.nc) + ")</h3>";
     if (!r.nc) h += '<p class="muted">' + esc(L.noConsumers) + "</p>";
     else {

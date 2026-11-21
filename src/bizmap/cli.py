@@ -801,7 +801,12 @@ def export_cmd(
     except json.JSONDecodeError as exc:
         raise click.ClickException(f"{graph_path}: invalid graph JSON: {exc}") from exc
     try:
-        text = export_graph(data, fmt, lang=lang, config=config_path, openapi=list(openapi), root=Path("."))
+        notes: list[str] = []
+        text = export_graph(
+            data, fmt, lang=lang, config=config_path, openapi=list(openapi), root=Path("."), notes=notes
+        )
+        for note in notes:
+            click.echo(note, err=True)
     except ExportError as exc:
         raise click.ClickException(str(exc)) from exc
     out = out_path or Path("bizmap.html")

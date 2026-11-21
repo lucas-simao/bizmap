@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-11-20
 
 ### Added
 
@@ -22,6 +22,17 @@
   colored JSON with sample values: enum's first value, `example`, dates,
   numbers) and a **Fields** tab (field, type, required, description, nested
   fields indented).
+- Specs found next to the code: also every spec in a repo's `openapi/`,
+  `docs/`, `api/`, `spec/`, `specs/` folder (one per area), in the folder the
+  graph's `repo_roots` names; a bad one found that way is skipped with a note,
+  and the export lists the specs it used. `--openapi` for a service the graph
+  does not have is an error.
+- A spec without `description` takes the handler's comment/docstring; query
+  parameters show their enum and default; routes without docs join the tag
+  named like a segment of their path after any prefix; the side panel no
+  longer repeats the raw swag comment.
+- Graph format version `0.7.0` (no field changed; it follows the release).
+  GitHub Action examples pin `@v0.7.0`.
 
 ### Fixed
 

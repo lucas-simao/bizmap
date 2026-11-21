@@ -744,7 +744,7 @@ def test_export_finds_the_spec_next_to_each_repo(tmp_path: Path) -> None:
 
     (tmp_path / "api").mkdir()
     (tmp_path / "api" / "openapi.json").write_text(json.dumps(_demo_spec()))
-    assert find_specs(tmp_path, ["api", "web"]) == {"api": tmp_path / "api" / "openapi.json"}
+    assert find_specs(tmp_path, ["api", "web"]) == [("api", tmp_path / "api" / "openapi.json")]
     html = export_graph(_demo(), "html", root=tmp_path)
     assert _blocks(html)["index"]["docs"]["spec"] == 7
     html = export_graph(_demo(), "html", openapi=[f"api={tmp_path / 'api' / 'openapi.json'}"])
@@ -808,3 +808,74 @@ def test_ts_only_front_counts_its_files_as_linked_screens() -> None:
     index, _chunks = _book(vite_graph())
     web = next(s for s in index["services"] if s["name"] == "web")
     assert web["has_ui"] is False and web["clients_linked"] == web["clients"] == 1
+
+
+# ── round 2 of API docs ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("name,text", [
+    ("docs/swagger.json", '{"swagger": "2.0", "info": {}}'),            # a fragment: no paths
+    ("openapi.yaml", "openapi: 3.0.0\npaths: {{ .Values.paths }}\n"),  # a template
+    ("openapi.json", '{"openapi": "3.0.0", "paths": {"/a": '),         # truncated
+])
+def test_a_bad_spec_found_next_to_the_code_is_skipped_with_a_note(tmp_path: Path, name: str, text: str) -> None:
+    (tmp_path / "api" / name).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "api" / name).write_text(text)
+    notes: list[str] = []
+    html = export_graph(_demo(), "html", root=tmp_path, notes=notes)
+    assert _blocks(html)["index"]["docs"]["spec"] == 0
+    assert len(notes) == 1 and notes[0].startswith("API docs: skipping") and name.split("/")[-1] in notes[0]
+    # the same file given explicitly is an error
+    with pytest.raises(ExportError):
+        export_graph(_demo(), "html", openapi=[f"api={tmp_path / 'api' / name}"])
+
+
+def test_openapi_for_an_unknown_service_is_an_error_and_used_specs_are_listed(tmp_path: Path) -> None:
+    (tmp_path / "spec.json").write_text(json.dumps(_demo_spec()))
+    with pytest.raises(ExportError, match="no service 'nope'.*services: api, billing"):
+        export_graph(_demo(), "html", openapi=[f"nope={tmp_path / 'spec.json'}"])
+    notes: list[str] = []
+    export_graph(_demo(), "html", openapi=[f"api={tmp_path / 'spec.json'}"], notes=notes)
+    assert notes == [f"API docs: 1 spec (api: {tmp_path / 'spec.json'})"]
+
+
+def test_specs_by_area_in_a_folder_and_repo_dirs_from_the_graph(tmp_path: Path) -> None:
+    from bizmap.export.openapi import find_specs
+
+    area = tmp_path / "services" / "py-api" / "openapi"
+    area.mkdir(parents=True)
+    spec = _demo_spec()
+    orders = {**spec, "paths": {k: v for k, v in spec["paths"].items() if k.startswith("/orders")}}
+    projects = {**spec, "paths": {k: v for k, v in spec["paths"].items() if k.startswith("/projects")}}
+    (area / "orders.json").write_text(json.dumps(orders))
+    (area / "projects.yaml").write_text(json.dumps(projects))  # JSON is valid YAML
+    (area / "notes.json").write_text('{"not": "a spec"}')
+    found = find_specs(tmp_path, ["api"], {"api": "services/py-api"})
+    assert [p.name for _s, p in found] == ["orders.json", "projects.yaml"]
+    data = _demo()
+    data["repo_roots"] = {"api": "services/py-api"}
+    notes: list[str] = []
+    html = export_graph(data, "html", root=tmp_path, notes=notes)
+    assert _blocks(html)["index"]["docs"]["spec"] == 7 and notes[0].startswith("API docs: 2 specs")
+
+
+def test_undocumented_routes_join_a_tag_after_a_prefix() -> None:
+    routes = [(0, {"kind": "http", "path": "/api/v1/products"}, ""), (1, {"kind": "http", "path": "/api/v1/products/:id"}, ""),
+              (2, {"kind": "http", "path": "/v2/orders/{order_id}/cancel"}, ""), (3, {"kind": "http", "path": "/billing/invoices"}, "")]
+    got = group_entrypoints(routes, "api", tags={0: "products", 2: "orders", 3: "invoices"})
+    assert {i: n for i, (n, _r) in got.items()} == {0: "products", 1: "products", 2: "orders", 3: "invoices"}
+
+
+def test_spec_without_description_takes_the_handler_comment_and_query_enums() -> None:
+    from bizmap.export.openapi import SchemaTable, comment_text, operations_from_spec
+
+    data = _demo()
+    for n in data["nodes"]:
+        if n["id"] == "api/function:handlers.Orders.List":
+            n["why"] = "ListOrders godoc. Returns the caller's orders, newest first. @Summary List your orders @Router /orders [get]"
+    index, chunks = _book(data, specs=[("api", _demo_spec())])
+    listing = _doc_of(index, chunks, "GET", "/api/v1/orders")
+    assert listing["doc"]["desc"] == "ListOrders godoc. Returns the caller's orders, newest first."
+    ops = {(o["m"], o["p"]): o for o in operations_from_spec(_demo_spec(), SchemaTable())}
+    assert ops[("GET", "/api/v1/orders")]["params"][0][4] == "Only orders in this status · one of: pending, paid, cancelled"
+    assert comment_text("ListProducts godoc @Summary x @Router /p [get]") == ""
