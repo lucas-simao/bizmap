@@ -225,12 +225,19 @@ export function usePortfolio() {
     "src/pages/WidgetsPage.tsx": """
 import { useWidgets, loadWidgetCounts } from '../features/widgets/widgets.queries';
 import { useCreateWidget } from '../features/widgets/widgets.mutations';
+import { goTo } from '../lib/nav';
 
 export function WidgetsPage() {
   const { data } = useWidgets({ status: 'active' });
   const create = useCreateWidget();
   const refresh = () => loadWidgetCounts();
-  return <div onClick={refresh}>{String(data)}{String(create)}</div>;
+  const open = (widgetId: string) => goTo(`/widgets/${widgetId}`);
+  return <div onClick={refresh} onDoubleClick={() => open('w1')}>{String(data)}{String(create)}</div>;
+}
+""",
+    "src/lib/nav.ts": """
+export function goTo(path: string) {
+  window.history.pushState({}, '', path);
 }
 """,
     "src/pages/WidgetDetailPage.tsx": """
@@ -348,6 +355,15 @@ def test_every_web_call_belongs_to_a_method_not_to_a_module(tmp_path: Path) -> N
     http = sorted((e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls_http")
     assert not [f for f, _t in http if f.endswith(".module")], http
     assert {(_w(f), t) for f, t in CALLS.items()} <= set(http), http
+
+
+def test_a_path_in_a_component_without_a_request_is_not_an_api_call(tmp_path: Path) -> None:
+    graph = _scan(tmp_path)
+    from_pages = [
+        (e.from_id, e.to_id) for e in graph.edges.values()
+        if e.type == "calls_http" and e.from_id.startswith(_w("src.pages."))
+    ]
+    assert not from_pages, from_pages
 
 
 def test_hooks_and_pages_call_the_client_methods(tmp_path: Path) -> None:

@@ -1467,6 +1467,14 @@ def _stash_http_call(
     node.attrs["http_calls"] = bucket
 
 
+_UI_SOURCE_EXTS = (".tsx", ".jsx", ".vue", ".svelte")
+
+
+def _is_ui_source(path: str | None) -> bool:
+    """A component file (`.tsx`, `.jsx`, `.vue`, `.svelte`)."""
+    return str(path or "").lower().endswith(_UI_SOURCE_EXTS)
+
+
 def _stash_route_literal(
     graph: Graph,
     fid: str,
@@ -2594,6 +2602,11 @@ def _scan_one(
         if hc.caller != hc.callee:
             callers_of[hc.callee].append(hc)
     for lit in js_analysis.route_literals:
+        if not lit.method and _is_ui_source(lit.file) and not getattr(lit, "helper", False):
+            # a path in a component with nothing saying it is a request (no
+            # client method, no fetch, no `url` + method) is navigation or a
+            # label: not a call to the API
+            continue
         base_item = {
             "path": lit.path,
             "method": lit.method,
@@ -2610,6 +2623,11 @@ def _scan_one(
             else None
         )
         sites = [hc for hc in all_sites or [] if getattr(hc, "direct", False)]
+        # a path helper used in a component without any request hint
+        # (`navigate(paths.widget(id))` through an unknown wrapper) is navigation
+        sites = [hc for hc in sites if (hc.method or lit.method) or not _is_ui_source(hc.file)]
+        if all_sites and not sites and any(getattr(hc, "direct", False) for hc in all_sites):
+            continue
         if all_sites and not sites:
             # Only used inside larger URLs (`${base(id)}/photos`): those
             # composed URLs are literals of their own; this fragment is not a
