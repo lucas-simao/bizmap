@@ -867,6 +867,9 @@ class JsHttpWrapper:
     base: str
     path_index: int = 0
     method_index: int | None = None
+    # `read(url) => api.get(url)` inside a factory: the call site is recorded
+    # as a call on that client (its bases come from the factory instances)
+    recv: str = ""
 
 
 @dataclass
@@ -1306,6 +1309,21 @@ class JsAnalyzer:
             chain_router = _is_router_factory(node)
             wrap = wrappers.get(raw_method) or wrappers.get(method)
             if wrap and args and not recv:
+                if wrap.recv:
+                    if wrap.path_index < len(args):
+                        self._record_client_http(
+                            analysis,
+                            node,
+                            wrap.method.lower() or "get",
+                            [args[wrap.path_index]],
+                            wrap.recv,
+                            clients,
+                            consts,
+                            rel_file,
+                            module,
+                            wrappers,
+                        )
+                    continue
                 self._record_wrapper_call(
                     analysis, node, wrap, args, consts, rel_file, module
                 )
@@ -2383,9 +2401,12 @@ def _collect_wrappers(
                 is_http = True
                 path_val, _u, http_method = _js_client_url_and_method(method, args, extra)
                 url_node = None
-                if path_val:
+                # `http.request({ baseURL: V2, url })`: the request's own base
+                # wins over the instance's
+                override = _per_call_base(method, args, extra)
+                if path_val or override is not None:
                     extra_url = path_val
-                    base = clients.get(recv) or ""
+                    base = override if override is not None else (clients.get(recv) or "")
                     composed = _join_route(base, extra_url) if extra_url else base
                     if composed:
                         wrappers[name] = JsHttpWrapper(
@@ -2410,6 +2431,12 @@ def _collect_wrappers(
             if url:
                 base = _join_route(base, url)
             if not base:
+                if recv and recv not in clients and method in CLIENT_HTTP_METHODS and url_node is not None:
+                    if text(url_node) == path_param and _is_outer_fn_param(fn_node, recv):
+                        wrappers[name] = JsHttpWrapper(
+                            method=http_method, base="", path_index=path_i, method_index=method_i, recv=recv
+                        )
+                        return
                 continue
             wrappers[name] = JsHttpWrapper(
                 method=http_method if method_i is None else "",
@@ -2430,6 +2457,17 @@ def _collect_wrappers(
             if name and value is not None and value.type in {"arrow_function", "function"}:
                 consider(name, value)
     return wrappers
+
+
+def _is_outer_fn_param(fn_node: Node, name: str) -> bool:
+    """`name` is a parameter of a function enclosing ``fn_node`` (a factory)."""
+    cur = parent_of(fn_node)
+    while cur is not None:
+        if cur.type in {"arrow_function", "function", "function_declaration", "function_expression", "method_definition"}:
+            if name in _fn_param_names(cur):
+                return True
+        cur = parent_of(cur)
+    return False
 
 
 def _is_known_http_client(recv: str, clients: dict[str, str], call: Node | None = None) -> bool:
@@ -2942,7 +2980,7 @@ def _import_wrappers(
                     wrap = (own.get(mod) or {}).get(name_in_src)
                     if wrap is not None:
                         break
-            if wrap is not None:
+            if wrap is not None and not wrap.recv:  # a factory's own helper stays local
                 local[name] = wrap
 
 
