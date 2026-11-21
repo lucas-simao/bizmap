@@ -57,7 +57,7 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 | `view` | `view:<name>` | `name`, `kind` (`view` \| `unresolved_relation`), optional `materialized` |
 | `column` | `column:<table>.<column>` | `table`, `name`, `data_type`, `nullable`, optional `why` |
 | `db_trigger` | `db_trigger:<name>` | `name`, `table`, `timing`, `events`, `function`, `evidence`; optional `columns` (the `UPDATE OF col, …` list, present only when the trigger has that clause) |
-| `collection` | `collection:<name>` | `name` (Firestore collection); optional `db` (`firestore:<project\|default>`), `same_as` |
+| `collection` | `collection:<name>` | `name` (Firestore collection: the **last** collection of its path, so `customers/{id}/notes` is `collection:notes`, as in Python); optional `path` (the full path with `{}` for ids, from JS/TS) / `paths`, `db` (`firestore:<project\|default>`), `same_as` |
 | `queue` | `queue:<kind>:<name>` | `kind` (`celery` \| `rq` \| `cloud_tasks` \| `pubsub` \| `firestore` \| `topic`), `name` |
 
 On a merged registry graph, function / entrypoint / queue ids are prefixed
@@ -99,10 +99,10 @@ picking an arbitrary match.
 | --- | --- | --- | --- |
 | `calls` | `function` | `function` | Intra-project call (handler → service → repository). Interface dispatch uses `inferred` and may list `candidates`. `supabase.rpc` calls `function:sql.<name>`. |
 | `reads` | `function` / `entrypoint` / `db_trigger` | `column`, `table`, or `collection` | SQL, ORM, or Firestore reads this data. |
-| `writes` | `function` / `entrypoint` / `db_trigger` | `column`, `table`, or `collection` | SQL, ORM, or Firestore writes this data. |
-| `triggers` | `entrypoint` or `db_trigger` (or a collection writer) | `function` / `entrypoint` | HTTP route / ticker job / DB trigger / Firestore writer invokes a function. |
+| `writes` | `function` / `entrypoint` / `db_trigger` | `column`, `table`, or `collection` | SQL, ORM, or Firestore writes this data. A JS/TS Firestore write has `fields` (the keys of the object written). |
+| `triggers` | `entrypoint` or `db_trigger` (or a collection writer, or a `queue`) | `function` / `entrypoint` | HTTP route / ticker job / DB trigger / Firestore writer invokes a function. `queue:pubsub:<topic> -> entrypoint` with `via: push_subscription`: a Pub/Sub push subscription delivers the topic to that route (see [Firestore in JS/TS](#firestore-in-jsts-and-pubsub-push)). |
 | `calls_http` | `function` | `entrypoint` | HTTP client URL matched a scanned route (same repo or via `services:` env/host/URL). |
-| `enqueues` | `function` | `queue` | Celery/RQ/Cloud Tasks/Pub/Sub produce site. |
+| `enqueues` | `function` | `queue` | Celery/RQ/Cloud Tasks/Pub/Sub produce site. JS/TS `pubsub.topic(t).publishMessage({ json })` / `publishJSON(obj)` has `fields` (the message keys). |
 | `derives_from` | `view` | `table` or `view` | View (or materialized view) is defined from these base relations. |
 | `feeds` | `table` / `view` | `table` or `collection` | Values read from one table are written to the other (often in another database). See [Data flow](#data-flow-between-tables-feeds). |
 
@@ -221,22 +221,28 @@ to the write:
 | How | `confidence` |
 | --- | --- |
 | In one function: the rows of `SELECT id, valor FROM pedidos` (Go `rows.Scan(&a, &o.Total)`, `QueryRow(...).Scan`; JS/TS `const { rows } = await a.query(...)`, `for (const p of rows)`, `(await a.query(...)).rows[0]`; Python `cur.execute(...)` then `fetchone()` / `fetchall()` / `for row in cur`, `row["valor"]`, `row.valor`, `row[1]`) reach the arguments of an `INSERT` / `UPDATE` / upsert, a Firestore `set` / `update` / `add`, or an ORM write the detectors saw on that line (`upsert({ update: { total: p.valor } })`). Struct / object literals, assignments and lists (`append`, `push`) are followed. `INSERT … SELECT` and `UPDATE … FROM` map in one statement (unqualified columns with a single table in `FROM` belong to it), also in a SQL function body (`CREATE FUNCTION`), even when the detectors recorded only the write. | `exact` |
-| Through calls in the same service: a reader passes the value to a writer (`s.writeSummary(ctx, o)`), or a writer uses what a reader returns (`orders, _ := repo.ListPaid(ctx)`), up to 2 calls deep; Celery / RQ `task.delay(...)` to the task. | `heuristic` |
+| Through calls in the same service: a reader passes the value to a writer (`s.writeSummary(ctx, o)`), or a writer uses what a reader returns (`orders, _ := repo.ListPaid(ctx)`), up to 2 calls deep; Celery / RQ `task.delay(...)` to the task. | `heuristic` (edge; a column passed through unchanged stays `exact`) |
+| From a Firestore document: `fs.collection("orders").document(id).get().to_dict()`, `snap.data()`, `s.to_dict()` for `s in ….stream()`, `getDoc(doc(db, 'orders', id))`, a trigger's `event.data.after.data()`. Its fields are the source "columns" (`orders.customerId`, case kept, no schema needed); `snap.id`, `event.params.<id>` and the id passed to `.document(id)` are `orders.__id__`. | as above |
 | Through a queue: the producer publishes a message built from the source (`queue.publish('pedido-pago', { orderId: o.id })`), the consumer of the same topic (`subscribe` / `consume` / `process` / BullMQ `Worker`) writes the message's fields. Also across repos in a joint scan or `registry merge`. `emit` / `on` events only link inside one repo. | `heuristic` |
 
 - `via`: up to 5 paths (functions, and the queue for a queue hop), strongest
   first; `via_total` counts every path.
 - `column_map`: `{from, to, fn, confidence, evidence}` per mapped column.
-  `exact` when the value goes through unchanged in one function;
-  `heuristic` otherwise. `transform: true` when an expression or function
+  `exact` when the value goes through unchanged (in one function, or passed
+  through calls as it is); `heuristic` through a queue or a transformation. `transform: true` when an expression or function
   is in between (`sum(valor)`, `date_trunc('month', criado_em)`,
   `Math.round(p.valor * 100)`, `decimal.NewFromFloat(o.Valor)`); `path` for
   a value that crossed calls or a queue; `field` for the message field of a
   queue hop. `match: "name"` (heuristic) is used only when a row was copied
   whole and no column path was seen: columns with the same name on both
   sides (not `id` / `created_at` / `updated_at`).
+- `__id__` is a Firestore document's id. Like any identifier copied into an
+  identifier column, it is a reference: a flow made only of ids is not a
+  `feeds`; next to other fields it is mapped (`orders.__id__ ->
+  order_summary.order_id`).
 - Never invented: a column that is not in the source (or destination)
-  table's schema is never mapped — a plpgsql parameter or `DECLARE`
+  table's schema is never mapped (a Firestore collection has no schema: a
+  field read from its document counts) — a plpgsql parameter or `DECLARE`
   variable in `INSERT … SELECT found, store, s.name FROM stores s` is not
   `stores.found`; a column only in `WHERE` is not mapped; a function that
   reads A and writes B with no value in common (a permission check, a
@@ -278,6 +284,46 @@ table is in the repo's database, as before):
 
 In a merged graph, the same table name with the same `db` in two repos gets
 `same_as` (the other node ids) on each node; nodes are not merged.
+
+## Firestore in JS/TS and Pub/Sub push
+
+A text pass over the JS/TS files that import Firestore (`firebase/firestore`,
+`firebase-admin`, `@google-cloud/firestore`) or Cloud Functions, attributed to
+the function the JS detector found around each call:
+
+- web modular SDK: `getDoc` / `getDocs` / `onSnapshot` / `getCountFromServer`
+  read, `setDoc` / `updateDoc` / `addDoc` / `deleteDoc` write, on
+  `collection(db, …)`, `doc(db, …)`, `query(…)`, `collectionGroup(db, …)`, or a
+  reference kept in a variable (`doc(ordersRef, id)`); `batch.set(ref, …)`,
+  `tx.get(ref)`;
+- admin / server SDK chains: `db.collection('x').doc(id).get()` /
+  `.where(…).get()` read, `.set / .update / .delete / .create / .add` write;
+- the collection from a literal, an exported constant (`ORDERS_COLLECTION`),
+  an enum or object member (`Collections.Customers`), or a template path
+  (`` `customers/${id}/notes` `` → `collection:notes`, `path:
+  customers/{}/notes`). A name passed to a helper's parameter
+  (`listAll('customers')` → `collection(db, path)`) puts the access on the
+  caller, with `via` the helper. Callers and their entrypoints get the
+  access with `derived: call`, as with SQL.
+- Cloud Functions triggers (`onDocumentWritten('orders/{orderId}', …)`,
+  `functions.firestore.document('orders/{id}').onWrite(…)`) become
+  `entrypoint:firestore:<collection>:<event>` (as in Python), triggering a
+  handler function that reads the collection; its `event.data.after.data()`
+  is the document.
+- `pubsub.topic('t').publishMessage({ json })` → `enqueues queue:pubsub:t`.
+
+A **push subscription** (Pub/Sub delivering a topic to an HTTP route) lives in
+deploy config, not in code. bizmap reads it from `push_subscriptions:` in
+`bizmap.yaml` (see [configuration](configuration.md#push_subscriptions)) and
+from `gcloud pubsub subscriptions create … --topic=T --push-endpoint=URL` in
+shell / YAML / Makefile files of the repo, and adds `triggers
+queue:pubsub:<topic> -> entrypoint` (`via: push_subscription`). The route's
+handler then receives the message (its first parameter; methods on it,
+`json.loads(base64.b64decode(…))` and Pydantic `model_validate(…)` keep it
+the message), so in a joint scan or `registry merge` the trigger → topic →
+route → write path becomes a `feeds` (`heuristic`). Message fields match the
+written attribute by name ignoring case and `_` (`customerId` /
+`customer_id`) or a Pydantic `Field(alias="…")`.
 
 ## Confidence
 

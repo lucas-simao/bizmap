@@ -28,6 +28,8 @@ database: checkout            # repos with the same database share table ids
 databases:                    # name the connections a service opens (the `db` of its tables)
   orders_db: { env: ORDERS_DATABASE_URL }
   summary_db: SUMMARY_DATABASE_URL                     # short form
+push_subscriptions:           # Pub/Sub topic delivered to a route of this repo
+  order-announce: POST /pubsub/orders
 
 repos:                        # makes this folder a workspace: scan these jointly
   - web
@@ -166,6 +168,21 @@ Calls that still match nothing are kept as `unresolved_http` with a reason, and
 Links a producer to its consumer when the queue or topic name alone does not:
 the value is the consumer's function name, or an entrypoint id / route
 (`entrypoint:http:POST:/jobs/drain`).
+
+### `push_subscriptions`
+
+A Pub/Sub push subscription delivers a topic to an HTTP route of this repo
+(`gcloud pubsub subscriptions create … --push-endpoint=…`). Declaring it links
+the topic to the route (`triggers queue:pubsub:<topic> -> entrypoint`), so a
+producer in another repo reaches the route's writes (and `feeds`). `gcloud …
+--topic=… --push-endpoint=…` commands in the repo's shell / YAML files are read
+too. A subscription whose route is not in the repo is reported in `warnings`.
+
+```yaml
+push_subscriptions:
+  order-announce: POST /pubsub/orders          # topic: METHOD /path (POST when omitted)
+  invoice-paid: { path: https://billing.run.app/pubsub/paid, method: POST }
+```
 
 ### `constants`
 
