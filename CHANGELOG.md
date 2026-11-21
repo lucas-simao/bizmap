@@ -58,6 +58,18 @@
 - A per-request `baseURL` set in a helper (`http.request({ baseURL: V2, url })`)
   is the call's base: `{VITE_API_URL}/api/v2/reports/flow`, never the v1 route
   with the same tail.
+- The same holds when the helper hands its config to a config wrapper of
+  another module (`reportsGet = (url) => requestWithStatus({ method: 'GET',
+  baseURL: V2, url })` with `requestWithStatus = (config) => api.request(config)`).
+- **A path literal counts as a request only when something sends it**: a
+  client method, `fetch`, a config with `url` and a method, or an argument of
+  a call whose name says it sends one (`apiGet(uid, '/x')`, `fetchJson`,
+  `doRequest`). A URL builder that only returns a URL
+  (`projectLink = (d, id) => `${d}/projects/${id}``), a route template
+  (`PROJECT_ROUTE_TEMPLATE`), a menu constant (`MENU_ACCESS = { projects:
+  '/projects' }`) or a hyperlink is navigation. A path helper / module const
+  that nobody is seen sending no longer links by itself (`origin:
+  path_helper` / `module_const`).
 - Navigation is not a request: `redirectUri`/`callbackUrl`/`returnTo`-style
   variables (assigned or returned) and JS/TS test files and mocks
   (`__tests__/`, `__mocks__/`, `mocks/`, `*.test.*`, `*.spec.*`, e2e) produce
