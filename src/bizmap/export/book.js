@@ -510,7 +510,7 @@
   function schemaHtml(sc) {
     if (!sc) return "";
     var named = sc.r ? schemaTable()[sc.r] : null;
-    if (sc.r && !named) return '<div class="schema-box"><div class="schema-name">' + esc(sc.r) + '</div><p class="muted small">' + esc(L.noFields) + "</p></div>";
+    if (sc.r && !named) return '<div class="schema-box"><div class="schema-tabs"><span class="schema-name">' + esc(sc.r) + '</span></div><p class="muted small schema-note">' + esc(L.noFields) + "</p></div>";
     var id = "sch" + (schemaSeq++);
     var rows = fieldRows(sc, "", 0, []);
     var ex = exampleOf(sc);

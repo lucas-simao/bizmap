@@ -951,3 +951,11 @@ def test_pages_read_only_keys_their_chunk_has() -> None:
         assert read <= have, (name, m.group(1), sorted(read - have))
         checked += 1
     assert checked >= 3  # screens, unmatched, uses
+
+
+def test_a_type_without_fields_keeps_the_box_header() -> None:
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parents[1] / "src/bizmap/export/book.js").read_text()
+    line = next(x for x in js.splitlines() if "L.noFields" in x and "schema-box" in x)
+    assert 'class="schema-tabs"' in line and "schema-note" in line  # name in the padded bar, note padded
