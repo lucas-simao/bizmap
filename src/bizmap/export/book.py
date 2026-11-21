@@ -31,6 +31,14 @@ from collections import defaultdict
 from typing import Any
 
 from bizmap.export.domains import group_entrypoints
+from bizmap.export.openapi import (
+    SchemaTable,
+    norm_path,
+    operations_from_spec,
+    parse_swag,
+    plain_summary,
+    resolve_names,
+)
 from bizmap.export.overview import TABLE_TYPES, build_overview, column_tables, data_target
 
 # node type codes
@@ -162,8 +170,10 @@ def build_book(
     domain_rules: dict[str, list[tuple[str, str, str]]] | None = None,
     domains_by: str = "path",
     lang: str = "en",
+    specs: list[tuple[str | None, dict[str, Any]]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """-> (index, {chunk id: chunk})."""
+    """-> (index, {chunk id: chunk}). `specs`: OpenAPI/Swagger documents, each
+    with the service it describes (None: match any service)."""
     overview = build_overview(data, svc_of)
     services = [s["name"] for s in overview["services"]]
     svc_index = {s: i for i, s in enumerate(services)}
@@ -314,6 +324,36 @@ def build_book(
             rec.append(sig)
         return rec
 
+    # ── API docs: OpenAPI/Swagger files first, then swag comments, then the comment ──
+    table = SchemaTable()
+    docs: dict[int, dict[str, Any]] = {}
+    routes_by_key: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for i in range(n_nodes):
+        if ntype[i] == T_ENTRY and nodes[i].get("kind") == "http":
+            routes_by_key[(str(nodes[i].get("method") or "").upper(), norm_path(str(nodes[i].get("path") or "")))].append(i)
+    for svc_name, spec in specs or []:
+        target = svc_index.get(svc_name) if svc_name else None
+        for op in operations_from_spec(spec, table):
+            hits = [r for r in routes_by_key.get((op["m"], op["p"]), []) if target is None or nsvc[r] == target]
+            if not hits:  # spec without its base path: match by path end, if unique
+                hits = [r for (m, p), rs in routes_by_key.items() if m == op["m"] and p.endswith(op["p"]) and op["p"] != "/"
+                        for r in rs if target is None or nsvc[r] == target]
+            if len(hits) == 1:
+                docs[hits[0]] = {k: v for k, v in op.items() if k not in ("m", "p")}
+    for i in range(n_nodes):
+        if ntype[i] != T_ENTRY or i in docs or nodes[i].get("kind") != "http":
+            continue
+        texts = [str(nodes[i].get("why") or "")] + [str(nodes[h].get("why") or "") for h in out_calls[i] if ntype[h] == T_FUNC]
+        op = next((o for o in (parse_swag(t) for t in texts) if o), None)
+        if op:
+            resolve_names(op, table)
+            op.pop("router", None)
+            docs[i] = op
+        else:
+            summary = next((plain_summary(t) for t in texts if plain_summary(t)), "")
+            if summary:
+                docs[i] = {"sum": summary, "src": "comment"}
+
     # ── domains ──
     domains: list[dict[str, Any]] = []
     route_domain: dict[int, int] = {}
@@ -326,8 +366,9 @@ def build_book(
         for e in eps:
             hs = [h for h in out_calls[e] if ntype[h] == T_FUNC]
             handler_file[e] = _file(nodes[hs[0]]) if hs else _file(nodes[e])
+        tags = {e: docs[e]["tags"][0] for e in eps if e in docs and docs[e].get("tags")}
         groups = group_entrypoints(
-            [(e, nodes[e], handler_file[e]) for e in eps], services[s], domain_rules, domains_by
+            [(e, nodes[e], handler_file[e]) for e in eps], services[s], domain_rules, domains_by, tags
         )
         by_name: dict[str, list[int]] = defaultdict(list)
         rule_of: dict[str, str] = {}
@@ -335,7 +376,7 @@ def build_book(
             name, rule = groups[e]
             by_name[name].append(e)
             rule_of.setdefault(name, rule)
-        ordered = sorted(by_name, key=lambda n: (n == "other", rule_of[n] == "kind", n))
+        ordered = sorted(by_name, key=lambda n: (n == "other", rule_of[n] == "kind", n.lstrip("/").lower(), n))
         for name in ordered:
             routes = by_name[name]
             did = len(domains)
@@ -383,6 +424,7 @@ def build_book(
                         "sc": [[sv, f] for sv, f in screens_of[:CONSUMER_CAP]],
                         "ev": _evidence(node),
                         "why": str(node.get("why") or ""),
+                        "doc": docs.get(e),
                     }
                 )
             route_rows.sort(key=lambda r: (r["p"].lower(), METHOD_ORDER.get(r["m"], 9), r["m"]))
@@ -542,6 +584,8 @@ def build_book(
         row["tables"] = len(tabs)
         row["data"] = sorted(([t, rw] for t, rw in tabs.items()), key=lambda x: labels[x[0]])[:SERVICE_TABLES]
 
+    if table.named:
+        chunks["s0"] = {"schemas": table.named}
     chunk_ids = sorted(chunks, key=lambda c: (c[0], int(c[1:]) if c[1:].isdigit() else 0))
     chunk_no = {c: n for n, c in enumerate(chunk_ids)}
     chunks["names"] = {
@@ -574,6 +618,10 @@ def build_book(
         "risks": risks,
         "chunks": chunk_ids,
         "routeDomain": {str(e): d for e, d in route_domain.items()},
+        "docs": {"spec": sum(1 for v in docs.values() if v.get("src") == "spec"),
+                 "swag": sum(1 for v in docs.values() if v.get("src") == "swag"),
+                 "comment": sum(1 for v in docs.values() if v.get("src") == "comment"),
+                 "schemas": bool(table.named)},
     }
     return index_doc, chunks
 

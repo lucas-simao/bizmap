@@ -4456,7 +4456,8 @@
    },
    "id": "billing/function:handlers.create_invoice",
    "name": "create_invoice",
-   "type": "function"
+   "type": "function",
+   "why": "create_invoice handles POST /invoices @Summary Create an invoice for an order @Description Bills the order total; one invoice per order. @Tags invoices @Accept json @Produce json @Param body body billing.InvoiceRequest true \"Order to bill\" @Success 201 {object} billing.Invoice @Failure 409 {object} billing.Error \"Already billed\" @Router /invoices [post]"
   },
   {
    "evidence": {
@@ -4503,7 +4504,8 @@
    },
    "id": "billing/function:handlers.get_invoice",
    "name": "get_invoice",
-   "type": "function"
+   "type": "function",
+   "why": "get_invoice handles GET /invoices/:id @Summary Get an invoice @Tags invoices @Param id path string true \"Invoice ID\" @Success 200 {object} billing.Invoice @Failure 404 {object} billing.Error \"Not found\" @Router /invoices/{id} [get]"
   },
   {
    "evidence": {

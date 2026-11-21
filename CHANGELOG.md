@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Added
+
+- **`bizmap export --format html` reads like API docs.** A domain lists its
+  endpoints (method, path, summary); opening one shows the description,
+  parameters, the **JSON request body** and each **response with its JSON**
+  (nested objects open on click), the screens that use it by name, its data in
+  one sentence ("Writes orders. Reads products."), and **See in code** for the
+  call tree. Domains follow the API's tags.
+- Docs come from an **OpenAPI / Swagger file** (swag's `docs/swagger.json`,
+  FastAPI's `openapi.json`; Swagger 2.0 / OpenAPI 3, JSON or YAML), found next
+  to each repo or given with `--openapi [SERVICE=]FILE` / `export.openapi` in
+  `bizmap.yaml`; else from **swag comments** in the graph (`@Summary`, `@Tags`,
+  `@Param`, `@Success`, `@Failure`); else from the handler's comment.
+- Service pages are shorter: domains with endpoint counts and data; screens,
+  HTTP calls, tables and code fold under one "more" section.
+- Fictional example `examples/export/api/openapi.json`.
+
 ### Changed
 
 - `bizmap export --format html`, front-end ↔ API links:

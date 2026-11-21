@@ -16,7 +16,7 @@
       notReached: "{n} of {f} functions are not reached from any route or job (search finds them).",
       callsTo: "calls", calledBy: "called by", risks: "Many depend on it", risksHint: "used by 3 or more services",
       domain: "Domain", rule_path: "grouped by path", rule_folder: "grouped by handler folder", rule_yaml: "from bizmap.yaml",
-      rule_other: "routes outside the patterns", rule_kind: "non-HTTP entrypoints",
+      rule_other: "routes outside the patterns", rule_tag: "API tag", rule_kind: "non-HTTP entrypoints",
       colRoute: "Route", colHandler: "Handler", colTables: "Reads / writes", colUsedBy: "Used by", colRoutes: "Routes",
       colFunctions: "Functions", colScreens: "Screens", colDb: "Database", colServices: "Services", colReaders: "Read by",
       colWriters: "Written by", colFile: "File", colUnmatched: "No route",
@@ -46,6 +46,12 @@
       reasonHelp_base_unknown: "The path is known but not the base URL (an environment variable no scanned service is mapped to).",
       reasonHelp_path_dynamic: "The path is built at runtime (template strings, concatenation) and could not be resolved.",
       reasonHelp_client_unknown: "An HTTP client the scan does not recognise.",
+      moreDetails: "Screens, HTTP calls, tables and code of this service",
+      endpoint: "endpoint", endpoints: "endpoints", openEndpoint: "Open an endpoint to see what it receives, returns, who uses it and the data it touches.",
+      requestBody: "Request body (JSON)", responses: "Responses", noFields: "(fields: export with the API's swagger.json / openapi.json)",
+      noDocs: "No API docs for this route yet (swag annotations or an OpenAPI file add the parameters and the JSON it receives and returns).",
+      required: "required", example: "example", or: "or", writesTo: "Writes", readsFrom: "Reads", dataTitleShort: "Data",
+      seeCode: "See in code", hideCode: "Hide code", calledByN: "Called by {n} functions in other services (no screen linked).",
       foldersTitle: "Code by folder", foldersRest: "Code no route reaches, by folder", colFolder: "Folder", colHttp: "HTTP calls", showMore: "Show {n} more (of {t})",
     },
     "pt-BR": {
@@ -57,7 +63,7 @@
       notReached: "{n} de {f} funções não são alcançadas por nenhuma rota ou job (a busca encontra).",
       callsTo: "chama", calledBy: "chamado por", risks: "Muitos dependem dele", risksHint: "usado por 3 ou mais serviços",
       domain: "Domínio", rule_path: "agrupado pelo path", rule_folder: "agrupado pela pasta do handler", rule_yaml: "do bizmap.yaml",
-      rule_other: "rotas fora dos padrões", rule_kind: "entrypoints que não são HTTP",
+      rule_other: "rotas fora dos padrões", rule_tag: "tag da API", rule_kind: "entrypoints que não são HTTP",
       colRoute: "Rota", colHandler: "Handler", colTables: "Lê / escreve", colUsedBy: "Usada por", colRoutes: "Rotas",
       colFunctions: "Funções", colScreens: "Telas", colDb: "Banco", colServices: "Serviços", colReaders: "Lida por",
       colWriters: "Escrita por", colFile: "Arquivo", colUnmatched: "Sem rota",
@@ -87,6 +93,12 @@
       reasonHelp_base_unknown: "O path é conhecido, mas não a URL base (uma variável de ambiente sem serviço mapeado).",
       reasonHelp_path_dynamic: "O path é montado em tempo de execução (template string, concatenação) e não pôde ser resolvido.",
       reasonHelp_client_unknown: "Um cliente HTTP que o scan não reconhece.",
+      moreDetails: "Telas, chamadas HTTP, tabelas e código deste serviço",
+      endpoint: "endpoint", endpoints: "endpoints", openEndpoint: "Abra um endpoint para ver o que ele recebe, o que devolve, quem usa e os dados que toca.",
+      requestBody: "Corpo da requisição (JSON)", responses: "Respostas", noFields: "(campos: exporte com o swagger.json / openapi.json da API)",
+      noDocs: "Esta rota ainda não tem documentação de API (anotações do swag ou um arquivo OpenAPI trazem os parâmetros e o JSON que ela recebe e devolve).",
+      required: "obrigatório", example: "exemplo", or: "ou", writesTo: "Grava em", readsFrom: "Lê", dataTitleShort: "Dados",
+      seeCode: "Ver no código", hideCode: "Esconder código", calledByN: "Chamada por {n} funções de outros serviços (sem tela ligada).",
       foldersTitle: "Código por pasta", foldersRest: "Código que nenhuma rota alcança, por pasta", colFolder: "Pasta", colHttp: "Chamadas HTTP", showMore: "Mostrar mais {n} (de {t})",
     },
   };
@@ -245,16 +257,16 @@
             (sv.routes + sv.jobs ? num(sv.routes + sv.jobs) + " " + esc(L.routes) + " · " + sv.domains.length + " " + esc(sv.domains.length === 1 ? L.domain1 : L.domains) + " · " : "") +
             num(sv.functions) + " " + esc(L.functions) + " · " + num(sv.tables) + " " + esc(L.tablesLc) + "</p>";
     if (sv.domains.length) {
-      h += "<h2>" + esc(L.domainsTitle) + '</h2><table class="list"><thead><tr><th>' + esc(L.domain) + '</th><th class="num">' + esc(L.colRoutes) + '</th><th class="num">' +
-           esc(L.colFunctions) + "</th><th>" + esc(L.colTables) + '</th><th class="num">' + esc(L.colUsedBy) + "</th></tr></thead><tbody>";
+      h += "<h2>" + esc(L.domainsTitle) + '</h2><table class="list fixed"><colgroup><col style="width:34%"><col style="width:90px"><col><col style="width:80px"></colgroup><thead><tr><th>' + esc(L.domain) + '</th><th class="num">' + esc(L.endpoints) +
+           "</th><th>" + esc(L.dataTitleShort) + '</th><th class="num">' + esc(L.colUsedBy) + "</th></tr></thead><tbody>";
       sv.domains.forEach(function (d) {
         var dm = DOM[d];
-        h += '<tr class="row" data-href="#/d/' + d + '"><td><b>' + esc(dm.name === "other" ? L.other : dm.name) + '</b><br><span class="muted">' + esc(L["rule_" + dm.rule] || dm.rule) +
-             '</span></td><td class="num">' + dm.routes + '</td><td class="num">' + num(dm.functions) + "</td><td>" + tableChips(dm.tables, 5) +
-             (dm.ntables > dm.tables.length ? '<span class="chip">+' + (dm.ntables - dm.tables.length) + "</span>" : "") +
+        h += '<tr class="row" data-href="#/d/' + d + '"><td><b>' + esc(dm.name === "other" ? L.other : dm.name) + '</b></td><td class="num">' + dm.routes + '</td><td class="muted ell">' +
+             esc(dm.tables.slice(0, 4).map(function (p) { return IX.tableNames[p[0]]; }).join(", ") + (dm.ntables > 4 ? " +" + (dm.ntables - 4) : "")) +
              '</td><td class="num">' + (dm.consumers ? num(dm.consumers) : "—") + "</td></tr>";
       });
       h += "</tbody></table>";
+      h += '<details class="more"><summary>' + esc(L.moreDetails) + "</summary>";
     }
     if (sv.screen_chunk) {
       var wc = chunk(sv.screen_chunk);
@@ -298,6 +310,7 @@
       });
       h += "</tbody></table>";
     }
+    if (sv.domains.length) h += "</details>";
     if (!sv.domains.length && !sv.screen_chunk && !sv.data.length && !sv.folders.length) h += '<p class="empty">' + esc(L.nothing) + "</p>";
     read(h);
     var md = $("more-data-btn");
@@ -350,27 +363,127 @@
     var name = dm.name === "other" ? L.other : dm.name;
     crumbs(['<a href="#/s/' + s + '">' + esc(SV[s].name) + "</a>", '<a href="#/d/' + d + '">' + esc(name) + "</a>"]);
     toc("d" + d);
-    var h = "<h1>" + esc(name) + '</h1><p class="lead">' + esc(SV[s].name) + " · " + dm.routes + " " + esc(L.routes) + " · " + num(dm.functions) + " " +
-            esc(L.functions) + " · " + esc(L["rule_" + dm.rule] || dm.rule) + ". " + esc(L.openTree) + "</p>";
-    h += '<table class="list fixed"><colgroup><col style="width:40%"><col style="width:26%"><col><col style="width:70px"></colgroup><thead><tr><th>' + esc(L.colRoute) + "</th><th>" + esc(L.colHandler) + "</th><th>" + esc(L.colTables) +
-         '</th><th class="num">' + esc(L.colUsedBy) + "</th></tr></thead><tbody>";
+    var h = "<h1>" + esc(name) + '</h1><p class="lead">' + esc(SV[s].name) + " · " + dm.routes + " " + esc(dm.routes === 1 ? L.endpoint : L.endpoints) + "</p>";
+    h += '<div class="eps">';
     ch.routes.forEach(function (r) {
-      var hl = r.h.length ? label(r.h[0], ch.fns[r.h[0]]) : "";
       var isHttp = /^[A-Z]+$/.test(r.m) && r.p.charAt(0) === "/";
-      h += '<tr class="row' + (route === r.i ? " on" : "") + '" data-route="' + r.i + '"><td>' + (isHttp ? methodHtml(r.m) + pathHtml(r.p) : '<span class="kind">' + esc(r.m) + "</span> " + esc(r.p)) +
-           '</td><td class="mono ell" title="' + esc(hl) + '">' + esc(shortFn(hl)) + "</td><td>" + tableChips(r.t, 4) + '</td><td class="num">' + (r.nc ? num(r.nc) : "—") + "</td></tr>";
-      if (route === r.i) h += '<tr><td colspan="4"><div class="tree" id="tree-' + r.i + '"></div></td></tr>';
+      var sum = r.doc && r.doc.sum ? r.doc.sum : "";
+      h += '<div class="ep' + (route === r.i ? " open" : "") + '" data-route="' + r.i + '"><div class="ep-head">' +
+           (isHttp ? methodHtml(r.m) + '<span class="ep-path">' + pathHtml(r.p) + "</span>" : '<span class="kind">' + esc(r.m) + '</span> <span class="ep-path">' + esc(r.p) + "</span>") +
+           '<span class="ep-sum">' + esc(sum) + "</span></div>" + (route === r.i ? '<div class="ep-body" id="ep-' + r.i + '"></div>' : "") + "</div>";
     });
-    read(h + "</tbody></table>");
+    read(h + "</div>");
     if (route !== undefined && route !== null) {
       var r = ch.routes.filter(function (x) { return x.i === route; })[0];
       if (r) {
-        renderTree($("tree-" + r.i), r.h, dm.chunk);
+        $("ep-" + r.i).innerHTML = endpointHtml(r, dm);
+        wireEndpoint(r, dm);
         routeDetail(r, dm);
-        var row = document.querySelector('tr[data-route="' + r.i + '"]');
+        var row = document.querySelector('[data-route="' + r.i + '"]');
         if (row) row.scrollIntoView({ block: "nearest" });
       }
-    } else detail('<p class="muted">' + esc(L.openTree) + "</p>");
+    } else detail('<p class="muted">' + esc(L.openEndpoint) + "</p>");
+  }
+
+  // ── an endpoint, read like API docs ──────────────────────────────────────
+  var schemas = null;
+  function schemaTable() {
+    if (schemas === null) schemas = IX.chunks.indexOf("s0") >= 0 ? chunk("s0").schemas : {};
+    return schemas;
+  }
+  function typeLabel(sc) {
+    if (!sc) return "";
+    if (sc.r) return sc.r;
+    if (sc.t === "array") return typeLabel(sc.i) + "[]";
+    return sc.t || "any";
+  }
+  // a schema as an indented JSON-like outline; refs resolved from the spec, nested levels open on click
+  function schemaHtml(sc, depth, seen) {
+    seen = seen || [];
+    if (!sc) return "";
+    var tbl = schemaTable();
+    if (sc.r) {
+      var named = tbl[sc.r];
+      if (!named) return '<span class="ty">' + esc(sc.r) + '</span> <span class="muted">' + esc(L.noFields) + "</span>";
+      if (seen.indexOf(sc.r) >= 0) return '<span class="ty">' + esc(sc.r) + "</span> ↺";
+      return '<span class="ty">' + esc(sc.r) + "</span> " + schemaHtml(named, depth, seen.concat([sc.r]));
+    }
+    if (sc.t === "array") return '<span class="punct">[</span> ' + schemaHtml(sc.i, depth, seen) + ' <span class="punct">]</span>';
+    if (sc.o) return sc.o.map(function (x) { return schemaHtml(x, depth, seen); }).join(' <span class="muted">' + esc(L.or) + "</span> ");
+    if (sc.t === "object" && sc.f && sc.f.length) {
+      var open = depth < 2;
+      return '<span class="obj' + (open ? " open" : "") + '"><span class="punct tog-obj">{' + (open ? "" : " … }") + '</span><span class="fields">' + sc.f.map(function (f) {
+        return '<div class="fld"><span class="fname">' + esc(f[0]) + "</span>" + (f[2] ? '<span class="req" title="' + esc(L.required) + '">*</span>' : "") +
+          ': <span class="fval">' + schemaHtml(f[1], depth + 1, seen) + "</span>" + (f[3] ? ' <span class="fdesc">' + esc(f[3]) + "</span>" : "") + "</div>";
+      }).join("") + '</span><span class="punct close">}</span></span>';
+    }
+    var t = '<span class="ty">' + esc(sc.t || "any") + "</span>";
+    if (sc.e) t += ' <span class="muted">' + esc(sc.e.join(" | ")) + "</span>";
+    if (sc.x) t += ' <span class="muted">' + esc(L.example) + ": " + esc(sc.x) + "</span>";
+    return t;
+  }
+  function dataSentence(list) {
+    var w = list.filter(function (p) { return p[1] & W; }).map(function (p) { return '<a href="#/t/' + p[0] + '">' + esc(IX.tableNames[p[0]] || label(p[0])) + "</a>"; });
+    var r = list.filter(function (p) { return p[1] & R; }).map(function (p) { return '<a href="#/t/' + p[0] + '">' + esc(IX.tableNames[p[0]] || label(p[0])) + "</a>"; });
+    var out = [];
+    if (w.length) out.push(esc(L.writesTo) + " " + w.join(", ") + ".");
+    if (r.length) out.push(esc(L.readsFrom) + " " + r.join(", ") + ".");
+    return out.join(" ");
+  }
+  function endpointHtml(r, dm) {
+    var doc = r.doc || {}, ch = chunk(dm.chunk), h = "";
+    var desc = doc.desc || (doc.src === "comment" ? "" : "");
+    if (desc) h += '<p class="ep-desc">' + esc(desc) + "</p>";
+    // parameters: the docs' own, plus path parameters they don't mention
+    var params = (doc.params || []).slice();
+    (r.pp || []).forEach(function (p) { if (!params.some(function (x) { return x[0] === p; })) params.push([p, "path", "", 1, ""]); });
+    if (params.length) {
+      h += "<h4>" + esc(L.params) + '</h4><table class="params"><tbody>' + params.map(function (p) {
+        return '<tr><td class="pname">' + esc(p[0]) + (p[3] ? '<span class="req">*</span>' : "") + '</td><td class="muted">' + esc(p[1]) + (p[2] ? " · " + esc(p[2]) : "") + "</td><td>" + esc(p[4] || "") + "</td></tr>";
+      }).join("") + "</tbody></table>";
+    }
+    if (doc.body) h += "<h4>" + esc(L.requestBody) + '</h4><div class="schema">' + schemaHtml(doc.body, 0) + "</div>";
+    if (doc.resp && doc.resp.length) {
+      h += "<h4>" + esc(L.responses) + "</h4>" + doc.resp.map(function (x) {
+        var ok = /^2/.test(x[0]);
+        return '<div class="resp"><span class="rcode ' + (ok ? "ok" : /^[45]/.test(x[0]) ? "bad" : "") + '">' + esc(x[0]) + "</span> " + esc(x[1] || "") +
+               (x[2] && (ok || x[2].r) ? '<div class="schema">' + schemaHtml(x[2], 0) + "</div>" : "") + "</div>";
+      }).join("");
+    }
+    if (!doc.src || doc.src === "comment") h += '<p class="muted small">' + esc(L.noDocs) + "</p>";
+    // who uses it: screens by a human name
+    if (r.sc.length) {
+      h += "<h4>" + esc(L.usedOnScreens) + "</h4><div>" + r.sc.map(function (p) {
+        return '<span class="chip screen" title="' + esc(p[1]) + '">' + esc(humanFile(p[1])) + ' <span class="muted">' + esc(svcName(p[0])) + "</span></span>";
+      }).join("") + "</div>";
+    } else if (r.nc) {
+      h += "<h4>" + esc(L.consumers) + '</h4><p class="muted">' + esc(fmt(L.calledByN, { n: num(r.nc) })) + "</p>";
+    }
+    if (r.t.length) h += "<h4>" + esc(L.dataTitleShort) + '</h4><p class="ep-data">' + dataSentence(r.t) + "</p>";
+    h += '<p><button class="code-btn" data-code="' + r.i + '">' + esc(L.seeCode) + ' ▾</button></p><div class="tree code" id="code-' + r.i + '" hidden></div>';
+    return h;
+  }
+  function wireEndpoint(r, dm) {
+    var body = $("ep-" + r.i);
+    body.onclick = function (ev) {
+      var t = ev.target;
+      if (t.classList.contains("tog-obj")) { t.parentNode.classList.toggle("open"); t.textContent = t.parentNode.classList.contains("open") ? "{" : "{ … }"; ev.stopPropagation(); return; }
+      if (t.dataset && t.dataset.code) {
+        var box = $("code-" + r.i);
+        box.hidden = !box.hidden;
+        if (!box.hidden && !box.children.length) renderTree(box, r.h, dm.chunk);
+        t.textContent = (box.hidden ? L.seeCode + " ▾" : L.hideCode + " ▴");
+        ev.stopPropagation();
+        return;
+      }
+      ev.stopPropagation();
+    };
+  }
+  function humanFile(f) {
+    var parts = f.split("/"), base = parts.pop().replace(/\.[^.]+$/, "");
+    if (/^(index|page|route|main)$/i.test(base) && parts.length) base = parts.pop();
+    base = base.replace(/(Page|Screen|View|Container|Route)$/, "") || base;
+    return base.replace(/[-_]+/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/^./, function (c) { return c.toUpperCase(); }).trim();
   }
   function shortFn(s) { return s.length > 48 ? "…" + s.slice(-47) : s; }
 
@@ -442,15 +555,11 @@
   }
 
   function routeDetail(r, dm) {
-    var ch = chunk(dm.chunk), hrec = r.h.length ? ch.fns[r.h[0]] : null;
+    var ch = chunk(dm.chunk);
     var h = "<h2>" + (/^[A-Z]+$/.test(r.m) ? methodHtml(r.m) + pathHtml(r.p) : esc(r.m + " " + r.p)) + "</h2>";
     h += '<p class="muted">' + esc(SV[dm.svc].name) + " › " + esc(dm.name === "other" ? L.other : dm.name) + "</p>";
-    if (r.ev) h += '<p class="ev">' + esc(r.ev) + "</p>";
-    if (r.why) h += '<div class="why">' + esc(r.why) + "</div>";
-    h += sigHtml(hrec, r.pp);
     if (r.h.length) h += "<h3>" + esc(L.handler) + "</h3><ul>" + r.h.map(function (f) { var rec = ch.fns[f]; return "<li>" + fnLink(f) + (rec ? ' <div class="ev">' + esc(rec[1]) + "</div>" : "") + "</li>"; }).join("") + "</ul>";
-    if (hrec && hrec[2] && hrec[2] !== r.why) h += '<div class="why">' + esc(hrec[2]) + "</div>";
-    if (r.t.length) h += "<h3>" + esc(L.readsWrites) + "</h3><ul>" + r.t.map(function (p) { return "<li>" + rwChip(p[0], p[1]) + ' <span class="muted">' + esc((tableRow[p[0]] || {}).db || "") + "</span></li>"; }).join("") + "</ul>";
+    if (r.why && !(r.doc && r.doc.src === "swag")) h += '<div class="why">' + esc(r.why) + "</div>";
     h += "<h3>" + esc(L.consumers) + " (" + num(r.nc) + ")</h3>";
     if (!r.nc) h += '<p class="muted">' + esc(L.noConsumers) + "</p>";
     else {
@@ -737,8 +846,9 @@
     if (ev.target.closest("a")) return;
     var card = ev.target.closest("[data-href]");
     if (card) { location.hash = card.dataset.href; return; }
-    var tr = ev.target.closest("tr[data-route]");
-    if (tr) {
+    var head = ev.target.closest(".ep-head");
+    var tr = head && head.parentNode;
+    if (tr && tr.dataset.route !== undefined) {
       var r = +tr.dataset.route;
       location.hash = openRoute === r ? "#/d/" + IX.routeDomain[r] : "#/r/" + r;
     }

@@ -1,7 +1,8 @@
 """Fictional multi-service graph for `bizmap export` (README GIF, docs, tests).
 
-    python scripts/export_demo_graph.py examples/export/shop.graph.json
-    bizmap export --graph examples/export/shop.graph.json --out /tmp/shop.html
+    python scripts/export_demo_graph.py examples/export/shop.graph.json examples/export/api/openapi.json
+    cd examples/export && bizmap export --graph shop.graph.json --out /tmp/shop.html
+    # (the api's openapi.json is found next to it: <service>/openapi.json)
 
 An invented shop: an API (orders, users, projects, cart), billing, catalog,
 shipping, a worker and a web front end whose pages call the API, some of them
@@ -55,8 +56,14 @@ ROUTES = {
         ("GET", "/api/v1/health", "Health", [], ""),
     ],
     "billing": [
-        ("POST", "/invoices", "create_invoice", [("w", "invoices", ["order_id", "status", "amount_cents"]), ("r", "orders", ["total_cents"])], ""),
-        ("GET", "/invoices/:id", "get_invoice", [("r", "invoices", ["id", "status"])], ""),
+        ("POST", "/invoices", "create_invoice", [("w", "invoices", ["order_id", "status", "amount_cents"]), ("r", "orders", ["total_cents"])],
+         "create_invoice handles POST /invoices @Summary Create an invoice for an order @Description Bills the order total; "
+         "one invoice per order. @Tags invoices @Accept json @Produce json @Param body body billing.InvoiceRequest true "
+         '"Order to bill" @Success 201 {object} billing.Invoice @Failure 409 {object} billing.Error "Already billed" '
+         "@Router /invoices [post]"),
+        ("GET", "/invoices/:id", "get_invoice", [("r", "invoices", ["id", "status"])],
+         'get_invoice handles GET /invoices/:id @Summary Get an invoice @Tags invoices @Param id path string true "Invoice ID" '
+         '@Success 200 {object} billing.Invoice @Failure 404 {object} billing.Error "Not found" @Router /invoices/{id} [get]'),
         ("POST", "/webhooks/payment", "payment_webhook", [("w", "payments", ["status", "captured_at"]), ("r", "invoices", ["id"])], ""),
         ("POST", "/refunds", "create_refund", [("w", "payments", ["status"]), ("w", "audit_log", ["action", "entity"])], ""),
     ],
@@ -206,9 +213,74 @@ def build() -> dict:
     }
 
 
+def build_openapi() -> dict:
+    """An OpenAPI 3 file for the fictional `api` service (what FastAPI or
+    swag would generate): the JSON each route receives and returns."""
+    ref = lambda name: {"$ref": f"#/components/schemas/{name}"}  # noqa: E731
+    ok = lambda schema, desc="OK": {"description": desc, "content": {"application/json": {"schema": schema}}}  # noqa: E731
+    err = {"description": "Error", "content": {"application/json": {"schema": ref("Error")}}}
+    pid = {"name": "id", "in": "path", "required": True, "schema": {"type": "string"}, "description": "Project ID"}
+    return {
+        "openapi": "3.0.3",
+        "info": {"title": "Shop API", "version": "1.0"},
+        "servers": [{"url": "https://api.shop.example/api/v1"}],
+        "paths": {
+            "/orders": {
+                "get": {"summary": "List your orders", "tags": ["orders"],
+                        "parameters": [{"name": "status", "in": "query", "schema": {"type": "string",
+                                        "enum": ["pending", "paid", "cancelled"]}, "description": "Only orders in this status"}],
+                        "responses": {"200": ok({"type": "array", "items": ref("Order")})}},
+                "post": {"summary": "Place an order", "description": "Creates the order, reserves stock and bills it.",
+                         "tags": ["orders"],
+                         "requestBody": {"required": True, "content": {"application/json": {"schema": ref("CreateOrderRequest")}}},
+                         "responses": {"201": ok(ref("Order"), "Created"), "409": err}},
+            },
+            "/orders/{id}": {"get": {"summary": "Get an order", "tags": ["orders"],
+                                     "parameters": [{"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                                     "responses": {"200": ok(ref("Order")), "404": err}}},
+            "/projects": {
+                "get": {"summary": "List projects", "tags": ["projects"], "responses": {"200": ok({"type": "array", "items": ref("Project")})}},
+                "post": {"summary": "Create a project", "tags": ["projects"],
+                         "requestBody": {"content": {"application/json": {"schema": {"type": "object", "required": ["name"],
+                                         "properties": {"name": {"type": "string", "example": "Kitchen remodel"}}}}}},
+                         "responses": {"201": ok(ref("Project"), "Created")}},
+            },
+            "/projects/{id}": {"get": {"summary": "Get a project with its tasks", "tags": ["projects"], "parameters": [pid],
+                                       "responses": {"200": ok(ref("Project")), "404": err}}},
+            "/projects/{id}/archive": {"post": {
+                "summary": "Archive a project", "description": "Archives the project; its tasks stay readable.",
+                "tags": ["projects"], "parameters": [pid],
+                "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {
+                    "reason": {"type": "string", "description": "Why it is archived"}}}}}},
+                "responses": {"200": ok(ref("Project")), "404": err}}},
+        },
+        "components": {"schemas": {
+            "Error": {"type": "object", "required": ["message"], "properties": {"message": {"type": "string"}}},
+            "Money": {"type": "object", "properties": {"amount_cents": {"type": "integer"}, "currency": {"type": "string", "example": "BRL"}}},
+            "OrderItem": {"type": "object", "required": ["sku", "qty"], "properties": {
+                "sku": {"type": "string"}, "qty": {"type": "integer", "description": "Units"}, "price": ref("Money")}},
+            "Order": {"type": "object", "required": ["id", "status"], "properties": {
+                "id": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "paid", "cancelled"]},
+                "items": {"type": "array", "items": ref("OrderItem")}, "total": ref("Money"),
+                "created_at": {"type": "string", "format": "date-time"}}},
+            "CreateOrderRequest": {"type": "object", "required": ["items"], "properties": {
+                "items": {"type": "array", "items": ref("OrderItem")}, "coupon": {"type": "string", "description": "Optional coupon code"}}},
+            "Task": {"type": "object", "properties": {"id": {"type": "string"}, "title": {"type": "string"}, "done": {"type": "boolean"}}},
+            "Project": {"type": "object", "required": ["id", "name"], "properties": {
+                "id": {"type": "string"}, "name": {"type": "string"}, "archived_at": {"type": "string", "format": "date-time"},
+                "tasks": {"type": "array", "items": ref("Task")}}},
+        }},
+    }
+
+
 if __name__ == "__main__":
     data = build()
-    with open(sys.argv[1] if len(sys.argv) > 1 else "shop.graph.json", "w", encoding="utf-8") as fh:
+    out = sys.argv[1] if len(sys.argv) > 1 else "shop.graph.json"
+    with open(out, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=1, sort_keys=True)
         fh.write("\n")
+    if len(sys.argv) > 2:  # the api service's OpenAPI file, e.g. examples/export/api/openapi.json
+        with open(sys.argv[2], "w", encoding="utf-8") as fh:
+            json.dump(build_openapi(), fh, indent=1)
+            fh.write("\n")
     print(len(data["nodes"]), "nodes", len(data["edges"]), "edges")

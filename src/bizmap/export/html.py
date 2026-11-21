@@ -52,9 +52,12 @@ def render_html(
     *,
     domain_rules: dict[str, list[tuple[str, str, str]]] | None = None,
     domains_by: str = "path",
+    specs: list[tuple[str | None, dict[str, Any]]] | None = None,
 ) -> str:
     lang = lang if lang in LANGS else "en"
-    index, chunks = build_book(data, svc_of, domain_rules=domain_rules, domains_by=domains_by, lang=lang)
+    index, chunks = build_book(
+        data, svc_of, domain_rules=domain_rules, domains_by=domains_by, lang=lang, specs=specs
+    )
     services = index["services"]
     if title:
         name = title
