@@ -31,6 +31,17 @@
   column (JSON `downstream`, a Markdown section).
 - HTML export: a table's page has a **Data flow** section — diagram,
   column correspondence both ways, and the diagram as Mermaid text.
+- **Function signatures.** Function nodes carry `params` (in order:
+  `[{name, type?, optional?}]`, `[]` when there are none) and `returns` (the
+  return type's text) for Go, Python and TypeScript (plain JavaScript: names
+  only). Optional fields: older graphs stay valid.
+- The HTML export shows the signature (`get(id: string, opts?: Options):
+  Promise<Order>`) under a function's name in its panel and page, as the
+  tooltip of its row in the call tree, and for the handler at the top of a
+  route. Without one in the graph: `name(…)`.
+- `pytest -m browser`: the exported HTML opened in Chromium (offline), every
+  kind of page visited; fails on a page error, a console error, a network
+  request or the error panel. Its own CI job.
 - **PR comment (GitHub Action), triggers:** the Triggers table shows the whole
   clause (`AFTER UPDATE OF status`), and "Fired by this change" answers
   **yes**, **no** (with the reason: no matching event in the writes, or the
