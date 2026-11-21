@@ -653,10 +653,8 @@
   function sigText(i, rec) {
     var name = label(i, rec), sig = rec && rec[9];
     if (name.indexOf(" ") < 0) name = name.slice(name.lastIndexOf(".") + 1);
-    if (!sig || !sig.params) return name + "(…)";
-    return name + "(" + sig.params.map(function (p) {
-      return p.name + (p.optional ? "?" : "") + (p.type ? ": " + p.type : "");
-    }).join(", ") + ")" + (sig.returns ? ": " + sig.returns : "");
+    if (!sig) return name + "(…)";
+    return name + "(" + sig[0] + ")" + (sig[1] ? ": " + sig[1] : "");
   }
   function sigLine(i, rec) { return '<div class="sig" title="' + esc(L.signature) + '">' + esc(sigText(i, rec)) + "</div>"; }
 

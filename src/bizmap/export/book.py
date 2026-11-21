@@ -166,6 +166,23 @@ def node_order(data: dict[str, Any], svc_of: dict[str, str | None], services: li
     return [n["id"] for n in sorted(data.get("nodes") or [], key=key)]
 
 
+def signature_record(node: dict[str, Any]) -> list[str] | None:
+    """The function's signature as the page shows it, compact:
+    `["id: string, opts?: Options", "Promise<Order>"]` (returns "" when none);
+    None when the graph has no signature for it."""
+    params = node.get("params")
+    if not isinstance(params, list):
+        return None
+    parts = []
+    for p in params:
+        if isinstance(p, dict):
+            name = str(p.get("name") or "_") + ("?" if p.get("optional") else "")
+            parts.append(f"{name}: {p['type']}" if p.get("type") else name)
+        else:
+            parts.append(str(p))
+    return [", ".join(parts), str(node.get("returns") or "")]
+
+
 def build_book(
     data: dict[str, Any],
     svc_of: dict[str, str | None],
@@ -335,12 +352,8 @@ def build_book(
             http_out[i],
             unresolved_by.get(i, []),
         ]
-        sig: dict[str, Any] = {}
-        if node.get("params") is not None:
-            sig["params"] = node["params"]
-        if node.get("returns") is not None:
-            sig["returns"] = node["returns"]
-        if sig:
+        sig = signature_record(node)
+        if sig is not None:
             rec.append(sig)
         return rec
 
