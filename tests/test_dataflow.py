@@ -687,6 +687,21 @@ def test_impact_without_feeds_has_no_downstream_key(tmp_path: Path) -> None:
     assert "downstream" not in compute_impact(Graph(), "").to_dict()
 
 
+def test_html_table_page_ships_flow_and_escapes(tmp_path: Path) -> None:
+    from bizmap.export import export_graph
+
+    g = _go_graph(tmp_path)
+    g.nodes["table:pedidos"].attrs["db"] = "orders<db>"
+    html = export_graph(g.to_dict())
+    assert '"flow":' in html
+    assert "<db>" not in html.split("<script", 1)[1].split("</script>", 1)[0]  # JSON data is escaped
+    data = g.to_dict()
+    for e in data["edges"]:
+        e.pop("column_map", None)
+    no_feeds = {**data, "edges": [e for e in data["edges"] if e["type"] != "feeds"]}
+    assert '"flow":' not in export_graph(no_feeds)
+
+
 def test_graph_without_flow_is_unchanged(tmp_path: Path) -> None:
     """Same graph with and without the pass when nothing feeds anything."""
     f = "svc/svc.go"
