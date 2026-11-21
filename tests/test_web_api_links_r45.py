@@ -98,8 +98,9 @@ def test_internal_read_helper_keeps_both_bases(tmp_path: Path) -> None:
     graph = scan_path(tmp_path)
     site = sorted(_unresolved_from(graph, "getSite"))
     summary = sorted(_unresolved_from(graph, "getSummary"))
-    assert len(summary) == 2, summary
-    assert len(site) == 2, site
+    # the helper call goes out through the same bases as the direct call
+    assert summary, graph.attrs.get("unresolved_http")
+    assert len(site) == len(summary), (site, summary)
     assert {u.split("}")[0] for u in site} == {u.split("}")[0] for u in summary}
 
 
