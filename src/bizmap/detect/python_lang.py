@@ -72,9 +72,15 @@ SA_INSERT_ALIASES = {
 }
 
 
+_SA_PREFIXED = re.compile(r"^(?:sa|sqla|sqlalchemy|pg|postgres|postgresql|psql|mysql|sqlite|core)_(insert|update|delete|select)$")
+
+
 def _sa_name(name: str) -> str:
-    """A dialect ``insert`` alias is SQLAlchemy's ``insert``."""
-    return "insert" if name in SA_INSERT_ALIASES else name
+    """A dialect / aliased ``insert`` (``pg_insert``, ``sa_insert``…) is SQLAlchemy's."""
+    if name in SA_INSERT_ALIASES:
+        return "insert"
+    m = _SA_PREFIXED.match(name)
+    return m.group(1) if m else name
 HTTP_CLIENT_LIBS = ("httpx", "requests", "aiohttp", "urllib")
 HTTP_CLIENT_CTORS = {
     "Client",
@@ -1120,6 +1126,31 @@ class PythonAnalyzer:
         self._flask = next((r for r in self.rules if r.framework == "flask"), None)
         self._firebase = next((r for r in self.rules if r.framework == "firebase"), None)
         self._sql_rules = [r for r in self.rules if "sql" in r.produce]
+        self._fn_bindings: dict[tuple[str, int], dict[str, str]] = {}
+
+    def _bindings_for(self, analysis: PyAnalysis, fn: PyFunction) -> dict[str, str]:
+        """Table bindings seen from ``fn``: the module's, plus ``t = order_summary``
+        in the function and ``self._t = order_summary`` in its class."""
+        key = (fn.file, fn.node.start_byte)
+        hit = self._fn_bindings.get(key)
+        if hit is not None:
+            return hit
+        base = analysis.bindings
+        cur = parent_of(fn.node)
+        while cur is not None and cur.type != "class_definition":
+            cur = parent_of(cur)
+        class_extra: dict[str, str] = {}
+        if cur is not None:
+            ckey = (fn.file, -1 - cur.start_byte)
+            cached = self._fn_bindings.get(ckey)
+            if cached is None:
+                cached = _alias_bindings([cur], base, analysis.models, self_only=True)
+                self._fn_bindings[ckey] = cached
+            class_extra = cached
+        extra = {**class_extra, **_alias_bindings([fn.node], {**base, **class_extra}, analysis.models)}
+        out = {**base, **extra} if extra else base
+        self._fn_bindings[key] = out
+        return out
 
     def analyze(
         self,
@@ -1131,6 +1162,7 @@ class PythonAnalyzer:
         _ENCLOSING_FN.clear()
         _PY_REEXPORTS.clear()
         clear_parent_index()
+        self._fn_bindings.clear()
         parsed: list[tuple[Path, str, bytes, Node, str, ImportMap, list[PyFunction]]] = []
         forest: list[object] = []
         consts_by_module: dict[str, dict[str, ResolvedString]] = {}
@@ -1384,10 +1416,33 @@ class PythonAnalyzer:
         blueprints: dict[str, str] = {}
         imap = imap or ImportMap()
         factories = factories or {}
+        aliases: list[tuple[str, list[str]]] = []  # `feeds = served if cond else unserved`
         for node in walk(tree):
             if node.type == "assignment":
                 left = node.child_by_field_name("left")
                 right = node.child_by_field_name("right")
+                if left is not None and right is not None and left.type == "identifier" and right.type in (
+                    "conditional_expression", "parenthesized_expression", "identifier"
+                ):
+                    inner = right
+                    while inner.type == "parenthesized_expression" and inner.named_children:
+                        inner = inner.named_children[0]
+                    names: list[str] = []
+                    if inner.type == "conditional_expression" and len(inner.named_children) >= 3:
+                        # `a if cond else b`: children are a, cond, b
+                        branch_nodes = [inner.named_children[0], inner.named_children[2]]
+                        names = [text(b) for b in branch_nodes if b.type == "identifier"]
+                    elif inner.type == "identifier":
+                        names = [text(inner)]
+                    known = [n for n in names if n in routers or n in blueprints]
+                    if known:
+                        lname0 = text(left)
+                        if known[0] in routers:
+                            routers[lname0] = routers[known[0]]
+                        else:
+                            blueprints[lname0] = blueprints[known[0]]
+                        aliases.append((lname0, known))
+                    continue
                 if left is None or right is None or right.type != "call":
                     continue
                 lname = text(left) if left.type == "identifier" else ""
@@ -1427,6 +1482,11 @@ class PythonAnalyzer:
                 if "prefix" in kw:
                     extra = resolve(kw["prefix"]).path_text
                 includes.append((rname, extra))
+        # a router picked by an expression is included wherever one of its candidates is
+        for alias, targets in aliases:
+            for rname, extra in list(includes):
+                if rname in targets and (alias, extra) not in includes:
+                    includes.append((alias, extra))
         return routers, includes, blueprints
 
     def _detect_routes(
@@ -1983,8 +2043,12 @@ class PythonAnalyzer:
                     # SQLAlchemy detector; their source text is not SQL. When
                     # the model/table cannot be resolved (it lives outside the
                     # scan), keep an honest `table:unknown` trace instead of
-                    # dropping the access.
-                    if not _builder_resolves(arg, analysis.bindings, analysis.models):
+                    # dropping the access. A chain with no statement at its
+                    # root (`by_customer.values()`) is not SQLAlchemy at all.
+                    is_builder, table = _builder_root(
+                        arg, self._bindings_for(analysis, fn), analysis.models, fn.node
+                    )
+                    if is_builder and not table:
                         analysis.accesses.append(
                             PyAccess(
                                 fn,
@@ -2030,12 +2094,26 @@ class PythonAnalyzer:
         resolve,
         evidence: Evidence,
     ) -> None:
-        bindings = analysis.bindings
         models = analysis.models
         method = _sa_name(method)
-        if method in SA_QUERY:
-            if not pos:
+        if method not in SA_QUERY and method not in ("values", "on_conflict_do_update", "add", "delete", "query",
+                                                     "where", "filter", "filter_by"):
+            return
+        bindings = self._bindings_for(analysis, fn)
+        if method in SA_QUERY and not pos:
+            # `order_summary.insert()` / `.update()` / `.delete()` / `.select()`: a Table method
+            func = node.child_by_field_name("function")
+            obj = func.child_by_field_name("object") if func is not None and func.type == "attribute" else None
+            if obj is None or obj.type not in ("identifier", "attribute"):
                 return
+            table, col = _resolve_table_ref(obj, bindings, models)
+            if not table or col:
+                return
+            kind = "read" if method == "select" else "write"
+            op = None if method == "select" else method.upper()
+            analysis.accesses.append(PyAccess(fn, kind, table, None, Confidence.INFERRED, evidence, op=op))
+            return
+        if method in SA_QUERY:
             cols: list[tuple[str, str | None]] = []
             for arg in pos:
                 table, col = _resolve_table_ref(arg, bindings, models)
@@ -2627,7 +2705,10 @@ def _resolve_table_ref(
             return models[name].table, None
         return None, None
     if node.type == "attribute":
-        parts = text(node).split(".")
+        whole = text(node)
+        if whole in bindings:
+            return bindings[whole], None
+        parts = whole.split(".")
         if len(parts) >= 3 and parts[1] == "c":
             table = bindings.get(parts[0]) or (models[parts[0]].table if parts[0] in models else None)
             return table, parts[-1].lower()
@@ -2787,6 +2868,70 @@ def _dict_keys(arg: Node | None, scope: Node | None, before: Node, bindings: dic
             if col:
                 out.append(col)
     return out
+
+
+def _alias_bindings(scopes: list[Node], base: dict[str, str], models: dict, self_only: bool = False) -> dict[str, str]:
+    """``t = order_summary`` / ``self._t = order_summary`` → {"t" / "self._t": table}."""
+    extra: dict[str, str] = {}
+    for scope in scopes:
+        for n in walk(scope):
+            if n.type != "assignment":
+                continue
+            left = n.child_by_field_name("left")
+            right = n.child_by_field_name("right")
+            if left is None or right is None or right.type not in ("identifier", "attribute"):
+                continue
+            lname = text(left)
+            if left.type == "attribute" and not lname.startswith("self."):
+                continue
+            if left.type not in ("identifier", "attribute") or (self_only and left.type != "attribute"):
+                continue
+            table, col = _resolve_table_ref(right, {**base, **extra}, models)
+            if table and not col:
+                extra.setdefault(lname, table)
+    return extra
+
+
+def _builder_root(
+    node: Node, bindings: dict[str, str], models: dict, scope: Node | None, depth: int = 0
+) -> tuple[bool, str | None]:
+    """Is ``node`` a SQLAlchemy statement, and on which table?
+
+    The root is ``insert(t)`` / ``select(t)`` / … (a function), or
+    ``t.insert()`` on a known Table (a method); a chain that starts at a
+    variable follows its assignment above (``stmt.on_conflict_do_update(…)``).
+    ``x.values()`` / ``lst.insert(0, v)`` on anything else is not a statement."""
+    chain = _builder_chain(node)
+    for name, call in chain:
+        if name not in _BUILDER_ROOTS:
+            continue
+        func = call.child_by_field_name("function")
+        pos = call_posargs(call)
+        if func is not None and func.type == "attribute":
+            obj = func.child_by_field_name("object")
+            if obj is not None and obj.type == "call":
+                continue  # `(…).insert(…)` inside a longer chain
+            table, col = _resolve_table_ref(obj, bindings, models) if obj is not None else (None, None)
+            if table and not col and not pos:
+                return True, table
+            if func.child_by_field_name("attribute") is not None and text(obj or func).split(".")[0] in ("sa", "sqlalchemy"):
+                pass  # `sa.insert(t)`: a function reached by its module
+            else:
+                return False, None
+        for a in pos:
+            table, _ = _resolve_table_ref(a, bindings, models)
+            if table:
+                return True, table
+        return True, None
+    if not chain or scope is None or depth >= 3:
+        return False, None
+    func = chain[-1][1].child_by_field_name("function")
+    base = func.child_by_field_name("object") if func is not None and func.type == "attribute" else None
+    if base is not None and base.type == "identifier":
+        right = _assignment_before(text(base), scope, node)
+        if right is not None and right.type == "call":
+            return _builder_root(right, bindings, models, scope, depth + 1)
+    return False, None
 
 
 def _builder_resolves(node: Node, bindings: dict[str, str], models: dict) -> bool:
