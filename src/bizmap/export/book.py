@@ -68,7 +68,9 @@ METHOD_ORDER = {"GET": 0, "POST": 1, "PUT": 2, "PATCH": 3, "DELETE": 4}
 
 
 NOISE = re.compile(
-    r"(\.(test|spec|stories|e2e)\.[^/]+$|\.d\.ts$|(^|/)(__tests__|__mocks__|tests?|spec|e2e|fixtures|generated|__generated__)/)"
+    r"(\.(test|spec|stories|story|e2e|cy|mock)\.[^/]+$|\.d\.ts$|"
+    r"(^|/)(__tests__|__mocks__|mocks?|tests?|testing|test-utils|test_utils|spec|e2e|cypress|playwright|"
+    r"stories|storybook|\.storybook|fixtures|generated|__generated__)/)"
 )
 
 
@@ -263,6 +265,23 @@ def build_book(
 
     files = [_file(n) for n in nodes]
     noise = [is_noise(f) for f in files]
+    # functions some entrypoint of their own service reaches (calls / triggers / enqueues)
+    reached = [False] * n_nodes
+    stack = [i for i in range(n_nodes) if ntype[i] == T_ENTRY]
+    for i in stack:
+        reached[i] = True
+    while stack:
+        u = stack.pop()
+        for v in out_calls[u]:
+            if not reached[v] and nsvc[v] == nsvc[u]:
+                reached[v] = True
+                stack.append(v)
+    # a service calling its own routes from code none of its routes reaches is a
+    # generated SDK / client kept in the API repo, not a consumer
+    for a, _b in list(http_pairs_self(http_out, nsvc, ntype)):
+        if not reached[a]:
+            noise[a] = True
+
     has_ui = {s for s, row in enumerate(svc_rows) if row["kind"] == "web"
               and any(is_ui_file(files[i]) for i in range(row_start(nsvc, s), row_end(nsvc, s)) if ntype[i] == T_FUNC)}
 
@@ -409,7 +428,12 @@ def build_book(
                 callers_http = [c for c in http_in[e] if not noise[c]]
                 hidden = len(http_in[e]) - len(callers_http)
                 consumers_total += len(callers_http)
-                screens_of = sorted({(nsvc[c], f) for c in callers_http for f in ui_reach.get(c, ())})
+                guess_of: dict[tuple[int, str], int] = {}
+                for c in callers_http:
+                    g = 1 if (c, e) in http_guess else 0
+                    for f in ui_reach.get(c, ()):
+                        guess_of[(nsvc[c], f)] = min(guess_of.get((nsvc[c], f), 1), g)
+                screens_of = sorted((sv, f, g) for (sv, f), g in guess_of.items())
                 route_rows.append(
                     {
                         "i": e,
@@ -421,7 +445,7 @@ def build_book(
                         "c": [[c, 1 if (c, e) in http_guess else 0] for c in callers_http[:CONSUMER_CAP]],
                         "nc": len(callers_http),
                         "nh": hidden,
-                        "sc": [[sv, f] for sv, f in screens_of[:CONSUMER_CAP]],
+                        "sc": [[sv, f, g] for sv, f, g in screens_of[:CONSUMER_CAP]],
                         "ev": _evidence(node),
                         "why": str(node.get("why") or ""),
                         "doc": docs.get(e),
@@ -494,11 +518,12 @@ def build_book(
         elif row["kind"] == "web":
             # no UI files (a Vite app with only .ts): the calling files are the screens
             screens = [{"f": c["f"], "g": c["g"], "via": c["fns"], "r": c["r"], "u": c["u"]} for c in clients]
-        linked = sum(1 for c in clients if c["ui"] or is_ui_file(c["f"]))
+        linked = sum(1 for c in clients if c["ui"] or is_ui_file(c["f"])) if s in has_ui else len(clients)
         chunks[cid] = {"screens": screens, "clients": clients, "fns": fns}
         row["screens"] = len(screens)
         row["clients"] = len(clients)
         row["clients_linked"] = linked
+        row["has_ui"] = s in has_ui
         row["unmatched"] = sum(c["u"] for c in clients)
         row["screen_chunk"] = cid
 
@@ -614,7 +639,7 @@ def build_book(
         "domains": domains,
         "tables": table_rows,
         "tableNames": {str(r["i"]): labels[r["i"]] for r in table_rows},
-        "connections": [[svc_index[c["from"]], svc_index[c["to"]], c["links"]] for c in overview["connections"]],
+        "connections": clean_connections(http_out, nsvc, noise),
         "risks": risks,
         "chunks": chunk_ids,
         "routeDomain": {str(e): d for e, d in route_domain.items()},
@@ -624,6 +649,26 @@ def build_book(
                  "schemas": bool(table.named)},
     }
     return index_doc, chunks
+
+
+def http_pairs_self(http_out: list[list[int]], nsvc: list[int], ntype: list[int]):
+    """(caller, route) calls_http pairs inside one service."""
+    for a, targets in enumerate(http_out):
+        for b in targets:
+            if nsvc[a] >= 0 and nsvc[a] == nsvc[b]:
+                yield a, b
+
+
+def clean_connections(http_out: list[list[int]], nsvc: list[int], noise: list[bool]) -> list[list[int]]:
+    """[caller service, callee service, links] without tests, mocks or generated code."""
+    links: dict[tuple[int, int], int] = defaultdict(int)
+    for a, targets in enumerate(http_out):
+        if noise[a] or nsvc[a] < 0:
+            continue
+        for b in targets:
+            if nsvc[b] >= 0 and nsvc[b] != nsvc[a]:
+                links[(nsvc[a], nsvc[b])] += 1
+    return [[a, b, n] for (a, b), n in sorted(links.items())]
 
 
 def row_start(nsvc: list[int], s: int) -> int:

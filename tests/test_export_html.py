@@ -277,7 +277,7 @@ def test_demo_book_levels_screens_and_unmatched_calls() -> None:
     assert {"service.Projects.Archive", "validate.Projects.Archive", "audit.Log"} <= tree
     # consumers: the web page that calls it
     assert [[names[c], g] for c, g in archive["c"]] == [["src.pages.projects.ProjectBoard.archive", 0]]
-    assert [f for _s, f in archive["sc"]] == ["src/pages/projects/ProjectBoard.tsx"] and archive["nh"] == 0
+    assert [f for _s, f, _g in archive["sc"]] == ["src/pages/projects/ProjectBoard.tsx"] and archive["nh"] == 0
     # web screens, with the calls that matched no route
     web = next(s for s in index["services"] if s["kind"] == "web")
     assert web["screens"] == 11 and web["unmatched"] == 3
@@ -636,7 +636,7 @@ def test_screens_are_ui_files_reaching_the_api_client_and_tests_are_left_out() -
     api_dom = next(d for d in index["domains"] if index["services"][d["svc"]]["name"] == "api")
     route = chunks[api_dom["chunk"]]["routes"][0]
     assert sorted(names[c] for c, _g in route["c"]) == ["src.api.orders.getOrder", "src.api.users.getUser"]
-    assert route["nh"] == 2 and [f for _s, f in route["sc"]] == ["src/pages/Orders.tsx"]
+    assert route["nh"] == 2 and [[f, g] for _s, f, g in route["sc"]] == [["src/pages/Orders.tsx", 0]]
 
 
 def test_module_level_functions_read_as_modules_and_unmatched_calls_on_any_service() -> None:
@@ -757,3 +757,54 @@ def test_export_finds_the_spec_next_to_each_repo(tmp_path: Path) -> None:
 def test_example_spec_is_the_demo_spec() -> None:
     stored = json.loads((ROOT / "examples" / "export" / "api" / "openapi.json").read_text(encoding="utf-8"))
     assert stored == json.loads(json.dumps(_demo_spec()))
+
+
+# ── round: noise, self-calls, likely screens, counts ────────────────────────
+
+
+def noisy_graph() -> dict:
+    g = react_graph()
+    g["nodes"] += [
+        _n("web/function:src.mocks.handlers.module", "function", evidence={"file": "src/mocks/handlers.ts", "line": 1}),
+        _n("web/function:cypress.e2e.orders.module", "function", evidence={"file": "cypress/e2e/orders.cy.ts", "line": 1}),
+        _n("web/function:src.test-utils.render.module", "function", evidence={"file": "src/test-utils/render.tsx", "line": 1}),
+        # an SDK generated into the API repo, outside any `generated/` folder, that no route reaches
+        _n("api/function:sdk.src.OrdersApi.getOrder", "function", evidence={"file": "sdk/src/OrdersApi.ts", "line": 3}),
+        # a page that only reaches the route through a likely (heuristic) link
+        _n("web/function:src.pages.Users.UsersPage", "function", evidence={"file": "src/pages/Users.tsx", "line": 1}),
+    ]
+    g["edges"] += [
+        _e("calls_http", "web/function:src.mocks.handlers.module", "api/entrypoint:http:GET:/orders/:id", "heuristic"),
+        _e("calls_http", "web/function:cypress.e2e.orders.module", "api/entrypoint:http:GET:/orders/:id", "heuristic"),
+        _e("calls_http", "web/function:src.test-utils.render.module", "api/entrypoint:http:GET:/orders/:id", "heuristic"),
+        _e("calls_http", "api/function:sdk.src.OrdersApi.getOrder", "api/entrypoint:http:GET:/orders/:id", "inferred"),
+        _e("calls", "web/function:src.pages.Users.UsersPage", "web/function:src.api.users.getUser"),
+    ]
+    return g
+
+
+def test_mocks_e2e_test_utils_and_unreached_self_calls_are_noise() -> None:
+    index, chunks = _book(noisy_graph())
+    names = chunks["names"]["l"]
+    api_dom = next(d for d in index["domains"] if index["services"][d["svc"]]["name"] == "api")
+    route = chunks[api_dom["chunk"]]["routes"][0]
+    assert sorted(names[c] for c, _g in route["c"]) == ["src.api.orders.getOrder", "src.api.users.getUser"]
+    assert route["nh"] == 6 and route["nc"] == 2
+    api = next(s for s in index["services"] if s["name"] == "api")
+    # the API does not "call itself" through its SDK
+    assert api.get("clients", 0) == 0 and api["hidden_calls"] == 2  # generated client + SDK
+    svc = [s["name"] for s in index["services"]]
+    assert [[svc[a], svc[b], n] for a, b, n in index["connections"]] == [["web", "api", 2]]
+
+
+def test_a_screen_reached_only_through_a_likely_link_is_likely() -> None:
+    index, chunks = _book(noisy_graph())
+    api_dom = next(d for d in index["domains"] if index["services"][d["svc"]]["name"] == "api")
+    route = chunks[api_dom["chunk"]]["routes"][0]
+    assert sorted([f, g] for _s, f, g in route["sc"]) == [["src/pages/Orders.tsx", 0], ["src/pages/Users.tsx", 1]]
+
+
+def test_ts_only_front_counts_its_files_as_linked_screens() -> None:
+    index, _chunks = _book(vite_graph())
+    web = next(s for s in index["services"] if s["name"] == "web")
+    assert web["has_ui"] is False and web["clients_linked"] == web["clients"] == 1
