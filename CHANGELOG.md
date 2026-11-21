@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.0 — 2026-11-21
+
 ### Added
 
 - **Firestore in JS/TS.** Reads and writes with the web modular SDK
