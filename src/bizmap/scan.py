@@ -13,6 +13,7 @@ from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
 from bizmap.detect.js_lang import JsAnalysis, JsAnalyzer
 from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer
 from bizmap.detect.rules import load_rules
+from bizmap.detect.signatures import go_signature, py_signature
 from bizmap.files import WalkOptions, discover_sql_files, iter_files, rel
 from bizmap.graph import (
     GRAPH_VERSION,
@@ -332,6 +333,7 @@ def _add_function_node_go(graph: Graph, fn: GoFunction) -> str:
         why=fn.why,
         end_line=None if fn.synthetic else _end_line(fn.node),
         evidence={"file": fn.file, "line": fn.line, "symbol": fn.qualname},
+        **({} if fn.synthetic else go_signature(fn.node)),
     )
     return nid
 
@@ -703,6 +705,7 @@ def _apply_python(
             why=fn.why,
             end_line=_end_line(fn.node),
             evidence={"file": fn.file, "line": fn.line, "symbol": fn.qualname},
+            **py_signature(fn.node),
             **extra,
         )
         evidence_by_fn[fn.qualname] = Evidence(file=fn.file, line=fn.line, symbol=fn.qualname)
@@ -1225,6 +1228,7 @@ def _copy_unresolved_to_entrypoints(
 def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
     ends = getattr(analysis, "function_ends", None) or {}
     whys = getattr(analysis, "function_why", None) or {}
+    sigs = getattr(analysis, "function_sigs", None) or {}
     for qual, (file, line) in (analysis.functions or {}).items():
         graph.add_node(
             function_id(qual),
@@ -1234,6 +1238,7 @@ def _apply_js(graph: Graph, analysis: JsAnalysis, schema: Schema) -> None:
             why=whys.get(qual),
             end_line=ends.get(qual),
             evidence={"file": file, "line": line, "symbol": qual},
+            **(sigs.get(qual) or {}),
         )
     for route in analysis.routes:
         if route.method == "USE":

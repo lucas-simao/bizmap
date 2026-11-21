@@ -52,7 +52,7 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 | `type` | `id` pattern | Extra fields |
 | --- | --- | --- |
 | `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:<kind>:<key>` | `kind` (`http` \| `scheduled_job` \| `firestore` \| `celery_task` \| `worker` \| `pubsub` \| `cloud_task` \| `firebase_http` \| `firebase_call`), `method`, `path`, `symbol`, `why`, `evidence`, optional `confidence`, `candidates`, `unresolved` (const path not in the scan), optional `unresolved_calls`, optional `collection` / `event`, optional `dynamic_table` / `dynamic_table_unknown` (flag/count when a reachable origin writes `table:unknown`; never a reach edge) |
-| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `end_line` (last line of the definition) and `start_line` (first line, when it differs from `evidence.line`; for an inline route handler `evidence.line` is where the registration call starts — in a chain like `new Hono().post(a).post(b)` or `router.route('/x').get(a)`, the chain's first line — and `start_line`/`end_line` are the handler function's own lines), optional `parent` (enclosing factory/function for members and route closures), optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http`, optional `route_literals` (JS/TS API-looking path strings `{path, method?, evidence}` kept for registry rematch) |
+| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `end_line` (last line of the definition) and `start_line` (first line, when it differs from `evidence.line`; for an inline route handler `evidence.line` is where the registration call starts — in a chain like `new Hono().post(a).post(b)` or `router.route('/x').get(a)`, the chain's first line — and `start_line`/`end_line` are the handler function's own lines), optional `parent` (enclosing factory/function for members and route closures), optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http`, optional `route_literals` (JS/TS API-looking path strings `{path, method?, evidence}` kept for registry rematch), optional `params` (the parameters in order: `[{name, type?, optional?}]`, `[]` when there are none) and `returns` (the return type's text) — see below |
 | `table` | `table:<name>` | `name`; optional `external` (system catalogs / `storage.*` / `vault.*` / `auth.*`), `kind` (`external_relation` \| `unresolved_relation`), `dropped` (still referenced after `DROP TABLE`), `candidates` (dynamic/`unknown`), `rls`, `policies` |
 | `view` | `view:<name>` | `name`, `kind` (`view` \| `unresolved_relation`), optional `materialized` |
 | `column` | `column:<table>.<column>` | `table`, `name`, `data_type`, `nullable`, optional `why` |
@@ -69,6 +69,22 @@ Go `qualname` is always the directory path relative to the scan root plus the
 type and method (`cmd/server.main`, `controllers/orders.Handler.Create`,
 `internal/services/appointments.Service.Run`). Functions also store the full
 Go import path.
+
+`params` / `returns` are the function's own signature text, read from the code
+(Go, Python, TypeScript; plain JavaScript gives the names only). A type is the
+code's text with whitespace collapsed, at most 120 characters (cut with `…`);
+`type` is absent for a parameter without annotation and `returns` for a
+function without a return type. Go leaves the receiver out (it is in the name)
+and writes a variadic as `...string`; Python leaves `self` / `cls` and the bare
+`*` / `/` out and keeps `*args` / `**kwargs`; defaults are not kept; a
+destructured TS/JS parameter is named by its pattern (`{ page, size }`). Both
+fields are optional: older graphs stay valid.
+
+```json
+{"id": "function:src.api.orders.ordersClient.get", "type": "function",
+ "params": [{"name": "id", "type": "string"}, {"name": "opts", "type": "{ expand?: boolean }", "optional": true}],
+ "returns": "Promise<Order>"}
+```
 
 `why` is copied only from a comment or docstring immediately above the function,
 or from `bizmap.yaml`. BizMap never invents business intent.

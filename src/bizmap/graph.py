@@ -61,6 +61,10 @@ def _list_sort_key(item: Any) -> str:
     return f"{type(item).__name__}:{item}"
 
 
+# node attributes whose lists are ordered by meaning, not sorted for stability
+_ORDERED_ATTRS = frozenset({"params"})
+
+
 def sort_list_attrs(value: Any) -> Any:
     """Sort every list (and nested lists) so JSON is PYTHONHASHSEED-stable."""
     if isinstance(value, list):
@@ -103,7 +107,8 @@ class Node:
     def to_dict(self) -> dict[str, Any]:
         out = {"id": self.id, "type": self.type}
         for key, value in self.attrs.items():
-            out[key] = sort_list_attrs(value)
+            # a function's parameters keep their order
+            out[key] = value if key in _ORDERED_ATTRS else sort_list_attrs(value)
         return out
 
 
