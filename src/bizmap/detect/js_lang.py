@@ -1044,6 +1044,10 @@ class JsAnalyzer:
         trees_by_mod: dict[str, Node] = {}
         mounts: list[tuple[str, str, str, str, str]] = []
         pending_import_calls: list[tuple[str, tuple[str, str], str, int]] = []
+        # `X.m(...)` on an object (or factory instance) declared here or imported:
+        # (caller, module the name lives in, name, member, file, line)
+        pending_member_calls: list[tuple[str, str, str, str, str, int]] = []
+        instances_by_mod: dict[str, dict[str, str]] = {}
 
         for _path, rel_file, module, tree, _src in parsed:
             consts = _collect_consts(tree)
@@ -1062,6 +1066,7 @@ class JsAnalyzer:
             factories_by_mod[module] = _collect_client_factories(tree, consts)
             class_ctors_by_mod[module] = _collect_class_ctors(tree)
             trees_by_mod[module] = tree
+            instances_by_mod[module] = _collect_instances(tree)
             file_quals: list[str] = []  # functions this file declares (fn_nodes keeps growing)
             for node in typed_walk(tree, _DECL_TYPES, JS_TYPES):
                 # declarations only: a named function *expression* is registered
@@ -1148,13 +1153,20 @@ class JsAnalyzer:
                     if obj is not None and prop is not None and obj.type == "identifier":
                         spec = specs.get(text(obj))
                         caller = _enclosing_symbol(node, module)
-                        if (
-                            spec
-                            and spec[1] in {"*", "require"}
-                            and not caller.endswith(".module")
-                            and not _locally_shadowed(node, text(obj))
-                        ):
+                        if caller.endswith(".module") or _locally_shadowed(node, text(obj)):
+                            continue
+                        if spec and spec[1] in {"*", "require"}:
                             pending_import_calls.append((caller, (spec[0], text(prop)), rel_file, line_of(node)))
+                        elif spec:
+                            # `import { widgetsHttpClient as client } ...; client.list()`
+                            pending_member_calls.append(
+                                (caller, spec[0], spec[1], text(prop), rel_file, line_of(node))
+                            )
+                        else:
+                            # `const X = { m: .. }` / `const X = createY(..)` in this file
+                            pending_member_calls.append(
+                                (caller, module, text(obj), text(prop), rel_file, line_of(node))
+                            )
                     continue
                 if fn_n is None or fn_n.type != "identifier":
                     continue
@@ -1189,6 +1201,15 @@ class JsAnalyzer:
         known_mods = set(trees_by_mod)
         for caller, (src_mod, orig), call_file, call_line in pending_import_calls:
             target = _imported_function(src_mod, orig, exports_by_mod, known_mods, fn_nodes)
+            if target and target != caller:
+                analysis.calls.append(
+                    JsCall(caller=caller, callee=target, file=call_file, line=call_line, exact=True)
+                )
+
+        for caller, src_mod, name, member, call_file, call_line in pending_member_calls:
+            target = _member_function(
+                src_mod, name, member, exports_by_mod, known_mods, fn_nodes, instances_by_mod, import_specs_by_mod
+            )
             if target and target != caller:
                 analysis.calls.append(
                     JsCall(caller=caller, callee=target, file=call_file, line=call_line, exact=True)
@@ -2919,6 +2940,67 @@ def _imported_function(
             if f"{mod}.{orig}" in fn_nodes:
                 return f"{mod}.{orig}"
     return None
+
+
+def _collect_instances(tree: Node) -> dict[str, str]:
+    """`X -> createY` for a module-level `[export] const X = createY(...)`: an
+    object a factory made (its methods are `createY.m`)."""
+    out: dict[str, str] = {}
+    for stmt in tree.named_children:
+        decl = stmt
+        if decl.type == "export_statement":
+            decl = decl.child_by_field_name("declaration") or next(
+                (c for c in decl.named_children if c.type in {"lexical_declaration", "variable_declaration"}), None
+            )
+        if decl is None or decl.type not in {"lexical_declaration", "variable_declaration"}:
+            continue
+        for d in decl.named_children:
+            if d.type != "variable_declarator":
+                continue
+            value = d.child_by_field_name("value")
+            while value is not None and value.type in {"await_expression", "parenthesized_expression"}:
+                value = value.named_children[0] if value.named_children else None
+            if value is None or value.type not in {"call_expression", "new_expression"}:
+                continue
+            fn = value.child_by_field_name("function") or value.child_by_field_name("constructor")
+            name = _declarator_name(d)
+            if fn is not None and fn.type == "identifier" and name:
+                out[name] = text(fn)
+    return out
+
+
+def _member_function(
+    src_mod: str,
+    name: str,
+    member: str,
+    exports_by_mod: dict[str, dict[str, str]],
+    known: set[str],
+    fn_nodes: dict[str, Node],
+    instances_by_mod: dict[str, dict[str, str]],
+    import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
+) -> str | None:
+    """Scanned function `name.member` is, for `name` living in ``src_mod``:
+    a method of an object of methods (`X.m`), or of the object a factory
+    returns when `name = createY(...)` (`createY.m`), through barrels."""
+    sources = _export_sources(src_mod, name, exports_by_mod, known)
+    if not sources:
+        sources = {(mod, name) for mod in (src_mod, f"{src_mod}.index") if mod in known}
+    found: set[str] = set()
+    for mod, local in sources:
+        direct = f"{mod}.{local}.{member}"
+        if direct in fn_nodes:
+            found.add(direct)
+            continue
+        factory = (instances_by_mod.get(mod) or {}).get(local)
+        if not factory:
+            continue
+        fq: str | None = f"{mod}.{factory}" if f"{mod}.{factory}" in fn_nodes else None
+        spec = (import_specs_by_mod.get(mod) or {}).get(factory)
+        if fq is None and spec and spec[1] not in {"*", "require"}:
+            fq = _imported_function(spec[0], spec[1], exports_by_mod, known, fn_nodes)
+        if fq and f"{fq}.{member}" in fn_nodes:
+            found.add(f"{fq}.{member}")
+    return next(iter(found)) if len(found) == 1 else None
 
 
 def _resolve_specs_through_barrels(
