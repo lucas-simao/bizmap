@@ -52,13 +52,13 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 | `type` | `id` pattern | Extra fields |
 | --- | --- | --- |
 | `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:<kind>:<key>` | `kind` (`http` \| `scheduled_job` \| `firestore` \| `celery_task` \| `worker` \| `pubsub` \| `cloud_task` \| `firebase_http` \| `firebase_call`), `method`, `path`, `symbol`, `why`, `evidence`, optional `confidence`, `candidates`, `unresolved` (const path not in the scan), optional `unresolved_calls`, optional `collection` / `event`, optional `dynamic_table` / `dynamic_table_unknown` (flag/count when a reachable origin writes `table:unknown`; never a reach edge) |
-| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `end_line` (last line of the definition) and `start_line` (first line, when it differs from `evidence.line`; for an inline route handler `evidence.line` is where the registration call starts — in a chain like `new Hono().post(a).post(b)` or `router.route('/x').get(a)`, the chain's first line — and `start_line`/`end_line` are the handler function's own lines), optional `parent` (enclosing factory/function for members and route closures), optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http`, optional `route_literals` (JS/TS API-looking path strings `{path, method?, evidence}` kept for registry rematch), optional `params` (the parameters in order: `[{name, type?, optional?}]`, `[]` when there are none) and `returns` (the return type's text) — see below |
+| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `end_line` (last line of the definition) and `start_line` (first line, when it differs from `evidence.line`; for an inline route handler `evidence.line` is where the registration call starts — in a chain like `new Hono().post(a).post(b)` or `router.route('/x').get(a)`, the chain's first line — and `start_line`/`end_line` are the handler function's own lines), optional `parent` (enclosing factory/function for members and route closures), optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_queues` (a publish whose topic is an env var without a value, see [Queue names](#queue-and-topic-names)), optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http`, optional `route_literals` (JS/TS API-looking path strings `{path, method?, evidence}` kept for registry rematch), optional `params` (the parameters in order: `[{name, type?, optional?}]`, `[]` when there are none) and `returns` (the return type's text) — see below |
 | `table` | `table:<name>` | `name`; optional `db` (database the code reaches it through, see [Data flow](#data-flow-between-tables-feeds)), `db_candidates`, `same_as`, `external` (system catalogs / `storage.*` / `vault.*` / `auth.*`), `kind` (`external_relation` \| `unresolved_relation`), `dropped` (still referenced after `DROP TABLE`), `candidates` (dynamic/`unknown`), `rls`, `policies` |
 | `view` | `view:<name>` | `name`, `kind` (`view` \| `unresolved_relation`), optional `materialized` |
 | `column` | `column:<table>.<column>` | `table`, `name`, `data_type`, `nullable`, optional `why` |
 | `db_trigger` | `db_trigger:<name>` | `name`, `table`, `timing`, `events`, `function`, `evidence`; optional `columns` (the `UPDATE OF col, …` list, present only when the trigger has that clause) |
 | `collection` | `collection:<name>` | `name` (Firestore collection: the **last** collection of its path, so `customers/{id}/notes` is `collection:notes`, as in Python); optional `path` (the full path with `{}` for ids, from JS/TS) / `paths`, `db` (`firestore:<project\|default>`), `same_as` |
-| `queue` | `queue:<kind>:<name>` | `kind` (`celery` \| `rq` \| `cloud_tasks` \| `pubsub` \| `firestore` \| `topic`), `name` |
+| `queue` | `queue:<kind>:<name>` | `kind` (`celery` \| `rq` \| `cloud_tasks` \| `pubsub` \| `firestore` \| `topic`), `name`, optional `env` (the env var the name came from, see [Queue names](#queue-and-topic-names)). `queue:pubsub:<topic>` ids are never repo-qualified: a topic is the same in every repo of a joint scan or `registry merge`. |
 
 On a merged registry graph, function / entrypoint / queue ids are prefixed
 with the repo (`catalog/function:db.create_order`). Table, column, view,
@@ -326,6 +326,58 @@ the message), so in a joint scan or `registry merge` the trigger → topic →
 route → write path becomes a `feeds` (`heuristic`). Message fields match the
 written attribute by name ignoring case and `_` (`customerId` /
 `customer_id`) or a Pydantic `Field(alias="…")`.
+
+## Firestore and Pub/Sub in Go
+
+A text pass over the Go files that import `cloud.google.com/go/firestore` or
+`cloud.google.com/go/pubsub` (v1 or v2), attributed to the Go function around
+each call:
+
+- Firestore: `client.Collection("x").Doc(id).Get / Set / Update / Delete /
+  Create`, `.Documents(ctx).GetAll()`, `.Where(…)`, a reference kept in a
+  variable, `tx.Get(ref)` / `tx.Set(ref, …)` → `reads` / `writes
+  collection:x` (writes with `fields`). `snap.DataTo(&d)` makes `d` the
+  document: its struct's `firestore:"…"` tags name the fields, so
+  `d.CustomerID` is the document field `customerId` in `feeds`.
+- Pub/Sub, direct: `client.Topic(t).Publish(ctx, &pubsub.Message{Data: b})`
+  and v2 `client.Publisher(t).Publish(…)` → `enqueues queue:pubsub:<t>`.
+- Pub/Sub through a **wrapper**: a constructor that passes its parameter (or
+  each element of a slice parameter) to `.Publisher(x)` / `.Topic(x)`
+  (`NewPublisher(ctx, project, []string{cfg.OrderTopic})`) publishes to the
+  topics its callers pass; a function that calls `x.Publish(ctx, data, …)`
+  with a non-`Message` payload — usually through an injected interface —
+  gets `enqueues` to those topics with `via: <wrapper type>`. With more than
+  one topic the edge lists `candidates` (`confidence: inferred`) and the
+  message is not linked to a consumer.
+- The topic comes from a literal, a package constant, or a config field filled
+  by `getEnv("X", "def")`, `os.Getenv("X")` or an `env:"X" envDefault:"y"`
+  tag; the queue node then has `env: X`.
+- `fields` of the enqueue are the message's: the `json:"…"` tags of the struct
+  passed to `json.Marshal`, or a map literal's keys. The dataflow follows the
+  struct back through helpers (`build(id, d)`), a `Scan(&row.ID, …)` of a SQL
+  read, or a Firestore document, so a Go publisher and a push route in another
+  repo give `feeds` (`collection:orders -> table:order_summary`, or
+  `orders_mirror -> order_summary` when Go re-reads its own table).
+
+## Queue and topic names
+
+- A queue node is only created for a name that looks like one
+  (`[A-Za-z0-9][A-Za-z0-9._~%+-]*`, up to 255 characters). An expression
+  (`{live[:10]}`, `a or b`) never becomes a node.
+- Python Pub/Sub: `publish` / `publish_message` count only on a
+  `PublisherClient()` / `PublisherAsyncClient()` (a variable, an attribute set
+  in `__init__`, or a closure variable). The topic comes from
+  `client.topic_path(project, topic)` with `topic` a literal, a module
+  constant, a parameter default (`topic: str = "invoice-ready"` kept in
+  `self.topic_path`), or `os.environ.get("X", "default")`; both branches of
+  `a if c else client.topic_path(…)` are tried.
+- rq: `enqueue` counts only on a `Queue("name", …)` receiver (`Queue()` is
+  `default`); the edge has `task` (the function or dotted path enqueued). Any
+  other `.enqueue(…)` / `.publish(…)` (a parameter, a repository method,
+  `self.publish` of a class that is not a client) adds nothing.
+- A name from an env var with no default and no value in `bizmap.yaml`
+  [`env:`](configuration.md#env) gives no node: the function lists it in
+  `unresolved_queues` (`[{kind, env, evidence}]`).
 
 ## Confidence
 

@@ -184,6 +184,19 @@ push_subscriptions:
   invoice-paid: { path: https://billing.run.app/pubsub/paid, method: POST }
 ```
 
+### `env`
+
+Values of environment variables that name a queue or topic and have no
+default in code (`os.environ.get("SHIPPED_TOPIC_NAME", "")`,
+`os.Getenv("ORDER_TOPIC")`). With a value the publish gets its
+`queue:<kind>:<name>` node (with `env: <VAR>`); without one it is listed in
+the function's `unresolved_queues` instead of a node.
+
+```yaml
+env:
+  SHIPPED_TOPIC_NAME: order-shipped
+```
+
 ### `constants`
 
 Values of constants defined in code that is not scanned (a shared module, a

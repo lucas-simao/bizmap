@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Added
+
+- **Firestore in Go**: `Collection("x").Doc(id).Get / Set / Update / Delete /
+  Create`, `Documents(ctx).GetAll()`, `Where(…)`, `tx.Get/Set(ref)` as
+  `reads` / `writes collection:x`; `DataTo(&d)` maps the struct's
+  `firestore:"…"` tags, so `feeds collection:orders -> table:orders_mirror`
+  lists `customerId → customer_id`, `__id__ → id`.
+- **Pub/Sub publish in Go**: direct (`client.Topic(t)` / v2
+  `client.Publisher(t)`) and through a wrapper constructor
+  (`NewPublisher(ctx, project, []string{cfg.OrderTopic})`) used via an
+  injected interface. Topic from a literal, a package constant or a config
+  field (`getEnv("X","def")`, `os.Getenv`, `env:"X"` tags), with `env` on the
+  queue node, `candidates` when the wrapper has several topics, and the
+  message `fields` from the `json:"…"` tags. The dataflow follows the message
+  to a push route in another repo (`feeds collection:orders ->
+  table:order_summary`, or `orders_mirror -> order_summary` when Go re-reads
+  its table).
+- `env:` in `bizmap.yaml` gives values to env vars that name a queue or topic;
+  without one the function lists the publish in `unresolved_queues`.
+
+### Changed
+
+- `queue:pubsub:<topic>` ids are never repo-qualified, so a producer and a
+  push subscription in different repos meet on one node.
+- Python queues: `publish` / `publish_message` count only on a
+  `PublisherClient()` receiver and `enqueue` only on a `Queue(…)` (the edge
+  gets `task`). The topic is resolved inside `topic_path(project, t)`, from
+  parameter defaults and `os.environ.get("X", "d")`.
+
+### Fixed
+
+- No queue node named after an expression (`queue:pubsub:{live[:10]}`), and
+  nothing for `.enqueue` / `.publish` on parameters, repositories or plain
+  methods.
+
 ## 0.10.0 — 2026-11-21
 
 ### Added
