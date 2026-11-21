@@ -457,7 +457,8 @@ def classify_unresolved_http(
         return "path_dynamic"
     # A segment built by a call the scanner could not evaluate
     # (`/client{site(siteId)}/orders`) is a dynamic path, whatever the base.
-    if any("(" in p for p in other_holes):
+    # `{dynamic}` is what URL cleaning leaves for such an expression.
+    if any("(" in p or p == "dynamic" for p in other_holes):
         return "path_dynamic"
     if base_holes and not env_holes and "://" not in raw:
         return "base_unknown"
@@ -551,8 +552,36 @@ def route_literal_hits(
     for eid, rmethod, rpath in routes:
         if method_u and rmethod.upper() not in {method_u, "ANY", "ALL"}:
             continue
+        # no method hint: a bare literal is read as a GET (it never links to
+        # every method registered on the path — `POST /x` beside `GET /x`)
+        if method_u is None and rmethod.upper() not in {"GET", "ANY", "ALL"}:
+            continue
         if path_template_match(rpath, path):
-            full.append(eid)
+            if _param_pairs_plausible(rpath, path, from_end=False):
+                full.append(eid)
         elif allow_suffix and suffix_template_match(rpath, path):
-            suffix.append(eid)
+            if _param_pairs_plausible(rpath, path, from_end=True):
+                suffix.append(eid)
     return full or suffix
+
+
+def _is_param(seg: str) -> bool:
+    return seg.startswith((":", "{", "<", "*")) or (seg.startswith("[") and seg.endswith("]"))
+
+
+def _param_pairs_plausible(route: str, path: str, *, from_end: bool) -> bool:
+    """A route parameter (`:projectId`) matched against a *literal* segment of
+    a bare string (`time-clocks`) is only believable for an id-like value (a
+    digit, no hyphen), and then needs 2+ equal literal segments besides."""
+    r = [x for x in normalize_path(route).split("/") if x]
+    p = [x for x in normalize_path(path).split("/") if x]
+    if from_end:
+        r = r[-len(p) :] if len(p) <= len(r) else r
+    pairs = list(zip(r, p, strict=False))
+    param_on_literal = [(a, b) for a, b in pairs if _is_param(a) and not _is_param(b)]
+    if not param_on_literal:
+        return True
+    if any(("-" in b) or not any(ch.isdigit() for ch in b) for _a, b in param_on_literal):
+        return False
+    equal = sum(1 for a, b in pairs if not _is_param(a) and a == b)
+    return equal >= 2

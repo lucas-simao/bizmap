@@ -1,0 +1,29 @@
+id: gin.v1.routes
+language: go
+framework: gin
+description: Gin HTTP route registration (r.GET("/path", h), group.POST, r.Handle("PATCH", "/path", h)).
+status: active
+when:
+  imports:
+    contains: github.com/gin-gonic/gin
+detect:
+  calls:
+    method:
+      in: [GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, Any, Handle]
+    arguments:
+      path:
+        index: 0
+        capture: string
+      handler:
+        index: -1
+        capture: ident_or_selector
+options:
+  receiver_path_prefixes:
+    group_method: Group
+    path_arg: 0
+produce:
+  entrypoint:
+    kind: http
+    method: "{method}"
+    path: "{path}"
+    handler: "{handler}"

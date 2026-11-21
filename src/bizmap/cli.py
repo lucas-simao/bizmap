@@ -147,6 +147,15 @@ def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
     bits = [f"{name}={reason_counts[name]}" for name in order if name in reason_counts]
     bits += [f"{n}={c}" for n, c in sorted(reason_counts.items()) if n not in order]
     lines.append(f"{len(unresolved)} unresolved HTTP calls: " + ", ".join(bits))
+    via_counts: dict[str, int] = {}
+    for item in unresolved:
+        via = str(item.get("via") or "")
+        url = str(item.get("url") or "")
+        path_part = url.split("}", 1)[1] if url.startswith("{") and "}" in url else url
+        if via and "{" in path_part:
+            via_counts[via] = via_counts.get(via, 0) + 1
+    for via, count in sorted(via_counts.items(), key=lambda kv: (-kv[1], kv[0]))[: (None if verbose else 5)]:
+        lines.append(f"  {count} call(s) via {via} with a dynamic path")
     if len(origin_counts) > 1 or "app" not in origin_counts:
         origin_order = ("app", "scripts", "eval", "tests")
         obits = [f"{k} {origin_counts[k]}" for k in origin_order if k in origin_counts]

@@ -48,6 +48,7 @@ from bizmap.files import rel
 from bizmap.graph import Confidence, Evidence
 from bizmap.schema_replay import Schema
 from bizmap.sql_analyze import looks_like_sql
+from bizmap.urlclean import clean_url
 
 _PY_LANGUAGE = Language(tspy.language())
 
@@ -605,39 +606,11 @@ def _looks_like_unscanned_http(
     return False
 
 
-_PLACEHOLDER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 
 def clean_url_placeholders(url: str) -> str:
-    """Keep `{name}` / `{settings.API_URL}` placeholders; any other `{…}` (an
-    expression's source: `{X.format(oid)}`, `{Report(\n rows=}`, `{1 << 20}`)
-    becomes `{dynamic}`, so labels are stable and never carry code."""
-    if "{" not in url:
-        return url
-    out: list[str] = []
-    i = 0
-    while i < len(url):
-        ch = url[i]
-        if ch != "{":
-            out.append(ch)
-            i += 1
-            continue
-        depth, j = 0, i
-        while j < len(url):
-            if url[j] == "{":
-                depth += 1
-            elif url[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        if j >= len(url):  # unbalanced: drop the rest
-            out.append("{dynamic}")
-            break
-        inner = url[i + 1 : j].strip()
-        out.append("{" + inner + "}" if _PLACEHOLDER_NAME.match(inner) else "{dynamic}")
-        i = j + 1
-    return "".join(out)
+    """See `bizmap.urlclean.clean_url` (placeholders and query string)."""
+    return clean_url(url)
 
 
 IN_PROCESS_CTORS = {"TestClient"}
