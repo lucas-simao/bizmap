@@ -1,6 +1,6 @@
 # `bizmap export`
 
-*Requires bizmap 0.5.0+. The reading layout below (domains, call trees, screens) is in the next release.*
+*Requires bizmap 0.5.0+; the reading layout below (domains, call trees, screens) since 0.6.0.*
 
 ![bizmap export --format html: system, a domain, a route's call tree, screens](../img/export-html.gif)
 
@@ -24,7 +24,7 @@ never draws the whole graph.
 | Level | What you see |
 | --- | --- |
 | **System** | One card per service: API, front-end, worker or library, with routes, domains, tables, who it calls and who calls it. "Many depend on it": services and tables used by 3 or more services. |
-| **Service** | Its **domains**: routes grouped by path (`/projects`, `/projects/tasks`…), with how many routes and functions, the tables they read and write, and how many callers use them. |
+| **Service** | Its **domains**: routes grouped by path (`/projects`, `/projects/tasks`…), with how many routes and functions, the tables they read and write, and how many callers use them. Then, for any service: its screens (front-ends), the tables it reads and writes itself, and its **code by folder** (functions, HTTP calls, tables) — for a library or a client with no routes, that is its whole page. A folder opens the list of its functions. |
 | **Domain** | The routes, ordered by path: method, path (parameters highlighted), handler, tables read/written, callers. |
 | **Route** | Its **call tree**: the handler, the functions it calls, and so on, one line per function with its folder and the tables (and columns) it reads (R) or writes (W). Each node opens on click; a function already shown, or one that calls back into the path, is marked instead of repeated. |
 | **Data** | A table's page: columns and types, the functions that read or write it (by service, with columns and SQL operations), and the routes and jobs that reach it. |
@@ -39,11 +39,15 @@ graph has `params` / `returns` on a function, the panel shows them too.
 
 ### Front-ends
 
-A service whose code is mostly TS/JS/Vue/Svelte with UI files and HTTP calls is
-listed as a **front-end**. Its page lists the **screens**: each file whose
+A service whose code is mostly TS/JS/Vue/Svelte and that calls APIs
+(`calls_http` or `unresolved_http`) is listed as a **front-end** when it has UI
+files (`.tsx`, `.jsx`, `.vue`, `.svelte`, a `pages/`, `screens/` or
+`components/` folder) or no routes of its own — a Vite app made of `.ts`
+files counts. Its page lists the **screens**: each file whose
 functions call the API, grouped by folder (the folder after `pages/`,
 `screens/`, `app/`, `views/`, `routes/`, `components/` or `features/` when there
-is one), with the routes each screen uses. **Calls with no route** lists the
+is one, else its own folder: `src/api/orders.ts` → `src/api`), with the routes
+each screen uses. **Calls with no route** lists the
 calls that matched no scanned route (`unresolved_http`), by reason: target not
 scanned, base URL unknown, path built at runtime, client unknown.
 
@@ -55,7 +59,8 @@ graph (services and the HTTP links between them).
 
 Routes are grouped by the first useful path segment. Skipped: generic segments
 (`api`, `v1`, `v2`…, `rest`, `public`, `internal`, `graphql`, `rpc`), path
-parameters, and a prefix every route of the service shares. A group that is
+parameters, a prefix every route of the service shares, and a first segment
+at least 70% of the routes share (`/svc/…`). A group that is
 too large (more than 80 routes, or more than 35% of a service with over 30
 routes) is split by the next segment into sections (`/projects/tasks`); a
 section with fewer than 3 routes stays in its parent. Groups with fewer than 3

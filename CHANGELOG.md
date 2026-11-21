@@ -23,6 +23,13 @@
   domain / front-end / table batch / folder read on first use, no derived
   edges shipped. Synthetic 107k nodes / 628k edges: 31 MB, ready in ~0.4 s,
   every level under 100 ms in headless Chrome.
+- Every service has a page with something to read: besides domains and
+  screens, the tables it reads and writes itself (the count matches the list)
+  and its **code by folder** (functions, HTTP calls, tables), so libraries and
+  clients without routes are browsable. A JS/TS service that calls APIs and
+  has no routes is a front-end (a Vite app with only `.ts` files); screens
+  without a UI folder are grouped by their own folder (`src/api`).
+- Domains skip a first path segment shared by at least 70% of the routes.
 - The service graph stays under **Map**; the graph expand/filter view is gone
   (a table's page lists who reads and writes it).
 - Fictional example: `examples/export/shop.graph.json`

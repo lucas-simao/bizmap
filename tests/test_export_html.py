@@ -225,8 +225,14 @@ def test_a_dominant_group_is_split_by_the_next_segment() -> None:
     paths = [f"/admin/{area}/{k}" for area in ("orders", "users", "teams") for k in range(15)] + \
             [f"/reports/{k}" for k in range(5)]
     names = {i: n for i, (n, _r) in group_entrypoints(_routes(paths), "api").items()}
-    assert names[0] == "/admin/orders" and names[15] == "/admin/users" and names[30] == "/admin/teams"
+    # /admin is on 90% of the routes: skipped like a shared prefix
+    assert names[0] == "/orders" and names[15] == "/users" and names[30] == "/teams"
     assert names[45] == "/reports"
+    # a large group under a dominant prefix is split by the following segments
+    paths = [f"/svc/alpha/{area}/{k}" for area in ("runs", "jobs") for k in range(50)] + \
+            [f"/svc/beta/{k}" for k in range(10)] + [f"/health{k}" for k in range(3)]
+    names = {n for n, _r in group_entrypoints(_routes(paths), "api").values()}
+    assert {"/alpha/runs", "/alpha/jobs", "/beta"} <= names
 
 
 def test_shared_prefix_is_skipped_and_small_services_get_one_domain() -> None:
@@ -515,3 +521,73 @@ def test_export_services_from_bizmap_yaml(tmp_path: Path) -> None:
         load_service_split(cfg)
     cfg.write_text("name: mono\n")
     assert load_service_split(cfg) == []
+
+
+# ── services without routes (round 3) ───────────────────────────────────────
+
+
+def vite_graph() -> dict:
+    """Two repos: an API with GET /orders/:id and a Vite front end made of .ts
+    files only (no pages/, no .tsx) that fetches it."""
+    return {
+        "version": "0.5.1", "generated_at": "x", "repos": ["api", "web"],
+        "nodes": [
+            _n("api/entrypoint:http:GET:/orders/:id", "entrypoint", kind="http", method="GET", path="/orders/:id",
+               evidence={"file": "main.go", "line": 3}),
+            _n("api/function:main.getOrder", "function", name="getOrder", evidence={"file": "main.go", "line": 9}),
+            _n("table:orders", "table", name="orders"),
+            _n("web/function:src.api.orders.getOrder", "function", name="getOrder",
+               evidence={"file": "src/api/orders.ts", "line": 1}),
+            _n("web/function:src.main.boot", "function", name="boot", evidence={"file": "src/main.ts", "line": 1}),
+        ],
+        "edges": [
+            _e("triggers", "api/entrypoint:http:GET:/orders/:id", "api/function:main.getOrder"),
+            _e("reads", "api/function:main.getOrder", "table:orders"),
+            _e("calls_http", "web/function:src.api.orders.getOrder", "api/entrypoint:http:GET:/orders/:id", "inferred"),
+            _e("calls", "web/function:src.main.boot", "web/function:src.api.orders.getOrder"),
+        ],
+    }
+
+
+def test_ts_only_client_without_routes_is_a_front_end_with_screens() -> None:
+    index, chunks = _book(vite_graph())
+    web = next(s for s in index["services"] if s["name"] == "web")
+    assert web["kind"] == "web" and web["screens"] == 1
+    screen = chunks[web["screen_chunk"]]["screens"][0]
+    assert screen["f"] == "src/api/orders.ts" and screen["g"] == "src/api"
+    assert [chunks["names"]["l"][r] for r in screen["r"]] == ["GET /orders/:id"]
+    # its code is listed by folder too, so its page is never empty
+    assert [f[0] for f in web["folders"]] == ["src", "src/api"]
+
+
+def test_library_page_lists_folders_and_the_tables_it_counts() -> None:
+    index, chunks = _book(big_graph_small())
+    for row in index["services"]:
+        assert row["tables"] == len(row["data"]) or row["tables"] > len(row["data"]) == 400
+        if not row["domains"] and row["kind"] != "web":
+            assert row["folders"], row["name"]
+            total = sum(f[1] for f in row["folders"])
+            assert total == row["functions"]
+            for f in row["folders"]:
+                items = [i for cid in f[5] for i in chunks[cid]["items"]]
+                assert len(items) == f[1]
+                assert all(chunks["names"]["h"][i] >= 0 for i in items)
+
+
+def big_graph_small() -> dict:
+    data = _demo()
+    lib = [_n(f"kit/function:util.Fn{k}", "function", name=f"Fn{k}",
+              evidence={"file": f"pkg/{'db' if k % 2 else 'text'}/f{k}.py", "line": k + 1}) for k in range(20)]
+    data["nodes"] += lib
+    data["edges"] += [_e("reads", f"kit/function:util.Fn{k}", "table:orders") for k in range(1, 20, 2)]
+    data["edges"] += [_e("writes", f"kit/function:util.Fn{k}", "table:users", "inferred", derived="call")
+                      for k in range(0, 20, 2)]
+    return data
+
+
+def test_library_table_count_is_its_own_access() -> None:
+    index, _chunks = _book(big_graph_small())
+    kit = next(s for s in index["services"] if s["name"] == "kit")
+    assert kit["kind"] == "lib" and kit["tables"] == 1  # derived edges do not count
+    assert [f[0] for f in kit["folders"]] == ["pkg/db", "pkg/text"]
+    assert kit["folders"][0][1:4] == [10, 0, 1]

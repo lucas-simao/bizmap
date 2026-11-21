@@ -50,6 +50,7 @@ SCREEN_DIRS = ("pages", "screens", "app", "views", "routes", "components", "feat
 CALLER_CAP = 40
 CONSUMER_CAP = 200
 FOLDER_CHUNK = 2500
+SERVICE_TABLES = 400
 TABLE_CHUNK = 60
 R, W = 1, 2
 METHOD_ORDER = {"GET": 0, "POST": 1, "PUT": 2, "PATCH": 3, "DELETE": 4}
@@ -99,6 +100,13 @@ def path_params(path: str) -> list[str]:
         elif part.startswith("[") and part.endswith("]"):
             out.append(part.strip("[].") or part)
     return out
+
+
+def code_folder(file: str) -> str:
+    """Folder a function is listed under on its service page: the first two
+    directory levels (`src/api`, `internal/billing`)."""
+    parts = file.split("/")[:-1]
+    return "/".join(parts[:2]) if parts else "."
 
 
 def screen_group(file: str) -> str:
@@ -208,7 +216,9 @@ def build_book(
         front = sum(1 for f in files if f.endswith(FRONT_EXT))
         ui = any(f.endswith(UI_EXT) for f in files) or any(f"/{d}/" in f"/{f}" for f in files for d in ("pages", "screens", "components"))
         calls_out = row["calls_out"] + sum(1 for i in range(n_nodes) if nsvc[i] == s and i in unresolved_by)
-        if files and front / len(files) >= 0.6 and ui and calls_out:
+        # a JS/TS code base that calls APIs is a front end (or client) when it has UI
+        # files or no routes of its own (a Vite app with only .ts files counts)
+        if files and front / len(files) >= 0.6 and calls_out and (ui or not row["routes"]):
             kind = "web"
         elif row["routes"]:
             kind = "api"
@@ -220,6 +230,11 @@ def build_book(
 
     chunks: dict[str, Any] = {}
     home = [""] * n_nodes  # node -> chunk that holds its record
+    svc_own_tables: dict[int, dict[int, int]] = defaultdict(dict)  # tables a service reads/writes itself
+    for f, per in own.items():
+        if nsvc[f] >= 0:
+            for t, (rw, _c, _o) in per.items():
+                svc_own_tables[nsvc[f]][t] = svc_own_tables[nsvc[f]].get(t, 0) | rw
 
     def fn_record(i: int, closure: set[int] | None = None) -> list[Any]:
         node = nodes[i]
@@ -397,23 +412,46 @@ def build_book(
         for c in cols_by_table.get(t, []):
             home[c] = cid
 
-    # ── functions no entrypoint reaches: folder chunks ──
+    # ── code by folder: functions no route reaches (all of a library's code) ──
     rest: dict[tuple[int, str], list[int]] = defaultdict(list)
     for i in range(n_nodes):
-        if ntype[i] in (T_FUNC, T_QUEUE, T_OTHER) and not home[i]:
-            f = _file(nodes[i])
-            top = f.split("/", 1)[0] if "/" in f else "."
-            rest[(nsvc[i], top)].append(i)
+        if ntype[i] in (T_FUNC, T_QUEUE, T_OTHER) and not home[i].startswith("d"):
+            rest[(nsvc[i], code_folder(_file(nodes[i])))].append(i)
     k = 0
-    for (_s, _top), items in sorted(rest.items()):
+    folders: dict[int, list[list[Any]]] = defaultdict(list)
+    for (svc, folder), items in sorted(rest.items()):
+        cids = []
         for start in range(0, len(items), FOLDER_CHUNK):
             cid = f"f{k}"
             k += 1
-            # label left out: the page takes it from `names` (these records are only
-            # opened from search, screens or a caller), which keeps the file smaller
-            chunks[cid] = {"fns": {str(i): ["", *fn_record(i)[1:]] for i in items[start : start + FOLDER_CHUNK]}}
-            for i in items[start : start + FOLDER_CHUNK]:
-                home[i] = cid
+            part = items[start : start + FOLDER_CHUNK]
+            # label left out: the page takes it from `names`, which keeps the file smaller;
+            # functions already filed with a front-end's screens are only listed here
+            chunks[cid] = {
+                "folder": folder,
+                "items": part,
+                "fns": {str(i): ["", *fn_record(i)[1:]] for i in part if not home[i]},
+            }
+            for i in part:
+                home[i] = home[i] or cid
+            cids.append(cid)
+        tabs: dict[int, int] = defaultdict(int)
+        for i in items:
+            for t, (rw, _c, _o) in own.get(i, {}).items():
+                tabs[t] |= rw
+        folders[svc].append([
+            folder,
+            len(items),
+            sum(len(http_out[i]) + len(unresolved_by.get(i, [])) for i in items),
+            len(tabs),
+            sorted(([t, rw] for t, rw in tabs.items()), key=lambda x: labels[x[0]])[:6],
+            cids,
+        ])
+    for s, row in enumerate(svc_rows):
+        row["folders"] = folders.get(s, [])
+        tabs = svc_own_tables.get(s, {})
+        row["tables"] = len(tabs)
+        row["data"] = sorted(([t, rw] for t, rw in tabs.items()), key=lambda x: labels[x[0]])[:SERVICE_TABLES]
 
     chunk_ids = sorted(chunks, key=lambda c: (c[0], int(c[1:]) if c[1:].isdigit() else 0))
     chunk_no = {c: n for n, c in enumerate(chunk_ids)}

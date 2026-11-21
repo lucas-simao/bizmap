@@ -1,8 +1,9 @@
 """Group a service's entrypoints into domains (the chapters of the HTML book).
 
 HTTP routes are grouped by the first *useful* path segment: generic segments
-(``api``, ``v1``…, ``rest``, ``public``, ``internal``), path parameters and the
-prefix shared by every route of the service are skipped. A group that holds
+(``api``, ``v1``…, ``rest``, ``public``, ``internal``), path parameters, the
+prefix shared by every route of the service, and a first segment shared by
+most of them (``DOMINANT_SHARE``) are skipped. A group that holds
 more than ``SPLIT_SHARE`` of the routes (and more than ``SPLIT_MIN`` routes)
 (or more than ``BIG_GROUP`` routes) is split by the next segment, up to
 ``MAX_DEPTH`` segments: ``/projects``, ``/projects/tasks``… read as sections. Groups smaller than
@@ -30,6 +31,7 @@ GENERIC = frozenset({"api", "apis", "rest", "public", "internal", "private", "gr
 _VERSION = re.compile(r"^v\d+(\.\d+)?$", re.I)
 SPLIT_SHARE = 0.35
 SPLIT_MIN = 30
+DOMINANT_SHARE = 0.7
 BIG_GROUP = 80  # a group this large is always split when its routes have a next segment
 MAX_DEPTH = 3
 MIN_GROUP = 3
@@ -108,10 +110,23 @@ def _auto_groups(keys: dict[int, list[str]]) -> dict[int, str]:
     seqs = list(keys.values())
     while all(len(s) > common + 1 for s in seqs) and len({s[common] for s in seqs}) == 1:
         common += 1
+    # a first segment most routes share (`/svc/...` on 80% of them) is skipped
+    # too, for the routes that have it
+    skip = {r: common for r in keys}
+    firsts: dict[str, int] = defaultdict(int)
+    for s in seqs:
+        if len(s) > common + 1:
+            firsts[s[common]] += 1
+    if total >= SPLIT_MIN and firsts:
+        seg, n = max(firsts.items(), key=lambda kv: (kv[1], kv[0]))
+        if n >= DOMINANT_SHARE * total:
+            for r, s in keys.items():
+                if len(s) > common + 1 and s[common] == seg:
+                    skip[r] = common + 1
     depth = {r: 1 for r in keys}
 
     def key(r: int) -> tuple[str, ...]:
-        s = keys[r][common:]
+        s = keys[r][skip[r]:]
         return tuple(s[: depth[r]])
 
     for _ in range(MAX_DEPTH):
@@ -121,7 +136,7 @@ def _auto_groups(keys: dict[int, list[str]]) -> dict[int, str]:
         split = False
         for k, rs in groups.items():
             if (len(rs) > max(SPLIT_MIN, SPLIT_SHARE * total) or len(rs) > BIG_GROUP) and len(k) < MAX_DEPTH:
-                deeper = {tuple(keys[r][common:][: len(k) + 1]) for r in rs}
+                deeper = {tuple(keys[r][skip[r]:][: len(k) + 1]) for r in rs}
                 if len(deeper) > 1:
                     for r in rs:
                         depth[r] = len(k) + 1

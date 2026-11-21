@@ -57,6 +57,10 @@
   table.list tr.row { cursor: pointer; }
   table.list tr.row:hover td { background: var(--soft); }
   table.list tr.on td { background: var(--sel); }
+  table.list.fixed { table-layout: fixed; }
+  table.list tr.group td { background: var(--soft); font-weight: 600; padding-top: 10px; }
+  table.list td.screen { font-weight: 600; color: var(--accent); overflow: hidden; text-overflow: ellipsis; }
+  table.list td.routes .chip { margin: 2px 6px 2px 0; }
   td.num, th.num { text-align: right; white-space: nowrap; color: var(--muted); }
   .m { display: inline-block; min-width: 52px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 700; }
   .m.GET { color: #0550ae; } .m.POST { color: #1a7f37; } .m.PUT, .m.PATCH { color: #9a6700; } .m.DELETE { color: #cf222e; }

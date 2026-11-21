@@ -32,7 +32,8 @@
       reason_path_dynamic: "path built at runtime", reason_client_unknown: "HTTP client unknown", reason_: "other",
       nothing: "Nothing here.", noResults: "No match.", evidence: "Defined at", service: "service", other: "other",
       shared: "shared", mapLead: "Services and the HTTP links between them (number = links). Click a service to open it.",
-      generated: "Graph",
+      generated: "Graph", domainsTitle: "Domains", screensTitle: "Screens", dataTitle: "Tables it reads and writes",
+      foldersTitle: "Code by folder", foldersRest: "Code no route reaches, by folder", colFolder: "Folder", colHttp: "HTTP calls", showMore: "Show {n} more (of {t})",
     },
     "pt-BR": {
       search: "Buscar rota, função, tabela, coluna…", system: "Sistema", services: "Serviços", frontends: "Front-ends",
@@ -59,7 +60,8 @@
       reason_path_dynamic: "path montado em tempo de execução", reason_client_unknown: "cliente HTTP desconhecido", reason_: "outro",
       nothing: "Nada aqui.", noResults: "Nada encontrado.", evidence: "Definido em", service: "serviço", other: "outros",
       shared: "compartilhada", mapLead: "Serviços e os links HTTP entre eles (número = links). Clique num serviço para abri-lo.",
-      generated: "Grafo",
+      generated: "Grafo", domainsTitle: "Domínios", screensTitle: "Telas", dataTitle: "Tabelas que lê e escreve",
+      foldersTitle: "Código por pasta", foldersRest: "Código que nenhuma rota alcança, por pasta", colFolder: "Pasta", colHttp: "Chamadas HTTP", showMore: "Mostrar mais {n} (de {t})",
     },
   };
 
@@ -155,7 +157,7 @@
       h += "<h4>" + esc(L.frontends) + "</h4>";
       fronts.forEach(function (p) {
         var s = p[0], i = p[1];
-        h += '<a href="#/w/' + i + '" class="' + (active === "w" + i ? "on" : "") + '"><span>' + esc(s.name) + '</span><span class="n">' + num(s.screens) + " " + esc(L.screens) + "</span></a>";
+        h += '<a href="#/w/' + i + '" class="' + (active === "w" + i ? "on" : "") + '"><span>' + esc(s.name) + '</span><span class="n">' + num(s.screens) + " " + esc(s.screens === 1 ? L.screen : L.screens) + "</span></a>";
         if (s.unmatched) h += '<a class="sub warn ' + (active === "u" + i ? "on" : "") + '" href="#/u/' + i + '"><span>⚠ ' + esc(L.unmatched) + '</span><span class="n">' + num(s.unmatched) + "</span></a>";
         if (s.domains.length) h += '<a class="sub" href="#/s/' + i + '"><span>' + esc(L.routes) + '</span><span class="n">' + num(s.routes + s.jobs) + "</span></a>";
       });
@@ -184,7 +186,7 @@
         var to = IX.connections.filter(function (c) { return c[0] === i; }).map(function (c) { return SV[c[1]].name; });
         var from = IX.connections.filter(function (c) { return c[1] === i; }).map(function (c) { return SV[c[0]].name; });
         var risk = IX.risks.filter(function (r) { return r.kind === "service" && r.i === i; })[0];
-        var href = s.kind === "web" ? "#/w/" + i : "#/s/" + i;
+        var href = "#/s/" + i;
         h += '<div class="card" data-href="' + href + '"><h3>' + (risk ? '<span class="risk">⚠</span>' : "") + esc(s.name) +
              ' <span class="kind">' + esc(L[s.kind] || s.kind) + '</span></h3><div class="stats">';
         if (s.routes + s.jobs) h += num(s.routes + s.jobs) + " " + esc(L.routes) + " · " + s.domains.length + " " + esc(s.domains.length === 1 ? L.domain1 : L.domains) + "<br>";
@@ -213,21 +215,82 @@
   // ── level 1: service ─────────────────────────────────────────────────────
   function pageService(s) {
     var sv = SV[s];
-    crumbs(['<a href="#/s/' + s + '">' + esc(sv.name) + "</a>"]); toc("s" + s);
+    crumbs(['<a href="#/s/' + s + '">' + esc(sv.name) + "</a>"]); toc(sv.kind === "web" && !sv.domains.length ? "w" + s : "s" + s);
     var h = "<h1>" + esc(sv.name) + ' <span class="kind">' + esc(L[sv.kind] || sv.kind) + '</span></h1><p class="lead">' +
-            num(sv.routes + sv.jobs) + " " + esc(L.routes) + " · " + sv.domains.length + " " + esc(sv.domains.length === 1 ? L.domain1 : L.domains) + " · " + num(sv.tables) + " " + esc(L.tablesLc) + "</p>";
-    if (sv.kind === "web") h += '<p><a href="#/w/' + s + '">' + num(sv.screens) + " " + esc(L.screens) + "</a></p>";
-    if (!sv.domains.length) { read(h + '<p class="empty">' + esc(L.nothing) + "</p>"); serviceDetail(s); return; }
-    h += '<table class="list"><thead><tr><th>' + esc(L.domain) + '</th><th class="num">' + esc(L.colRoutes) + '</th><th class="num">' +
-         esc(L.colFunctions) + "</th><th>" + esc(L.colTables) + '</th><th class="num">' + esc(L.colUsedBy) + "</th></tr></thead><tbody>";
-    sv.domains.forEach(function (d) {
-      var dm = DOM[d];
-      h += '<tr class="row" data-href="#/d/' + d + '"><td><b>' + esc(dm.name === "other" ? L.other : dm.name) + '</b><br><span class="muted">' + esc(L["rule_" + dm.rule] || dm.rule) +
-           '</span></td><td class="num">' + dm.routes + '</td><td class="num">' + num(dm.functions) + "</td><td>" + tableChips(dm.tables, 5) +
-           (dm.ntables > dm.tables.length ? '<span class="chip">+' + (dm.ntables - dm.tables.length) + "</span>" : "") +
-           '</td><td class="num">' + (dm.consumers ? num(dm.consumers) : "—") + "</td></tr>";
-    });
-    read(h + "</tbody></table>");
+            (sv.routes + sv.jobs ? num(sv.routes + sv.jobs) + " " + esc(L.routes) + " · " + sv.domains.length + " " + esc(sv.domains.length === 1 ? L.domain1 : L.domains) + " · " : "") +
+            num(sv.functions) + " " + esc(L.functions) + " · " + num(sv.tables) + " " + esc(L.tablesLc) + "</p>";
+    if (sv.domains.length) {
+      h += "<h2>" + esc(L.domainsTitle) + '</h2><table class="list"><thead><tr><th>' + esc(L.domain) + '</th><th class="num">' + esc(L.colRoutes) + '</th><th class="num">' +
+           esc(L.colFunctions) + "</th><th>" + esc(L.colTables) + '</th><th class="num">' + esc(L.colUsedBy) + "</th></tr></thead><tbody>";
+      sv.domains.forEach(function (d) {
+        var dm = DOM[d];
+        h += '<tr class="row" data-href="#/d/' + d + '"><td><b>' + esc(dm.name === "other" ? L.other : dm.name) + '</b><br><span class="muted">' + esc(L["rule_" + dm.rule] || dm.rule) +
+             '</span></td><td class="num">' + dm.routes + '</td><td class="num">' + num(dm.functions) + "</td><td>" + tableChips(dm.tables, 5) +
+             (dm.ntables > dm.tables.length ? '<span class="chip">+' + (dm.ntables - dm.tables.length) + "</span>" : "") +
+             '</td><td class="num">' + (dm.consumers ? num(dm.consumers) : "—") + "</td></tr>";
+      });
+      h += "</tbody></table>";
+    }
+    if (sv.screen_chunk) {
+      var groups = {};
+      chunk(sv.screen_chunk).screens.forEach(function (sc) { var g = groups[sc.g] = groups[sc.g] || [0, 0, 0]; g[0]++; g[1] += sc.r.length; g[2] += sc.u; });
+      h += "<h2>" + esc(L.screensTitle) + ' <span class="muted">· <a href="#/w/' + s + '">' + num(sv.screens) + " " + esc(sv.screens === 1 ? L.screen : L.screens) + "</a>" +
+           (sv.unmatched ? ' · <a class="risk" href="#/u/' + s + '">' + num(sv.unmatched) + " " + esc(L.unmatched) + "</a>" : "") + '</span></h2><table class="list"><thead><tr><th>' +
+           esc(L.colFolder) + '</th><th class="num">' + esc(L.screens) + '</th><th class="num">' + esc(L.colRoutes) + '</th><th class="num">' + esc(L.colUnmatched) + "</th></tr></thead><tbody>";
+      Object.keys(groups).sort().forEach(function (g) {
+        h += '<tr class="row" data-href="#/w/' + s + '"><td class="mono">' + esc(g) + '</td><td class="num">' + groups[g][0] + '</td><td class="num">' + groups[g][1] +
+             '</td><td class="num">' + (groups[g][2] ? '<span class="risk">' + groups[g][2] + "</span>" : "—") + "</td></tr>";
+      });
+      h += "</tbody></table>";
+    }
+    if (sv.data.length) {
+      var first = sv.data.slice(0, 60), rest = sv.data.slice(60);
+      h += "<h2>" + esc(L.dataTitle) + ' <span class="muted">· ' + num(sv.tables) + "</span></h2><div>" + first.map(function (p) { return rwChip(p[0], p[1]); }).join("") +
+           (rest.length ? '<span id="more-data"><button class="chip" id="more-data-btn">+' + num(sv.tables - first.length) + "</button></span>" : "") + "</div>";
+    }
+    if (sv.folders.length) {
+      h += "<h2>" + esc(sv.domains.length ? L.foldersRest : L.foldersTitle) + '</h2><table class="list"><thead><tr><th>' + esc(L.colFolder) + '</th><th class="num">' +
+           esc(L.colFunctions) + '</th><th class="num">' + esc(L.colHttp) + "</th><th>" + esc(L.colTables) + "</th></tr></thead><tbody>";
+      sv.folders.forEach(function (f, k) {
+        h += '<tr class="row" data-href="#/p/' + s + "/" + k + '"><td class="mono">' + esc(f[0]) + '</td><td class="num">' + num(f[1]) + '</td><td class="num">' + (f[2] ? num(f[2]) : "—") +
+             "</td><td>" + tableChips(f[4], 4) + (f[3] > f[4].length ? '<span class="chip">+' + (f[3] - f[4].length) + "</span>" : "") + "</td></tr>";
+      });
+      h += "</tbody></table>";
+    }
+    if (!sv.domains.length && !sv.screen_chunk && !sv.data.length && !sv.folders.length) h += '<p class="empty">' + esc(L.nothing) + "</p>";
+    read(h);
+    var md = $("more-data-btn");
+    if (md) md.onclick = function () {
+      $("more-data").innerHTML = sv.data.slice(60).map(function (p) { return rwChip(p[0], p[1]); }).join("") +
+        (sv.tables > sv.data.length ? '<span class="chip">+' + (sv.tables - sv.data.length) + "</span>" : "");
+    };
+    serviceDetail(s);
+  }
+
+  // a folder of a service's code: its functions, with data access and HTTP calls
+  function pageFolder(s, k, limit) {
+    var sv = SV[s], f = sv.folders[k];
+    if (!f) return pageService(s);
+    limit = limit || 300;
+    crumbs(['<a href="#/s/' + s + '">' + esc(sv.name) + "</a>", '<span class="mono">' + esc(f[0]) + "</span>"]); toc("s" + s);
+    var h = '<h1 class="mono">' + esc(f[0]) + '</h1><p class="lead">' + esc(sv.name) + " · " + num(f[1]) + " " + esc(L.functions) + "</p>";
+    h += '<table class="list"><thead><tr><th>' + esc(L.function) + "</th><th>" + esc(L.colFile) + "</th><th>" + esc(L.colTables) + "</th><th>" + esc(L.colHttp) + "</th></tr></thead><tbody>";
+    var shown = 0;
+    for (var c = 0; c < f[5].length && shown < limit; c++) {
+      var ch = chunk(f[5][c]);
+      for (var j = 0; j < ch.items.length && shown < limit; j++, shown++) {
+        var i = ch.items[j], rec = ch.fns[i] || fnRecord(i);
+        var data = rec ? rec[6].map(function (d) { return rwChip(d[0], d[1]); }).join("") : "";
+        var http = rec ? rec[7].slice(0, 3).map(function (e) { return '<a class="chip http" href="#/r/' + e + '">' + esc(label(e)) + "</a>"; }).join("") +
+                         (rec[8].length ? '<span class="chip bad">⚠ ' + rec[8].length + "</span>" : "") : "";
+        h += '<tr class="row" data-href="#/f/' + i + '"><td class="mono">' + esc(label(i, rec)) + '</td><td class="ev">' + esc(rec ? rec[1] : "") + "</td><td>" + data + "</td><td>" + http + "</td></tr>";
+      }
+    }
+    h += "</tbody></table>";
+    if (f[1] > shown) h += '<p><button id="more-fns">' + esc(fmt(L.showMore, { n: num(Math.min(f[1] - shown, 1000)), t: num(f[1]) })) + "</button></p>";
+    read(h);
+    var btn = $("more-fns");
+    if (btn) btn.onclick = function () { var y = $("read").scrollTop; pageFolder(s, k, limit + 1000); $("read").scrollTop = y; };
     serviceDetail(s);
   }
   function serviceDetail(s) {
@@ -471,16 +534,18 @@
     var h = "<h1>" + esc(sv.name) + ' <span class="kind">' + esc(L.web) + '</span></h1><p class="lead">' + esc(fmt(L.screensLead, { n: num(sv.screens), u: num(sv.unmatched) })) + "</p>";
     var groups = {};
     ch.screens.forEach(function (sc, k) { (groups[sc.g] = groups[sc.g] || []).push(k); });
+    h += '<table class="list fixed"><colgroup><col style="width:28%"><col><col style="width:90px"></colgroup><thead><tr><th>' + esc(L.colFile) + "</th><th>" +
+         esc(L.usedByScreens) + '</th><th class="num">' + esc(L.colUnmatched) + "</th></tr></thead><tbody>";
     Object.keys(groups).sort().forEach(function (g) {
-      h += "<h2 class=mono>" + esc(g) + '</h2><table class="list"><thead><tr><th>' + esc(L.colFile) + "</th><th>" + esc(L.usedByScreens) + '</th><th class="num">' + esc(L.colUnmatched) + "</th></tr></thead><tbody>";
+      h += '<tr class="group"><td colspan="3" class="mono">' + esc(g) + "</td></tr>";
       groups[g].forEach(function (k) {
         var sc = ch.screens[k];
-        h += '<tr class="row" data-screen="' + k + '"><td class="mono">' + esc(sc.f.split("/").pop()) + "</td><td>" +
+        h += '<tr class="row" data-screen="' + k + '"><td class="mono screen">' + esc(sc.f.split("/").pop()) + '</td><td class="routes">' +
              sc.r.slice(0, 6).map(function (e) { return '<a class="chip http" href="#/r/' + e + '">' + esc(label(e)) + "</a>"; }).join("") + (sc.r.length > 6 ? '<span class="chip">+' + (sc.r.length - 6) + "</span>" : "") +
              '</td><td class="num">' + (sc.u ? '<span class="risk">' + sc.u + "</span>" : "—") + "</td></tr>";
       });
-      h += "</tbody></table>";
     });
+    h += "</tbody></table>";
     read(h);
     detail("");
     $("read").onclick = function (ev) {
@@ -539,7 +604,7 @@
       ],
       layout: SV.length <= 150 ? { name: "cose", animate: false, randomize: false, nodeRepulsion: function () { return 400000; }, idealEdgeLength: function () { return 200; } }
                                : { name: "grid" } });
-    cy.on("tap", "node", function (e) { var i = +e.target.id().slice(1); location.hash = SV[i].kind === "web" ? "#/w/" + i : "#/s/" + i; });
+    cy.on("tap", "node", function (e) { var i = +e.target.id().slice(1); location.hash = "#/s/" + i; });
     detail("");
   }
 
@@ -622,6 +687,7 @@
       else if (h[0] === "t") pageTables();
       else if (h[0] === "w" && SV[+h[1]] && SV[+h[1]].screen_chunk) pageScreens(+h[1]);
       else if (h[0] === "u" && SV[+h[1]] && SV[+h[1]].screen_chunk) pageUnmatched(+h[1]);
+      else if (h[0] === "p" && SV[+h[1]]) pageFolder(+h[1], +h[2]);
       else if (h[0] === "map") pageMap();
       else pageSystem();
     } catch (err) {
