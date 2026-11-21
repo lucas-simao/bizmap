@@ -154,6 +154,9 @@ import axios from 'axios';
 export function createClientApi(baseUrl: string) {
   return axios.create({ baseURL: `${baseUrl}/api/v1/client` });
 }
+""",
+    "src/api/clientApi.ts": """
+import { createClientApi } from './clientApiFactory';
 
 export const clientApi = createClientApi(import.meta.env.VITE_CLIENT_API_URL);
 """,
@@ -168,7 +171,7 @@ export function createDeliveryHttpClient(http: AxiosInstance) {
 }
 """,
     "src/api/delivery/index.ts": """
-import { clientApi } from '../clientApiFactory';
+import { clientApi } from '../clientApi';
 import { createDeliveryHttpClient } from './client';
 
 export const deliveryHttpClient = createDeliveryHttpClient(clientApi);
@@ -356,6 +359,11 @@ def test_the_second_api_keeps_its_env_through_the_factory(tmp_path: Path) -> Non
     graph = _scan(tmp_path)
     unresolved = graph.attrs.get("unresolved_http") or []
     assert not [u for u in unresolved if u.get("reason") == "base_unknown"], unresolved
+    # the call knows its base: the env of the factory's argument, not `{baseUrl}`
+    for fn, path in (("getSite", "/api/v1/client/sites/"), ("portfolioSummary", "/api/v1/client/portfolio/summary")):
+        node = graph.nodes[_w(f"src.api.delivery.client.createDeliveryHttpClient.{fn}")]
+        urls = [c.get("url") for c in node.attrs.get("http_calls") or []]
+        assert urls and all(u.startswith("{VITE_CLIENT_API_URL}" + path) for u in urls), urls
 
 
 def test_export_lists_four_screens_and_per_route_consumers(tmp_path: Path) -> None:
