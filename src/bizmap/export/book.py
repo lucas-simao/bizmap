@@ -26,6 +26,7 @@ The graph is only read.
 from __future__ import annotations
 
 import posixpath
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -48,12 +49,29 @@ FRONT_EXT = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte")
 UI_EXT = (".tsx", ".jsx", ".vue", ".svelte")
 SCREEN_DIRS = ("pages", "screens", "app", "views", "routes", "components", "features")
 CALLER_CAP = 40
+UI_DEPTH = 8  # calls followed up from an API call to the screen that triggers it
+UI_VISIT = 4000
 CONSUMER_CAP = 200
 FOLDER_CHUNK = 2500
 SERVICE_TABLES = 400
 TABLE_CHUNK = 60
 R, W = 1, 2
 METHOD_ORDER = {"GET": 0, "POST": 1, "PUT": 2, "PATCH": 3, "DELETE": 4}
+
+
+NOISE = re.compile(
+    r"(\.(test|spec|stories|e2e)\.[^/]+$|\.d\.ts$|(^|/)(__tests__|__mocks__|tests?|spec|e2e|fixtures|generated|__generated__)/)"
+)
+
+
+def is_noise(file: str) -> bool:
+    """Tests, mocks, fixtures, type declarations and generated code: they call
+    APIs too, but they are not who *uses* a route."""
+    return bool(file) and bool(NOISE.search(file))
+
+
+def is_ui_file(file: str) -> bool:
+    return file.endswith(UI_EXT) and not is_noise(file)
 
 
 def node_label(node: dict[str, Any]) -> str:
@@ -67,7 +85,9 @@ def node_label(node: dict[str, Any]) -> str:
         sym = node.get("symbol") or node.get("path") or leaf.split(":", 2)[-1]
         return f"{node.get('kind')} {sym}".strip()
     if kind == "function":
-        return leaf.removeprefix("function:")
+        qual = leaf.removeprefix("function:")
+        # module-level code (an API client object, a router) -> "pkg.file (module)"
+        return f"{qual[: -len('.module')]} (module)" if qual.endswith(".module") else qual
     if kind == "column":
         return f"{node.get('table')}.{node.get('name')}"
     if kind == "queue":
@@ -162,6 +182,7 @@ def build_book(
     in_calls: list[list[int]] = [[] for _ in range(n_nodes)]
     http_out: list[list[int]] = [[] for _ in range(n_nodes)]
     http_in: list[list[int]] = [[] for _ in range(n_nodes)]
+    http_guess: set[tuple[int, int]] = set()  # calls_http matched by heuristic (a route literal…)
     own: dict[int, dict[int, list[Any]]] = defaultdict(dict)  # fn -> table -> [rw, cols set, ops set]
     reach_tables: dict[int, dict[int, int]] = defaultdict(dict)  # entrypoint -> table -> rw (own + derived)
     for edge in data.get("edges") or []:
@@ -175,6 +196,8 @@ def build_book(
         elif etype == "calls_http":
             http_out[a].append(b)
             http_in[b].append(a)
+            if edge.get("confidence") in ("heuristic", "unknown"):
+                http_guess.add((a, b))
         elif etype in ("reads", "writes"):
             t = b if ntype[b] == T_TABLE else col_tab.get(b)
             if t is None:
@@ -227,6 +250,35 @@ def build_book(
         else:
             kind = "lib"
         svc_rows.append({**row, "kind": kind})
+
+    files = [_file(n) for n in nodes]
+    noise = [is_noise(f) for f in files]
+    has_ui = {s for s, row in enumerate(svc_rows) if row["kind"] == "web"
+              and any(is_ui_file(files[i]) for i in range(row_start(nsvc, s), row_end(nsvc, s)) if ntype[i] == T_FUNC)}
+
+    # UI files (screens) that reach each HTTP-calling function through the calls
+    # inside their service: a page -> a hook -> the API client -> the route
+    ui_reach: dict[int, set[str]] = {}
+    for i in range(n_nodes):
+        if ntype[i] != T_FUNC or noise[i] or nsvc[i] not in has_ui or not (http_out[i] or i in unresolved_by):
+            continue
+        found = {files[i]} if is_ui_file(files[i]) else set()
+        seen, frontier = {i}, [i]
+        for _ in range(UI_DEPTH):
+            nxt = []
+            for u in frontier:
+                for c in in_calls[u]:
+                    if c in seen or nsvc[c] != nsvc[i] or noise[c]:
+                        continue
+                    seen.add(c)
+                    if is_ui_file(files[c]):
+                        found.add(files[c])
+                    if len(seen) < UI_VISIT:
+                        nxt.append(c)
+            frontier = nxt
+            if not frontier:
+                break
+        ui_reach[i] = found
 
     chunks: dict[str, Any] = {}
     home = [""] * n_nodes  # node -> chunk that holds its record
@@ -313,8 +365,10 @@ def build_book(
                 rt = reach_tables.get(e, {})
                 for t, rw in rt.items():
                     tables[t] |= rw
-                callers_http = http_in[e]
+                callers_http = [c for c in http_in[e] if not noise[c]]
+                hidden = len(http_in[e]) - len(callers_http)
                 consumers_total += len(callers_http)
+                screens_of = sorted({(nsvc[c], f) for c in callers_http for f in ui_reach.get(c, ())})
                 route_rows.append(
                     {
                         "i": e,
@@ -323,8 +377,10 @@ def build_book(
                         "pp": path_params(str(node.get("path") or "")),
                         "h": [h for h in out_calls[e]],
                         "t": sorted([t, rw] for t, rw in rt.items()),
-                        "c": callers_http[:CONSUMER_CAP],
+                        "c": [[c, 1 if (c, e) in http_guess else 0] for c in callers_http[:CONSUMER_CAP]],
                         "nc": len(callers_http),
+                        "nh": hidden,
+                        "sc": [[sv, f] for sv, f in screens_of[:CONSUMER_CAP]],
                         "ev": _evidence(node),
                         "why": str(node.get("why") or ""),
                     }
@@ -346,29 +402,62 @@ def build_book(
             )
         row["domains"] = [d for d in range(len(domains)) if domains[d]["svc"] == s]
 
-    # ── screens (front-end services) ──
+    # ── outbound HTTP: screens (front-ends), API client code, calls with no route ──
     for s, row in enumerate(svc_rows):
         row["screens"] = 0
+        row["clients"] = 0
         row["unmatched"] = 0
-        if row["kind"] != "web":
+        row["hidden_calls"] = 0
+        callers = [i for i in range(row_start(nsvc, s), row_end(nsvc, s))
+                   if ntype[i] == T_FUNC and (http_out[i] or i in unresolved_by)]
+        if not callers:
             continue
-        files: dict[str, list[int]] = defaultdict(list)
-        for i in range(row_start(nsvc, s), row_end(nsvc, s)):
-            if ntype[i] == T_FUNC and (http_out[i] or i in unresolved_by):
-                files[_file(nodes[i]) or labels[i]].append(i)
+        real = [i for i in callers if not noise[i]]
+        row["hidden_calls"] = sum(len(http_out[i]) + len(unresolved_by.get(i, [])) for i in callers if noise[i])
         cid = f"w{s}"
-        rows = []
-        fns = {}
-        for f in sorted(files):
-            calls = sorted({t for i in files[f] for t in http_out[i]})
-            unmatched = sum(len(unresolved_by.get(i, [])) for i in files[f])
-            rows.append({"f": f, "g": screen_group(f), "fns": files[f], "r": calls, "u": unmatched})
-            for i in files[f]:
+        fns: dict[str, Any] = {}
+
+        def routes_of(group: list[int]) -> list[list[int]]:
+            pairs = {(t, 1 if (i, t) in http_guess else 0) for i in group for t in http_out[i]}
+            best: dict[int, int] = {}
+            for t, guess in pairs:
+                best[t] = min(best.get(t, 1), guess)
+            return sorted([t, g] for t, g in best.items())
+
+        by_file: dict[str, list[int]] = defaultdict(list)
+        for i in real:
+            by_file[files[i] or labels[i]].append(i)
+        clients = []
+        for f in sorted(by_file):
+            group = by_file[f]
+            clients.append({
+                "f": f, "g": screen_group(f), "fns": group, "r": routes_of(group),
+                "u": sum(len(unresolved_by.get(i, [])) for i in group),
+                "ui": sorted({u for i in group for u in ui_reach.get(i, ())} - {f}),
+            })
+            for i in group:
                 fns[str(i)] = fn_record(i)
                 home[i] = home[i] or cid
-        chunks[cid] = {"screens": rows, "fns": fns}
-        row["screens"] = len(rows)
-        row["unmatched"] = sum(r["u"] for r in rows)
+        screens = []
+        if s in has_ui:
+            # a screen = a UI file that makes, or reaches through calls, an API call
+            per_ui: dict[str, list[int]] = defaultdict(list)
+            for i in real:
+                for u in ui_reach.get(i, ()):
+                    per_ui[u].append(i)
+            for f in sorted(per_ui):
+                via = sorted(set(per_ui[f]))
+                screens.append({"f": f, "g": screen_group(f), "via": via, "r": routes_of(via),
+                                "u": sum(len(unresolved_by.get(i, [])) for i in via)})
+        elif row["kind"] == "web":
+            # no UI files (a Vite app with only .ts): the calling files are the screens
+            screens = [{"f": c["f"], "g": c["g"], "via": c["fns"], "r": c["r"], "u": c["u"]} for c in clients]
+        linked = sum(1 for c in clients if c["ui"] or is_ui_file(c["f"]))
+        chunks[cid] = {"screens": screens, "clients": clients, "fns": fns}
+        row["screens"] = len(screens)
+        row["clients"] = len(clients)
+        row["clients_linked"] = linked
+        row["unmatched"] = sum(c["u"] for c in clients)
         row["screen_chunk"] = cid
 
     # ── tables ──

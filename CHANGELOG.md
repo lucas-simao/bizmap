@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `bizmap export --format html`, front-end ↔ API links:
+  - **Screens are UI files** (pages, components) that reach an API call
+    through the call graph (page → hook → API client → route), not the client
+    files themselves; each lists the routes it uses and the client functions it
+    goes through. The client layer has its own section (**API client code**),
+    for every service, with the screens that use each file.
+  - **Tests, mocks, fixtures, `.d.ts` and generated code** are left out of
+    screens, client code, a route's consumers and the counts (the page says
+    how many calls it left out).
+  - A route's **consumers** list the screens first, then the calling functions.
+  - **Likely** links (heuristic `calls_http`, matched from a path literal by
+    its end) are dashed.
+  - **Calls with no route** for every service (APIs and workers too), with what
+    each reason means.
+  - Module-level code reads as `pkg.file (module)`.
+  - Table of contents grouped by kind (APIs, front-ends, workers, libraries),
+    each service once; the routes table no longer overflows (fixed columns,
+    long handler names cut with `…`).
+
 ## 0.6.0 — 2026-11-20
 
 ### Changed

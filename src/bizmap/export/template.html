@@ -68,7 +68,10 @@
   .chip { display: inline-block; font-size: 11px; border-radius: 4px; padding: 0 5px; margin: 1px 2px 1px 0; background: var(--chip); white-space: nowrap; }
   .chip.r { background: var(--readbg); color: var(--read); } .chip.w { background: var(--writebg); color: var(--write); }
   .chip.rw { background: linear-gradient(90deg, var(--readbg) 50%, var(--writebg) 50%); color: var(--fg); }
-  .chip.http { background: #ddf4ff; color: #0550ae; } .chip.bad { background: #fff8c5; color: #9a6700; }
+  .chip.http { background: #ddf4ff; color: #0550ae; }
+  .chip.guess { background: #fff; border: 1px dashed #54aeff; }
+  td.ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  code.wrap { word-break: break-all; } .chip.bad { background: #fff8c5; color: #9a6700; }
   .tree { margin: 6px 0 10px; }
   .tree .node { display: flex; gap: 6px; align-items: baseline; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
   .tree .node:hover { background: var(--soft); }

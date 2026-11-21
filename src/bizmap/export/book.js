@@ -33,6 +33,19 @@
       nothing: "Nothing here.", noResults: "No match.", evidence: "Defined at", service: "service", other: "other",
       shared: "shared", mapLead: "Services and the HTTP links between them (number = links). Click a service to open it.",
       generated: "Graph", domainsTitle: "Domains", screensTitle: "Screens", dataTitle: "Tables it reads and writes",
+      apis: "APIs", workers: "Workers", libs: "Libraries", httpTitle: "HTTP calls it makes", files: "files",
+      clientTitle: "API client code", clientFile: "API client", clientLead: "Files whose functions call an API (the client layer). Tests, mocks and generated code are left out.",
+      screensLead2: "{n} screens call the API through its client code; {l} of {c} client files are linked to a screen by the calls the scan follows.",
+      linkedLead: "{n} of {t} client files are linked to a screen by the calls the scan follows (a function passed by reference, as to a hook, is not followed).",
+      hiddenCalls: "{n} HTTP calls from tests, mocks or generated code are not counted.",
+      noScreens: "No screen file reaches an API call through the calls the scan follows; see the API client code below.",
+      noScreen: "no screen linked", noScreenLong: "No screen reaches this file through the calls the scan follows (for example when a function is passed by reference to a hook).",
+      throughClient: "Through", usedOnScreens: "Used on screens", onScreens: "Screens", byFunctions: "Calling functions",
+      guess: "likely", guessHint: "Dashed links are likely matches (a path found in the code matched to a route by its end); solid ones were matched from the full URL.",
+      reasonHelp_target_not_scanned: "The full URL is known but no scanned route has that path: the service is not in the scan, or the route was renamed or removed.",
+      reasonHelp_base_unknown: "The path is known but not the base URL (an environment variable no scanned service is mapped to).",
+      reasonHelp_path_dynamic: "The path is built at runtime (template strings, concatenation) and could not be resolved.",
+      reasonHelp_client_unknown: "An HTTP client the scan does not recognise.",
       foldersTitle: "Code by folder", foldersRest: "Code no route reaches, by folder", colFolder: "Folder", colHttp: "HTTP calls", showMore: "Show {n} more (of {t})",
     },
     "pt-BR": {
@@ -61,6 +74,19 @@
       nothing: "Nada aqui.", noResults: "Nada encontrado.", evidence: "Definido em", service: "serviço", other: "outros",
       shared: "compartilhada", mapLead: "Serviços e os links HTTP entre eles (número = links). Clique num serviço para abri-lo.",
       generated: "Grafo", domainsTitle: "Domínios", screensTitle: "Telas", dataTitle: "Tabelas que lê e escreve",
+      apis: "APIs", workers: "Workers", libs: "Bibliotecas", httpTitle: "Chamadas HTTP que faz", files: "arquivos",
+      clientTitle: "Código cliente da API", clientFile: "cliente da API", clientLead: "Arquivos cujas funções chamam uma API (a camada cliente). Testes, mocks e código gerado ficam de fora.",
+      screensLead2: "{n} telas chamam a API pelo código cliente; {l} de {c} arquivos cliente estão ligados a uma tela pelas chamadas que o scan segue.",
+      linkedLead: "{n} de {t} arquivos cliente estão ligados a uma tela pelas chamadas que o scan segue (função passada por referência, como para um hook, não é seguida).",
+      hiddenCalls: "{n} chamadas HTTP de testes, mocks ou código gerado não entram na contagem.",
+      noScreens: "Nenhum arquivo de tela chega a uma chamada de API pelas chamadas que o scan segue; veja o código cliente abaixo.",
+      noScreen: "sem tela ligada", noScreenLong: "Nenhuma tela chega a este arquivo pelas chamadas que o scan segue (por exemplo, quando a função é passada por referência para um hook).",
+      throughClient: "Por meio de", usedOnScreens: "Usado nas telas", onScreens: "Telas", byFunctions: "Funções que chamam",
+      guess: "provável", guessHint: "Links tracejados são prováveis (um path achado no código casado com uma rota pelo final); os contínuos vieram da URL completa.",
+      reasonHelp_target_not_scanned: "A URL completa é conhecida, mas nenhuma rota escaneada tem esse path: o serviço não está no scan ou a rota mudou ou foi removida.",
+      reasonHelp_base_unknown: "O path é conhecido, mas não a URL base (uma variável de ambiente sem serviço mapeado).",
+      reasonHelp_path_dynamic: "O path é montado em tempo de execução (template string, concatenação) e não pôde ser resolvido.",
+      reasonHelp_client_unknown: "Um cliente HTTP que o scan não reconhece.",
       foldersTitle: "Código por pasta", foldersRest: "Código que nenhuma rota alcança, por pasta", colFolder: "Pasta", colHttp: "Chamadas HTTP", showMore: "Mostrar mais {n} (de {t})",
     },
   };
@@ -140,28 +166,27 @@
       .map(function (p) { return p[0]; }).join('<span class="sep">›</span>');
   }
   function toc(active) {
-    var h = '<h4>' + esc(L.services) + "</h4>";
-    SV.forEach(function (s, i) {
-      if (s.kind === "web" && !s.domains.length) return;
-      h += '<a href="#/s/' + i + '" class="' + (active === "s" + i ? "on" : "") + '"><span>' + esc(s.name) + '</span><span class="n">' +
-           (s.routes + s.jobs ? num(s.routes + s.jobs) : esc(L[s.kind] || s.kind)) + "</span></a>";
-      if (active && (active === "s" + i || (active.charAt(0) === "d" && DOM[+active.slice(1)] && DOM[+active.slice(1)].svc === i))) {
-        s.domains.forEach(function (d) {
+    var h = "";
+    var groups = [["api", L.apis], ["web", L.frontends], ["worker", L.workers], ["lib", L.libs]];
+    var dsvc = active && active.charAt(0) === "d" && DOM[+active.slice(1)] ? DOM[+active.slice(1)].svc : -1;
+    groups.forEach(function (g) {
+      var list = SV.map(function (sv, i) { return [sv, i]; }).filter(function (p) { return p[0].kind === g[0]; });
+      if (!list.length) return;
+      h += "<h4>" + esc(g[1]) + "</h4>";
+      list.forEach(function (p) {
+        var sv = p[0], i = p[1];
+        var mine = active === "s" + i || active === "w" + i || active === "u" + i || dsvc === i;
+        var n = sv.routes + sv.jobs ? num(sv.routes + sv.jobs) : sv.kind === "web" ? num(sv.screens) + " " + esc(sv.screens === 1 ? L.screen : L.screens) : num(sv.functions);
+        h += '<a href="#/s/' + i + '" class="' + (active === "s" + i ? "on" : "") + '"><span>' + esc(sv.name) + '</span><span class="n">' + n + "</span></a>";
+        if (!mine) return;
+        sv.domains.forEach(function (d) {
           h += '<a class="sub ' + (active === "d" + d ? "on" : "") + '" href="#/d/' + d + '"><span>' + esc(DOM[d].name === "other" ? L.other : DOM[d].name) +
                '</span><span class="n">' + DOM[d].routes + "</span></a>";
         });
-      }
-    });
-    var fronts = SV.map(function (s, i) { return [s, i]; }).filter(function (p) { return p[0].kind === "web"; });
-    if (fronts.length) {
-      h += "<h4>" + esc(L.frontends) + "</h4>";
-      fronts.forEach(function (p) {
-        var s = p[0], i = p[1];
-        h += '<a href="#/w/' + i + '" class="' + (active === "w" + i ? "on" : "") + '"><span>' + esc(s.name) + '</span><span class="n">' + num(s.screens) + " " + esc(s.screens === 1 ? L.screen : L.screens) + "</span></a>";
-        if (s.unmatched) h += '<a class="sub warn ' + (active === "u" + i ? "on" : "") + '" href="#/u/' + i + '"><span>⚠ ' + esc(L.unmatched) + '</span><span class="n">' + num(s.unmatched) + "</span></a>";
-        if (s.domains.length) h += '<a class="sub" href="#/s/' + i + '"><span>' + esc(L.routes) + '</span><span class="n">' + num(s.routes + s.jobs) + "</span></a>";
+        if (sv.screen_chunk) h += '<a class="sub ' + (active === "w" + i ? "on" : "") + '" href="#/w/' + i + '"><span>' + esc(sv.kind === "web" ? L.screensTitle : L.httpTitle) + '</span><span class="n">' + num(sv.kind === "web" ? sv.screens : sv.clients) + "</span></a>";
+        if (sv.unmatched) h += '<a class="sub warn ' + (active === "u" + i ? "on" : "") + '" href="#/u/' + i + '"><span>⚠ ' + esc(L.unmatched) + '</span><span class="n">' + num(sv.unmatched) + "</span></a>";
       });
-    }
+    });
     h += "<h4>" + esc(L.tables) + '</h4><a href="#/t" class="' + (active === "t" ? "on" : "") + '"><span>' + esc(L.allTables) + '</span><span class="n">' + num(IX.tables.length) + "</span></a>";
     h += '<h4>' + esc(L.map) + '</h4><a href="#/map" class="' + (active === "map" ? "on" : "") + '"><span>' + esc(L.map) + "</span></a>";
     $("toc").innerHTML = h;
@@ -232,16 +257,32 @@
       h += "</tbody></table>";
     }
     if (sv.screen_chunk) {
-      var groups = {};
-      chunk(sv.screen_chunk).screens.forEach(function (sc) { var g = groups[sc.g] = groups[sc.g] || [0, 0, 0]; g[0]++; g[1] += sc.r.length; g[2] += sc.u; });
-      h += "<h2>" + esc(L.screensTitle) + ' <span class="muted">· <a href="#/w/' + s + '">' + num(sv.screens) + " " + esc(sv.screens === 1 ? L.screen : L.screens) + "</a>" +
-           (sv.unmatched ? ' · <a class="risk" href="#/u/' + s + '">' + num(sv.unmatched) + " " + esc(L.unmatched) + "</a>" : "") + '</span></h2><table class="list"><thead><tr><th>' +
-           esc(L.colFolder) + '</th><th class="num">' + esc(L.screens) + '</th><th class="num">' + esc(L.colRoutes) + '</th><th class="num">' + esc(L.colUnmatched) + "</th></tr></thead><tbody>";
-      Object.keys(groups).sort().forEach(function (g) {
-        h += '<tr class="row" data-href="#/w/' + s + '"><td class="mono">' + esc(g) + '</td><td class="num">' + groups[g][0] + '</td><td class="num">' + groups[g][1] +
-             '</td><td class="num">' + (groups[g][2] ? '<span class="risk">' + groups[g][2] + "</span>" : "—") + "</td></tr>";
-      });
-      h += "</tbody></table>";
+      var wc = chunk(sv.screen_chunk);
+      if (sv.kind === "web") {
+        var groups = {};
+        // distinct routes and distinct calls with no route per folder (screens share client functions)
+        wc.screens.forEach(function (sc) {
+          var g = groups[sc.g] = groups[sc.g] || [0, {}, {}];
+          g[0]++;
+          sc.r.forEach(function (p) { g[1][p[0]] = 1; });
+          sc.via.forEach(function (f) { var rec = wc.fns[f]; if (rec && rec[8].length) g[2][f] = rec[8].length; });
+        });
+        Object.keys(groups).forEach(function (k) { var u = 0, m = groups[k][2]; Object.keys(m).forEach(function (f) { u += m[f]; }); groups[k][2] = u; });
+        h += "<h2>" + esc(L.screensTitle) + ' <span class="muted">· <a href="#/w/' + s + '">' + num(sv.screens) + " " + esc(sv.screens === 1 ? L.screen : L.screens) + "</a></span></h2>";
+        h += '<table class="list"><thead><tr><th>' + esc(L.colFolder) + '</th><th class="num">' + esc(L.screens) + '</th><th class="num">' + esc(L.colRoutes) + '</th><th class="num">' + esc(L.colUnmatched) + "</th></tr></thead><tbody>";
+        Object.keys(groups).sort().forEach(function (g) {
+          h += '<tr class="row" data-href="#/w/' + s + '"><td class="mono">' + esc(g) + '</td><td class="num">' + groups[g][0] + '</td><td class="num">' + Object.keys(groups[g][1]).length +
+               '</td><td class="num">' + (groups[g][2] ? '<span class="risk">' + groups[g][2] + "</span>" : "—") + "</td></tr>";
+        });
+        h += "</tbody></table>";
+      }
+      var targets = {};
+      wc.clients.forEach(function (c) { c.r.forEach(function (p) { var t = getNames().s[p[0]]; targets[t] = (targets[t] || 0) + 1; }); });
+      h += "<h2>" + esc(L.httpTitle) + ' <span class="muted">· <a href="#/w/' + s + '">' + num(sv.clients) + " " + esc(L.files) + "</a>" +
+           (sv.unmatched ? ' · <a class="risk" href="#/u/' + s + '">' + num(sv.unmatched) + " " + esc(L.unmatched) + "</a>" : "") + "</span></h2><p>" +
+           Object.keys(targets).map(function (t) { return '<a class="chip http" href="#/s/' + t + '">→ ' + esc(svcName(+t)) + " · " + targets[t] + "</a>"; }).join("") + "</p>";
+      if (sv.kind === "web" && sv.clients) h += '<p class="muted">' + esc(fmt(L.linkedLead, { n: num(sv.clients_linked), t: num(sv.clients) })) + "</p>";
+      if (sv.hidden_calls) h += '<p class="muted">' + esc(fmt(L.hiddenCalls, { n: num(sv.hidden_calls) })) + "</p>";
     }
     if (sv.data.length) {
       var first = sv.data.slice(0, 60), rest = sv.data.slice(60);
@@ -311,13 +352,13 @@
     toc("d" + d);
     var h = "<h1>" + esc(name) + '</h1><p class="lead">' + esc(SV[s].name) + " · " + dm.routes + " " + esc(L.routes) + " · " + num(dm.functions) + " " +
             esc(L.functions) + " · " + esc(L["rule_" + dm.rule] || dm.rule) + ". " + esc(L.openTree) + "</p>";
-    h += '<table class="list"><thead><tr><th>' + esc(L.colRoute) + "</th><th>" + esc(L.colHandler) + "</th><th>" + esc(L.colTables) +
+    h += '<table class="list fixed"><colgroup><col style="width:40%"><col style="width:26%"><col><col style="width:70px"></colgroup><thead><tr><th>' + esc(L.colRoute) + "</th><th>" + esc(L.colHandler) + "</th><th>" + esc(L.colTables) +
          '</th><th class="num">' + esc(L.colUsedBy) + "</th></tr></thead><tbody>";
     ch.routes.forEach(function (r) {
       var hl = r.h.length ? label(r.h[0], ch.fns[r.h[0]]) : "";
       var isHttp = /^[A-Z]+$/.test(r.m) && r.p.charAt(0) === "/";
       h += '<tr class="row' + (route === r.i ? " on" : "") + '" data-route="' + r.i + '"><td>' + (isHttp ? methodHtml(r.m) + pathHtml(r.p) : '<span class="kind">' + esc(r.m) + "</span> " + esc(r.p)) +
-           '</td><td class="mono">' + esc(shortFn(hl)) + "</td><td>" + tableChips(r.t, 4) + '</td><td class="num">' + (r.nc ? num(r.nc) : "—") + "</td></tr>";
+           '</td><td class="mono ell" title="' + esc(hl) + '">' + esc(shortFn(hl)) + "</td><td>" + tableChips(r.t, 4) + '</td><td class="num">' + (r.nc ? num(r.nc) : "—") + "</td></tr>";
       if (route === r.i) h += '<tr><td colspan="4"><div class="tree" id="tree-' + r.i + '"></div></td></tr>';
     });
     read(h + "</tbody></table>");
@@ -408,18 +449,24 @@
     if (r.why) h += '<div class="why">' + esc(r.why) + "</div>";
     h += sigHtml(hrec, r.pp);
     if (r.h.length) h += "<h3>" + esc(L.handler) + "</h3><ul>" + r.h.map(function (f) { var rec = ch.fns[f]; return "<li>" + fnLink(f) + (rec ? ' <div class="ev">' + esc(rec[1]) + "</div>" : "") + "</li>"; }).join("") + "</ul>";
-    if (hrec && hrec[2]) h += '<div class="why">' + esc(hrec[2]) + "</div>";
+    if (hrec && hrec[2] && hrec[2] !== r.why) h += '<div class="why">' + esc(hrec[2]) + "</div>";
     if (r.t.length) h += "<h3>" + esc(L.readsWrites) + "</h3><ul>" + r.t.map(function (p) { return "<li>" + rwChip(p[0], p[1]) + ' <span class="muted">' + esc((tableRow[p[0]] || {}).db || "") + "</span></li>"; }).join("") + "</ul>";
     h += "<h3>" + esc(L.consumers) + " (" + num(r.nc) + ")</h3>";
     if (!r.nc) h += '<p class="muted">' + esc(L.noConsumers) + "</p>";
     else {
       var nm = getNames();
-      h += "<ul>" + r.c.map(function (f) {
-        var rec = fnRecord(f), s = nm.s[f], web = SV[s] && SV[s].kind === "web";
+      if (r.sc.length) {
+        h += '<p class="muted">' + esc(L.onScreens) + "</p><ul>" + r.sc.map(function (p) {
+          return '<li>🖥 <span class="mono">' + esc(p[1].split("/").pop()) + '</span> <span class="muted">' + esc(svcName(p[0])) + '</span><div class="ev">' + esc(p[1]) + "</div></li>";
+        }).join("") + "</ul>";
+      }
+      h += '<p class="muted">' + esc(L.byFunctions) + "</p><ul>" + r.c.map(function (p) {
+        var f = p[0], rec = fnRecord(f), s = nm.s[f];
         var file = rec ? rec[1].replace(/:\d+$/, "") : "";
-        return "<li>" + (web ? "🖥 " : "") + fnLink(f) + ' <span class="muted">' + esc(svcName(s)) + "</span>" + (file ? '<div class="ev">' + esc(file) + "</div>" : "") + "</li>";
+        return "<li>" + fnLink(f) + ' <span class="muted">' + esc(svcName(s)) + "</span>" + (p[1] ? ' <span class="chip guess">' + esc(L.guess) + "</span>" : "") + (file ? '<div class="ev">' + esc(file) + "</div>" : "") + "</li>";
       }).join("") + (r.nc > r.c.length ? '<li class="muted">+' + (r.nc - r.c.length) + " " + esc(L.more) + "</li>" : "") + "</ul>";
     }
+    if (r.nh) h += '<p class="muted">' + esc(fmt(L.hiddenCalls, { n: num(r.nh) })) + "</p>";
     detail(h);
   }
 
@@ -528,58 +575,82 @@
   }
 
   // ── front-ends: screens and unmatched calls ──────────────────────────────
-  function pageScreens(s) {
-    var sv = SV[s], ch = chunk(sv.screen_chunk);
-    crumbs(['<a href="#/w/' + s + '">' + esc(sv.name) + "</a>", esc(L.screens)]); toc("w" + s);
-    var h = "<h1>" + esc(sv.name) + ' <span class="kind">' + esc(L.web) + '</span></h1><p class="lead">' + esc(fmt(L.screensLead, { n: num(sv.screens), u: num(sv.unmatched) })) + "</p>";
+  function routeChips(list, max) {
+    max = max || 6;
+    return list.slice(0, max).map(function (p) {
+      return '<a class="chip http' + (p[1] ? " guess" : "") + '" href="#/r/' + p[0] + '" title="' + esc(p[1] ? L.guess : "") + '">' + esc(label(p[0])) + "</a>";
+    }).join("") + (list.length > max ? '<span class="chip">+' + (list.length - max) + "</span>" : "");
+  }
+  function fileTable(rows, key, extraHead, extraCell) {
     var groups = {};
-    ch.screens.forEach(function (sc, k) { (groups[sc.g] = groups[sc.g] || []).push(k); });
-    h += '<table class="list fixed"><colgroup><col style="width:28%"><col><col style="width:90px"></colgroup><thead><tr><th>' + esc(L.colFile) + "</th><th>" +
-         esc(L.usedByScreens) + '</th><th class="num">' + esc(L.colUnmatched) + "</th></tr></thead><tbody>";
+    rows.forEach(function (sc, k) { (groups[sc.g] = groups[sc.g] || []).push(k); });
+    var h = '<table class="list fixed"><colgroup><col style="width:28%"><col><col style="width:90px"></colgroup><thead><tr><th>' + esc(L.colFile) + "</th><th>" +
+            esc(extraHead) + '</th><th class="num">' + esc(L.colUnmatched) + "</th></tr></thead><tbody>";
     Object.keys(groups).sort().forEach(function (g) {
       h += '<tr class="group"><td colspan="3" class="mono">' + esc(g) + "</td></tr>";
       groups[g].forEach(function (k) {
-        var sc = ch.screens[k];
-        h += '<tr class="row" data-screen="' + k + '"><td class="mono screen">' + esc(sc.f.split("/").pop()) + '</td><td class="routes">' +
-             sc.r.slice(0, 6).map(function (e) { return '<a class="chip http" href="#/r/' + e + '">' + esc(label(e)) + "</a>"; }).join("") + (sc.r.length > 6 ? '<span class="chip">+' + (sc.r.length - 6) + "</span>" : "") +
+        var sc = rows[k];
+        h += '<tr class="row" data-' + key + '="' + k + '"><td class="mono screen" title="' + esc(sc.f) + '">' + esc(sc.f.split("/").pop()) + '</td><td class="routes">' + extraCell(sc) +
              '</td><td class="num">' + (sc.u ? '<span class="risk">' + sc.u + "</span>" : "—") + "</td></tr>";
       });
     });
-    h += "</tbody></table>";
+    return h + "</tbody></table>";
+  }
+  function pageScreens(s) {
+    var sv = SV[s], ch = chunk(sv.screen_chunk);
+    crumbs(['<a href="#/s/' + s + '">' + esc(sv.name) + "</a>", esc(sv.kind === "web" ? L.screensTitle : L.httpTitle)]); toc("w" + s);
+    var h = "<h1>" + esc(sv.name) + ' <span class="kind">' + esc(L[sv.kind] || sv.kind) + "</span></h1>";
+    if (sv.kind === "web") {
+      h += '<p class="lead">' + esc(fmt(L.screensLead2, { n: num(sv.screens), c: num(sv.clients), l: num(sv.clients_linked) })) + "</p>";
+      h += "<h2>" + esc(L.screensTitle) + "</h2>" + (ch.screens.length ? fileTable(ch.screens, "screen", L.usedByScreens, function (sc) { return routeChips(sc.r); }) : '<p class="muted">' + esc(L.noScreens) + "</p>");
+    }
+    h += "<h2>" + esc(L.clientTitle) + '</h2><p class="muted">' + esc(L.clientLead) + "</p>";
+    h += fileTable(ch.clients, "client", L.usedByScreens, function (c) {
+      return routeChips(c.r) + (sv.kind === "web" && !c.ui.length && !/\.(tsx|jsx|vue|svelte)$/.test(c.f) ? ' <span class="chip">' + esc(L.noScreen) + "</span>" : "");
+    });
+    if (sv.hidden_calls) h += '<p class="muted">' + esc(fmt(L.hiddenCalls, { n: num(sv.hidden_calls) })) + "</p>";
     read(h);
-    detail("");
+    detail('<p class="muted">' + esc(L.guessHint) + "</p>");
     $("read").onclick = function (ev) {
-      var tr = ev.target.closest("tr[data-screen]");
+      if (ev.target.closest("a")) return;
+      var tr = ev.target.closest("tr[data-screen], tr[data-client]");
       if (!tr) return;
       Array.prototype.forEach.call(document.querySelectorAll("tr.on"), function (x) { x.classList.remove("on"); });
       tr.classList.add("on");
-      screenDetail(s, +tr.dataset.screen);
+      if (tr.dataset.screen !== undefined) screenDetail(s, ch.screens[+tr.dataset.screen], true);
+      else screenDetail(s, ch.clients[+tr.dataset.client], false);
     };
   }
-  function screenDetail(s, k) {
-    var ch = chunk(SV[s].screen_chunk), sc = ch.screens[k];
-    var h = "<h2>" + esc(sc.f.split("/").pop()) + ' <span class="kind">' + esc(L.screen) + '</span></h2><p class="ev">' + esc(sc.f) + "</p>";
-    h += "<h3>" + esc(L.usedByScreens) + " (" + sc.r.length + ")</h3><ul>" + sc.r.map(function (e) { return "<li>" + routeLink(e) + "</li>"; }).join("") + "</ul>";
-    h += "<h3>" + esc(L.functions) + " (" + sc.fns.length + ")</h3><ul>";
-    sc.fns.forEach(function (f) {
-      var rec = ch.fns[f];
-      h += "<li>" + fnLink(f) + (rec && rec[8].length ? rec[8].map(function (u) { return '<div><span class="chip bad">⚠ ' + esc(u[0] || "?") + "</span> <code>" + esc(u[1]) + '</code> <span class="muted">' + esc(L["reason_" + u[2]] || u[2]) + "</span></div>"; }).join("") : "") + "</li>";
-    });
-    detail(h + "</ul>");
+  function unmatchedHtml(rec) {
+    return rec && rec[8].length ? rec[8].map(function (u) { return '<div><span class="chip bad">⚠ ' + esc(u[0] || "?") + "</span> <code>" + esc(u[1]) + '</code> <span class="muted">' + esc(L["reason_" + u[2]] || u[2]) + "</span></div>"; }).join("") : "";
+  }
+  function screenDetail(s, sc, isScreen) {
+    var ch = chunk(SV[s].screen_chunk);
+    var h = "<h2>" + esc(sc.f.split("/").pop()) + ' <span class="kind">' + esc(isScreen ? L.screen : L.clientFile) + '</span></h2><p class="ev">' + esc(sc.f) + "</p>";
+    h += "<h3>" + esc(L.usedByScreens) + " (" + sc.r.length + ")</h3><ul>" + sc.r.map(function (p) { return "<li>" + routeLink(p[0]) + (p[1] ? ' <span class="chip guess">' + esc(L.guess) + "</span>" : "") + "</li>"; }).join("") + "</ul>";
+    if (isScreen) {
+      h += "<h3>" + esc(L.throughClient) + " (" + sc.via.length + ")</h3><ul>" + sc.via.map(function (f) { var rec = ch.fns[f]; return "<li>" + fnLink(f) + (rec ? '<div class="ev">' + esc(rec[1]) + "</div>" : "") + unmatchedHtml(rec) + "</li>"; }).join("") + "</ul>";
+    } else {
+      if (sc.ui.length) h += "<h3>" + esc(L.usedOnScreens) + " (" + sc.ui.length + ")</h3><ul>" + sc.ui.map(function (f) { return '<li class="ev">' + esc(f) + "</li>"; }).join("") + "</ul>";
+      else if (SV[s].kind === "web") h += '<p class="muted">' + esc(L.noScreenLong) + "</p>";
+      h += "<h3>" + esc(L.functions) + " (" + sc.fns.length + ")</h3><ul>" + sc.fns.map(function (f) { return "<li>" + fnLink(f) + unmatchedHtml(ch.fns[f]) + "</li>"; }).join("") + "</ul>";
+    }
+    detail(h);
   }
   function pageUnmatched(s) {
     var sv = SV[s], ch = chunk(sv.screen_chunk);
-    crumbs(['<a href="#/w/' + s + '">' + esc(sv.name) + "</a>", esc(L.unmatched)]); toc("u" + s);
+    crumbs(['<a href="#/s/' + s + '">' + esc(sv.name) + "</a>", esc(L.unmatched)]); toc("u" + s);
     var byReason = {};
-    ch.screens.forEach(function (sc) {
-      sc.fns.forEach(function (f) { (ch.fns[f] || [])[8] && ch.fns[f][8].forEach(function (u) { (byReason[u[2]] = byReason[u[2]] || []).push([f, u, sc.f]); }); });
+    ch.clients.forEach(function (c) {
+      c.fns.forEach(function (f) { var rec = ch.fns[f]; if (rec) rec[8].forEach(function (u) { (byReason[u[2]] = byReason[u[2]] || []).push([f, u, c.f]); }); });
     });
     var h = "<h1>⚠ " + esc(L.unmatched) + '</h1><p class="lead">' + esc(L.unmatchedLead) + "</p>";
     Object.keys(byReason).sort(function (a, b) { return byReason[b].length - byReason[a].length; }).forEach(function (r) {
-      h += "<h2>" + esc(L["reason_" + r] || r) + " (" + byReason[r].length + ')</h2><table class="list"><tbody>' + byReason[r].slice(0, 1000).map(function (x) {
-        return '<tr class="row" data-href="#/f/' + x[0] + '"><td>' + '<span class="chip bad">' + esc(x[1][0] || "?") + "</span> <code>" + esc(x[1][1]) + '</code></td><td class="mono">' + esc(label(x[0])) + '</td><td class="ev">' + esc(x[2]) + "</td></tr>";
+      h += "<h2>" + esc(L["reason_" + r] || r) + " (" + byReason[r].length + ')</h2><p class="muted">' + esc(L["reasonHelp_" + r] || "") + '</p><table class="list fixed"><colgroup><col style="width:42%"><col style="width:30%"><col></colgroup><tbody>' + byReason[r].slice(0, 1000).map(function (x) {
+        return '<tr class="row" data-href="#/f/' + x[0] + '"><td>' + '<span class="chip bad">' + esc(x[1][0] || "?") + '</span> <code class="wrap">' + esc(x[1][1]) + '</code></td><td class="mono ell">' + esc(label(x[0])) + '</td><td class="ev">' + esc(x[2]) + "</td></tr>";
       }).join("") + "</tbody></table>";
     });
+    if (sv.hidden_calls) h += '<p class="muted">' + esc(fmt(L.hiddenCalls, { n: num(sv.hidden_calls) })) + "</p>";
     read(h); detail("");
   }
 
