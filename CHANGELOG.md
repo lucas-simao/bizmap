@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Added
+
+- **`bizmap who-writes` / `bizmap who-reads ENTITY`**: every function that
+  writes (reads) a table, collection, view or column, by repo, from what runs
+  it — HTTP route, queue consumer, job, trigger, or the outermost caller — as
+  *entrypoint → handler → (via N functions) → writer*, with the columns, the
+  confidence (weakest link) and `file:line`. `--path` shows every function on
+  the way. ENTITY: `orders`, `table:orders`, `collection:orders`,
+  `orders-api/table:orders`, `orders.status`. A name that matches different
+  things (a Firestore collection and a Postgres table) lists the candidates
+  (kind · store · repo) and exits with code 2; the same table / collection in
+  several repos is answered per repo, saying so.
+- **`bizmap trace ENTITY`**: where the data comes from and goes — `feeds`
+  between tables / collections, queues (the code that writes it publishes →
+  consumers in other repos → what they write) and HTTP calls between services.
+  `--depth N` (default 2), `--direction up|down|both`.
+- The three commands take `--format text|json|md` (JSON: the stable
+  `bizmap.query/v1` contract, documented in `docs/commands/query.md`; md for a
+  PR), `--lang pt-BR`, `--graph`, work on multi-repo graphs, and end with what
+  the graph could not resolve and could change the answer (reads / writes with
+  a table name built at runtime, publishes to a runtime topic, HTTP calls with
+  no route). They only read the JSON: ~1 s on a 70k-node / 170k-edge graph.
+
 ## 0.12.0 — 2026-11-21
 
 ### Added
