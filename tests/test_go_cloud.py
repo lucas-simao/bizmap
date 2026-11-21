@@ -851,7 +851,7 @@ def test_mirror_with_built_sql_and_interface_call_in_closure(tmp_path: Path) -> 
     assert f"writes:function:{w}->table:order_items" in g.edges
     call = g.edges[f"calls:function:internal/mirror.Service.Sync->function:{w}"]
     assert call.attrs["via"] == "interface"
-    assert f"reads:function:internal/fsread.Reader.MirrorDocument->collection:orders" in g.edges
+    assert "reads:function:internal/fsread.Reader.MirrorDocument->collection:orders" in g.edges
     feed = g.edges["feeds:collection:orders->table:orders_mirror"]
     assert feed.confidence.value == "heuristic"
     assert not feed.attrs.get("column_map")  # table level: the columns are built at run time
