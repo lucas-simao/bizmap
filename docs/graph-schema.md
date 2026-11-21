@@ -298,7 +298,8 @@ the function the JS detector found around each call:
   `tx.get(ref)`;
 - admin / server SDK chains: `db.collection('x').doc(id).get()` /
   `.where(…).get()` read, `.set / .update / .delete / .create / .add` write;
-- the collection from a literal, an exported constant (`ORDERS_COLLECTION`),
+- the collection from a literal, a constant of the file or an exported one (`ORDERS_COLLECTION`),
+  a multi-segment path (`collection(db, 'drawings', id, 'versions')` → `collection:versions`),
   an enum or object member (`Collections.Customers`), or a template path
   (`` `customers/${id}/notes` `` → `collection:notes`, `path:
   customers/{}/notes`). A name passed to a helper's parameter
@@ -316,7 +317,8 @@ A **push subscription** (Pub/Sub delivering a topic to an HTTP route) lives in
 deploy config, not in code. bizmap reads it from `push_subscriptions:` in
 `bizmap.yaml` (see [configuration](configuration.md#push_subscriptions)) and
 from `gcloud pubsub subscriptions create … --topic=T --push-endpoint=URL` in
-shell / YAML / Makefile files of the repo, and adds `triggers
+shell / YAML / Makefile files of the repo (also in comments and across `\`
+line continuations; `$VAR/path`, `$(…)/path` and full URLs match by path), and adds `triggers
 queue:pubsub:<topic> -> entrypoint` (`via: push_subscription`). The route's
 handler then receives the message (its first parameter; methods on it,
 `json.loads(base64.b64decode(…))` and Pydantic `model_validate(…)` keep it

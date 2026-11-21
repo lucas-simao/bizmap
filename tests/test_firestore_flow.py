@@ -624,3 +624,166 @@ def test_scan_pubsub_push_between_repos(tmp_path: Path) -> None:
     feeds = {(a.split("/")[-1], b.split("/")[-1]): v for (a, b), v in _feeds(g).items()}
     cols = feeds[("collection:orders", "table:order_summary")][1]
     assert {("customerId", "customer_id"), ("total", "total_amount"), ("status", "status")} <= {(c[0], c[1]) for c in cols}
+
+
+# ── round 2: SQLAlchemy Core statements, conditional routers, push endpoint, TS forms ──
+
+SA_CORE_2 = '''from sqlalchemy import Column, MetaData, Table, Text
+from sqlalchemy import insert as sa_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+metadata = MetaData()
+order_summary = Table(
+    "order_summary",
+    metadata,
+    Column("order_id", Text, primary_key=True),
+    Column("customer_id", Text),
+    Column("total_amount", Text),
+    Column("status", Text),
+)
+
+
+def stmt_upsert(conn, r):
+    stmt = pg_insert(order_summary).values({"order_id": r.order_id, "status": r.status})
+    conn.execute(stmt.on_conflict_do_update(index_elements=["order_id"], set_={"status": stmt.excluded.status}))
+
+
+def table_method(conn, r):
+    conn.execute(order_summary.insert().values(order_id=r.order_id, status=r.status))
+
+
+def bulk(conn, rows):
+    conn.execute(order_summary.insert().values(rows[:100]))
+
+
+class Repo:
+    def __init__(self):
+        self._t = order_summary
+
+    def add(self, conn, r):
+        conn.execute(sa_insert(self._t).values(order_id=r.order_id))
+
+
+def totals(by_customer: dict) -> list:
+    return sorted(by_customer.values(), key=lambda v: v["total"])
+'''
+
+
+def test_scan_sqlalchemy_core_statements_round2(tmp_path: Path) -> None:
+    pytest.importorskip("tree_sitter_python")
+    from bizmap.scan import scan_path
+
+    _write_all(tmp_path, {"app/__init__.py": "", "app/store.py": SA_CORE_2})
+    g = scan_path(tmp_path)
+
+    def writes(fn: str) -> set[str]:
+        return {e.to_id for e in g.edges.values() if e.type == "writes" and e.from_id.endswith(f".{fn}")}
+
+    assert "table:unknown" not in g.nodes
+    assert {"column:order_summary.order_id", "column:order_summary.status"} <= writes("stmt_upsert")
+    assert {"column:order_summary.order_id", "column:order_summary.status"} <= writes("table_method")
+    assert "table:order_summary" in writes("table_method")
+    assert "table:order_summary" in writes("bulk")
+    assert writes("Repo.add") >= {"column:order_summary.order_id"}
+    assert writes("totals") == set()
+
+
+ROUTER_PICK = '''from fastapi import APIRouter, FastAPI
+
+
+def create_app(role: str) -> FastAPI:
+    served = APIRouter()
+    unserved = APIRouter()
+    feeds = served if role in ("feeds", "all") else unserved
+
+    @feeds.post("/pubsub/orders")
+    def announce_order(envelope: dict) -> dict:
+        return {"ok": True}
+
+    app = FastAPI()
+    app.include_router(served)
+    return app
+'''
+
+
+def test_scan_router_picked_by_a_conditional(tmp_path: Path) -> None:
+    pytest.importorskip("tree_sitter_python")
+    from bizmap.scan import scan_path
+
+    _write_all(tmp_path, {"svc/__init__.py": "", "svc/app.py": ROUTER_PICK})
+    g = scan_path(tmp_path)
+    assert "entrypoint:http:POST:/pubsub/orders" in g.nodes
+
+
+CLOUDBUILD = """steps:
+  - name: gcr.io/cloud-builders/gcloud
+    args: ["run", "deploy", "warehouse"]
+# Push subscription (created once by hand):
+#   gcloud pubsub subscriptions create order-announce-push \\
+#     --topic=order-announce \\
+#     --push-endpoint="$AUD/pubsub/orders" \\
+#     --push-auth-service-account=sa@x.iam.gserviceaccount.com
+"""
+
+
+def test_push_endpoint_with_a_shell_variable_in_a_commented_yaml(tmp_path: Path) -> None:
+    root = tmp_path / "warehouse"
+    root.mkdir()
+    (root / "cloudbuild.yaml").write_text(CLOUDBUILD, encoding="utf-8")
+    specs = fsapply.push_specs(root, {})
+    assert [(t, m, p) for t, m, p, _f, _l in specs] == [("order-announce", "POST", "/pubsub/orders")]
+    gw = _warehouse_graph(root, {})
+    assert "triggers:queue:pubsub:order-announce->entrypoint:http:POST:/pubsub/orders" in gw.edges
+
+
+@pytest.mark.parametrize(
+    ("url", "path"),
+    [
+        ('"$AUD/pubsub/orders"', "/pubsub/orders"),
+        ("${URL}/pubsub/orders/", "/pubsub/orders"),
+        ("$(gcloud run services describe w --format='value(status.url)')/pubsub/orders", "/pubsub/orders"),
+        ("https://w-abc.a.run.app/pubsub/orders", "/pubsub/orders"),
+    ],
+)
+def test_push_endpoint_path(url: str, path: str) -> None:
+    assert fsapply._endpoint_path(url) == path
+
+
+def test_feeds_never_end_on_table_unknown(tmp_path: Path) -> None:
+    gf = _js_graph(tmp_path / "functions", {"src/index.ts": FUNCTIONS}, repo="functions")
+    root = tmp_path / "warehouse"
+    gw = _warehouse_graph(root, {"push_subscriptions": {"order-announce": "POST /pubsub/orders"}})
+    # what the Python detector emitted before: a dynamic write next to the real one
+    gw.add_node("table:unknown", "table", name="unknown")
+    gw.add_edge("writes", "function:warehouse.store.upsert_order", "table:unknown",
+                evidence=Evidence("warehouse/store.py", _line(WAREHOUSE_STORE, "stmt = pg_insert"), "upsert_order"))
+    files = {"warehouse/app.py": WAREHOUSE_APP, "warehouse/store.py": WAREHOUSE_STORE, "warehouse/tables.py": WAREHOUSE_TABLES}
+    dataflow.apply(gw, root, files)
+    merged = merge_graphs([gf, gw])
+    dataflow.link_queue_flows(merged)
+    assert {(a, b) for a, b in _feeds(merged)} == {("functions/collection:orders", "warehouse/table:order_summary")}
+
+
+WEB_LOCAL = """import { collection, doc, getDocs, getDoc, addDoc } from 'firebase/firestore';
+import { db } from './firebase';
+const COLLECTION = 'order_events';
+const C = 'audit';
+export async function list() { return (await getDocs(collection(db, COLLECTION))).docs; }
+export async function log(x: string) { await addDoc(collection(db, C), { x }); }
+export async function versions(drawingId: string) { return getDocs(collection(db, 'drawings', drawingId, 'versions')); }
+export async function pricing() { return (await getDoc(doc(db, 'settings', 'pricing'))).data(); }
+export async function oneVersion(d: string, v: string) { return getDoc(doc(db, 'drawings', d, 'versions', v)); }
+"""
+
+
+def test_local_constants_and_multi_segment_paths() -> None:
+    files = {"src/events.ts": WEB_LOCAL, "src/other.ts": "const COLLECTION = 'other_things';\n"}
+    fns, ends = _js_functions(files)
+    got = {a.symbol.rsplit(".", 1)[-1]: (a.kind, a.collection, a.path) for a in js_firestore.scan_files(files, fns, ends).accesses}
+    assert got == {
+        "list": ("read", "order_events", "order_events"),  # this file's constant wins over another file's
+        "log": ("write", "audit", "audit"),
+        "versions": ("read", "versions", "drawings/{}/versions"),
+        "pricing": ("read", "settings", "settings"),
+        "oneVersion": ("read", "versions", "drawings/{}/versions"),
+    }
