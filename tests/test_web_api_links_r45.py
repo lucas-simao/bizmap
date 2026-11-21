@@ -58,27 +58,43 @@ def _unresolved_from(graph, suffix: str) -> list[str]:
     return [u["url"] for u in graph.attrs.get("unresolved_http") or [] if str(u.get("from", "")).endswith(suffix)]
 
 
-DELIVERY = """import axios from 'axios';
+DELIVERY = {
+    "src/api/clientApiFactory.ts": """import axios from 'axios';
 
-const createClientApi = (base: string) => axios.create({ baseURL: base });
+export function createClientApi(baseUrl: string) {
+  return axios.create({ baseURL: baseUrl });
+}
+""",
+    "src/api/clientApi.ts": """import { createClientApi } from './clientApiFactory';
+
 const PORTAL_URL = import.meta.env.VITE_PORTAL_API_URL ?? '';
+export const clientApi = createClientApi(import.meta.env.VITE_CLIENT_API_URL);
+export const portalApi = createClientApi(PORTAL_URL);
+""",
+    "src/api/delivery/client.ts": """import type { AxiosInstance } from 'axios';
 
-export const createDeliveryHttpClient = (api: any) => {
-  async function read<T>(url: string) { return (await api.get(url)).data; }
+export function createDeliveryHttpClient(http: AxiosInstance) {
+  async function read<T>(url: string): Promise<T> {
+    return (await http.get(url)).data;
+  }
   return {
-    getSite: (id: string) => read(`/delivery-sites/${id}`),
-    getSummary: () => api.get('/delivery-summary'),
+    getSite: (siteId: string) => read(`/delivery-sites/${siteId}`),
+    getSummary: () => http.get('/delivery-summary').then((r) => r.data),
   };
-};
+}
+""",
+    "src/api/delivery/index.ts": """import { clientApi, portalApi } from '../clientApi';
+import { createDeliveryHttpClient } from './client';
 
-export const clientDelivery = createDeliveryHttpClient(createClientApi(import.meta.env.VITE_CLIENT_API_URL));
-export const portalDelivery = createDeliveryHttpClient(createClientApi(PORTAL_URL));
-"""
+export const clientDelivery = createDeliveryHttpClient(clientApi);
+export const portalDelivery = createDeliveryHttpClient(portalApi);
+""",
+}
 
 
 def test_internal_read_helper_keeps_both_bases(tmp_path: Path) -> None:
     # paths the API does not serve: each call stays unresolved, once per base
-    _workspace(tmp_path, {"src/delivery.ts": DELIVERY})
+    _workspace(tmp_path, DELIVERY)
     graph = scan_path(tmp_path)
     site = sorted(_unresolved_from(graph, "getSite"))
     summary = sorted(_unresolved_from(graph, "getSummary"))
