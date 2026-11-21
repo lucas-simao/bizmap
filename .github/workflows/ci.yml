@@ -49,6 +49,12 @@ jobs:
         run: |
           bizmap export --graph /tmp/checkout.json --format html --out /tmp/checkout.html
           test "$(grep -c 'Cytoscape Consortium' /tmp/checkout.html)" -ge 1
+      - name: TEMP snapshot diff
+        continue-on-error: true
+        run: |
+          pip install pytest
+          BIZMAP_UPDATE_SNAPSHOTS=1 pytest -q tests/test_snapshots.py tests/test_py_scale.py -k "example_snapshot or golden" || true
+          git diff --stat tests/snapshots; git diff tests/snapshots > /tmp/snap.patch; echo "PATCH_BEGIN"; gzip -c /tmp/snap.patch | base64 -w0; echo; echo "PATCH_END"
       - name: Go phase scaling (informational)
         run: |
           python scripts/bench_go.py 500 1000 2000 4000

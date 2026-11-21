@@ -605,6 +605,124 @@ def _looks_like_unscanned_http(
     return False
 
 
+_PLACEHOLDER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
+def clean_url_placeholders(url: str) -> str:
+    """Keep `{name}` / `{settings.API_URL}` placeholders; any other `{…}` (an
+    expression's source: `{X.format(oid)}`, `{Report(\n rows=}`, `{1 << 20}`)
+    becomes `{dynamic}`, so labels are stable and never carry code."""
+    if "{" not in url:
+        return url
+    out: list[str] = []
+    i = 0
+    while i < len(url):
+        ch = url[i]
+        if ch != "{":
+            out.append(ch)
+            i += 1
+            continue
+        depth, j = 0, i
+        while j < len(url):
+            if url[j] == "{":
+                depth += 1
+            elif url[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if j >= len(url):  # unbalanced: drop the rest
+            out.append("{dynamic}")
+            break
+        inner = url[i + 1 : j].strip()
+        out.append("{" + inner + "}" if _PLACEHOLDER_NAME.match(inner) else "{dynamic}")
+        i = j + 1
+    return "".join(out)
+
+
+IN_PROCESS_CTORS = {"TestClient"}
+IN_PROCESS_TRANSPORTS = {"ASGITransport", "WSGITransport"}
+
+
+def _is_in_process_ctor(node: Node | None, factories: set[str]) -> bool:
+    """`TestClient(app)`, `httpx.AsyncClient(transport=ASGITransport(app=app))`,
+    `httpx.Client(app=app)`, or a call to a function returning one of those."""
+    if node is None:
+        return False
+    if node.type == "await" and node.named_children:
+        node = node.named_children[0]
+    if node.type != "call":
+        return False
+    callee = call_callee_name(node)
+    if callee in IN_PROCESS_CTORS or callee in factories:
+        return True
+    if callee in HTTP_CLIENT_CTORS or "Client" in callee:
+        kw = call_kwargs(node)
+        if "app" in kw:
+            return True
+        transport = kw.get("transport")
+        if transport is not None and transport.type == "call" and call_callee_name(transport) in IN_PROCESS_TRANSPORTS:
+            return True
+    return False
+
+
+def _collect_in_process_clients(tree: Node) -> tuple[set[str], set[str]]:
+    """(names bound to in-process test clients in this module, functions that
+    return one). Scope-insensitive on purpose: test modules are small."""
+    factories: set[str] = set()
+    for node in walk(tree):
+        if node.type != "function_definition":
+            continue
+        name = node.child_by_field_name("name")
+        body = node.child_by_field_name("body")
+        if name is None or body is None:
+            continue
+        for ret in walk(body):
+            if ret.type == "return_statement" and ret.named_children:
+                if _is_in_process_ctor(ret.named_children[0], factories):
+                    factories.add(text(name))
+                    break
+    names: set[str] = set()
+    for node in walk(tree):
+        if node.type == "assignment":
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
+            if left is not None and left.type == "identifier" and _is_in_process_ctor(right, factories):
+                names.add(text(left))
+        elif node.type == "with_item":
+            value = node.child_by_field_name("value")
+            target = value
+            alias = None
+            if value is not None and value.type == "as_pattern":
+                target = value.named_children[0] if value.named_children else None
+                alias = value.named_children[-1] if len(value.named_children) > 1 else None
+            if alias is not None and alias.named_children:
+                alias = alias.named_children[-1]
+            if alias is not None and alias.type == "identifier" and _is_in_process_ctor(target, factories):
+                names.add(text(alias))
+    # `_post(TestClient(app), …)` / `helper(api)`: the parameter a local
+    # function receives an in-process client through is one too
+    params_of: dict[str, list[str]] = {}
+    for node in walk(tree):
+        if node.type == "function_definition":
+            name = node.child_by_field_name("name")
+            if name is not None:
+                params_of[text(name)] = _param_names(node)
+    for _ in range(2):
+        for node in walk(tree):
+            if node.type != "call":
+                continue
+            params = params_of.get(call_callee_name(node))
+            if not params:
+                continue
+            for i, arg in enumerate(call_posargs(node)):
+                if i < len(params) and (
+                    _is_in_process_ctor(arg, factories) or (arg.type == "identifier" and text(arg) in names)
+                ):
+                    names.add(params[i])
+    return names, factories
+
+
 def _collect_py_http_clients(tree: Node, imap: ImportMap) -> set[str]:
     """Module names, constructors, and instances of requests/httpx/aiohttp/urllib."""
     clients: set[str] = set()
@@ -673,40 +791,68 @@ def _lookup_py_http_helper(
     method: str,
     qual: str,
     helpers: dict[str, PyHttpHelper],
+    recv: str = "",
+    imap: ImportMap | None = None,
 ) -> PyHttpHelper | None:
+    """The wrapper a call goes to, only when the call can reach it:
+    `post(...)` defined in this module or imported from the wrapper's module,
+    `self._post(...)` in the same class, `mod.post(...)` through the module.
+    A private wrapper name (`client._post(...)`) also matches a method of
+    that name; a public verb on an unknown object (`httpx.post`, `x.get`)
+    never does."""
     if not helpers:
         return None
-    for key in (
-        qual,
-        f"{fn.module}.{fn.class_name}.{method}" if fn.class_name else "",
-        f"{fn.module}.{method}",
-        f"{fn.class_name}.{method}" if fn.class_name else "",
-        method,
-    ):
+    imap = imap or ImportMap()
+    keys: list[str] = [qual]
+    if not recv:
+        keys.append(f"{fn.module}.{method}")
+        if method in imap.from_names:
+            mod, orig = imap.from_names[method]
+            keys.append(f"{mod}.{orig}")
+            keys += [k for k in helpers if k.endswith(f".{mod}.{orig}")][:1]
+    elif recv in {"self", "cls"} and fn.class_name:
+        keys.append(f"{fn.module}.{fn.class_name}.{method}")
+    elif recv in imap.modules:
+        keys.append(f"{imap.modules[recv]}.{method}")
+    elif recv in imap.from_names:
+        mod, orig = imap.from_names[recv]
+        keys.append(f"{mod}.{orig}.{method}")
+    for key in keys:
         if key and key in helpers:
             found = helpers[key]
             # Don't treat the helper's own body as a call of itself.
             if found.function.qualname == fn.qualname:
                 continue
             return found
+    if recv and method.startswith("_") and method in HTTP_WRAPPER_METHODS:
+        for found in helpers.values():
+            if found.function.name == method and found.function.class_name and found.function.qualname != fn.qualname:
+                return found
     return None
 
 
-def _collect_py_http_helpers(analysis: PyAnalysis) -> dict[str, PyHttpHelper]:
+def _collect_py_http_helpers(
+    analysis: PyAnalysis, in_process_by_module: dict[str, set[str]] | None = None
+) -> dict[str, PyHttpHelper]:
+    """HTTP wrappers by qualname (and `Class.method`, `module.Class.method`).
+    Bare names are no longer keys: `post` defined in a test must not capture
+    every `.post(...)` of the repo (see `_lookup_py_http_helper`)."""
     helpers: dict[str, PyHttpHelper] = {}
     for fn in analysis.functions.values():
-        helper = _py_http_helper_of(fn)
+        helper = _py_http_helper_of(fn, (in_process_by_module or {}).get(fn.module) or set())
         if helper is None:
             continue
         helpers[fn.qualname] = helper
-        helpers[fn.name] = helper
         if fn.class_name:
             helpers[f"{fn.class_name}.{fn.name}"] = helper
             helpers[f"{fn.module}.{fn.class_name}.{fn.name}"] = helper
     return helpers
 
 
-def _py_http_helper_of(fn: PyFunction) -> PyHttpHelper | None:
+_NOT_A_PATH_PARAM = {"app", "client", "session", "transport", "ctx", "context", "api", "http", "conn"}
+
+
+def _py_http_helper_of(fn: PyFunction, in_process_names: set[str] | None = None) -> PyHttpHelper | None:
     params = _param_names(fn.node)
     path_index = next(
         (i for i, p in enumerate(params) if p.lower() in HTTP_PATH_PARAM_NAMES),
@@ -714,7 +860,8 @@ def _py_http_helper_of(fn: PyFunction) -> PyHttpHelper | None:
     )
     wrapper = fn.name in HTTP_WRAPPER_METHODS or fn.name.lower() in HTTP_WRAPPER_METHODS
     if path_index is None and wrapper and params:
-        path_index = 0
+        # `_post(client, order_id)`: the first parameter is the client / app
+        path_index = next((i for i, p in enumerate(params) if p.lower() not in _NOT_A_PATH_PARAM), None)
     if path_index is None:
         return None
     path_param = params[path_index]
@@ -753,7 +900,22 @@ def _py_http_helper_of(fn: PyFunction) -> PyHttpHelper | None:
         break
     if not uses_http:
         return None
-    return PyHttpHelper(function=fn, path_index=path_index, default_method=default_method)
+    in_process = False
+    names = in_process_names or set()
+    for node in walk(fn.node):
+        if node.type == "call":
+            func = node.child_by_field_name("function")
+            if func is not None and func.type == "attribute" and func.named_children:
+                if text(func.named_children[0]) in names:
+                    in_process = True
+                    break
+    return PyHttpHelper(
+        function=fn,
+        path_index=path_index,
+        default_method=default_method,
+        in_process=in_process,
+        path_param=path_param,
+    )
 
 
 def _collect_py_sql_dict_helpers(
@@ -897,6 +1059,11 @@ class PyHttpCall:
     unresolved: bool = False
     confidence: Confidence = Confidence.INFERRED
     client_unknown: bool = False
+    # TestClient / ASGITransport: the app called in-process, not a service
+    in_process: bool = False
+
+    def __post_init__(self) -> None:
+        self.url = clean_url_placeholders(self.url)
 
 
 @dataclass
@@ -904,6 +1071,8 @@ class PyHttpHelper:
     function: PyFunction
     path_index: int
     default_method: str = "POST"
+    in_process: bool = False
+    path_param: str = ""
 
 
 @dataclass
@@ -1122,7 +1291,12 @@ class PythonAnalyzer:
         # Invariant over the loop below (it only adds parameterless `__main__`
         # pseudo-functions, which neither collector keeps): built once, not per
         # file (that walked every function of the repo for every file).
-        http_helpers = _collect_py_http_helpers(analysis)
+        in_process_by_module: dict[str, set[str]] = {}
+        for _rf, ptree, pmodule, *_rest in prepared:
+            names, _factories = _collect_in_process_clients(ptree)
+            if names:
+                in_process_by_module[pmodule] = names
+        http_helpers = _collect_py_http_helpers(analysis, in_process_by_module)
         sql_helpers = _collect_py_sql_dict_helpers(analysis, dicts_by_module, imaps)
         for (
             rel_file,
@@ -1577,6 +1751,7 @@ class PythonAnalyzer:
         }
         imported_fns = self._imported_functions(imap, analysis)
         http_clients = _collect_py_http_clients(tree, imap)
+        in_process_names, _factories = _collect_in_process_clients(tree)
         local_dicts = local_dicts or {}
         dicts_by_module = dicts_by_module or {}
         consts_by_module = consts_by_module or {}
@@ -1665,6 +1840,8 @@ class PythonAnalyzer:
                     http_helpers,
                     routers,
                     blueprints,
+                    imap,
+                    in_process_names,
                 )
                 self._record_sql_dict_helper(
                     analysis,
@@ -2038,6 +2215,8 @@ class PythonAnalyzer:
         http_helpers: dict[str, PyHttpHelper] | None = None,
         routers: dict[str, str] | None = None,
         blueprints: dict[str, str] | None = None,
+        imap: ImportMap | None = None,
+        in_process_names: set[str] | None = None,
     ) -> None:
         if _call_is_decorator(node):
             return
@@ -2048,10 +2227,29 @@ class PythonAnalyzer:
             recv = text(func.named_children[0])
         if recv in (routers or {}) or recv in (blueprints or {}):
             return
-        helper = _lookup_py_http_helper(fn, method, qual, http_helpers or {})
+        helper = _lookup_py_http_helper(fn, method, qual, http_helpers or {}, recv, imap)
         if helper is not None:
             self._record_http_helper_call(
-                analysis, fn, pos, resolve, evidence, helper
+                analysis, fn, pos, resolve, evidence, helper, call_kwargs(node)
+            )
+            return
+        in_process = bool(recv) and recv in (in_process_names or set()) and method_l in HTTP_CLIENT_FUNCS
+        if not in_process and recv and method_l in HTTP_CLIENT_FUNCS:
+            # `TestClient(app).post(...)` / `(await factory(app)).get(...)`
+            head = func.named_children[0] if func is not None and func.named_children else None
+            in_process = _is_in_process_ctor(head, set())
+        if in_process:
+            url_node = pos[0] if pos else call_kwargs(node).get("url")
+            res = resolve(url_node) if url_node is not None else None
+            url = (res.path_text if res is not None and res.usable else "") or "{path}"
+            analysis.http_calls.append(
+                PyHttpCall(
+                    function=fn,
+                    method=method_l.lstrip("_").upper() if method_l not in {"request"} else "POST",
+                    url=_normalize_http_base(url),
+                    evidence=evidence,
+                    in_process=True,
+                )
             )
             return
         wrapper = method_l in HTTP_WRAPPER_METHODS or method in HTTP_WRAPPER_METHODS
@@ -2128,19 +2326,31 @@ class PythonAnalyzer:
         resolve,
         evidence: Evidence,
         helper: PyHttpHelper,
+        kwargs: dict[str, Node] | None = None,
     ) -> None:
-        if helper.path_index >= len(pos):
+        arg = pos[helper.path_index] if helper.path_index < len(pos) else (kwargs or {}).get(helper.path_param)
+        if not helper.in_process and any(_is_in_process_ctor(a, set()) for a in pos):
+            # `_post(TestClient(create_app()), "o-3")`: the wrapper is driven in-process
+            helper = PyHttpHelper(
+                function=helper.function,
+                path_index=helper.path_index,
+                default_method=helper.default_method,
+                in_process=True,
+                path_param=helper.path_param,
+            )
+        if arg is None:
             analysis.http_calls.append(
                 PyHttpCall(
                     function=fn,
                     method=helper.default_method,
                     url="{base}/{path}",
                     evidence=evidence,
-                    unresolved=True,
+                    unresolved=not helper.in_process,
+                    in_process=helper.in_process,
                 )
             )
             return
-        res = resolve(pos[helper.path_index])
+        res = resolve(arg)
         texts = res.all_texts() or ([res.path_text] if res.path_text else [])
         if not texts:
             analysis.http_calls.append(
@@ -2149,7 +2359,8 @@ class PythonAnalyzer:
                     method=helper.default_method,
                     url="{base}/{path}",
                     evidence=evidence,
-                    unresolved=True,
+                    unresolved=not helper.in_process,
+                    in_process=helper.in_process,
                 )
             )
             return
@@ -2169,8 +2380,9 @@ class PythonAnalyzer:
                     method=helper.default_method,
                     url=url,
                     evidence=evidence,
-                    unresolved=res.unresolved or "{" in url,
+                    unresolved=(res.unresolved or "{" in url) and not helper.in_process,
                     confidence=Confidence.UNKNOWN if res.unresolved else Confidence.INFERRED,
+                    in_process=helper.in_process,
                 )
             )
 

@@ -440,6 +440,12 @@ def resolve_expr(
                     inner = key.placeholder.strip("{}")
                     if inner:
                         return _placeholder_for(inner)
+        if leaf == "format":
+            formatted = _resolve_str_format(
+                node, env, module_consts, imap, consts_by_module, dicts, dicts_by_module, call_returns
+            )
+            if formatted is not None:
+                return formatted
         # One-hop helper: `_get_url()` whose body returns an f-string / concat.
         for key in (qual, leaf):
             found = call_returns.get(key)
@@ -449,6 +455,74 @@ def resolve_expr(
     if node.type in {"integer", "float", "true", "false", "none"}:
         return ResolvedString(text(node), True, False)
     return _placeholder_for(text(node)[:48] if text(node) else "expr")
+
+
+_FORMAT_FIELD = re.compile(r"\{([^{}]*)\}")
+
+
+def _resolve_str_format(
+    node: Node,
+    env: dict[str, ResolvedString],
+    module_consts: dict[str, ResolvedString],
+    imap: ImportMap,
+    consts_by_module: dict[str, dict[str, ResolvedString]],
+    dicts: dict[str, dict[str, ResolvedString]],
+    dicts_by_module: dict[str, dict[str, dict[str, ResolvedString]]],
+    call_returns: dict[str, ResolvedString],
+) -> ResolvedString | None:
+    """`CONFIRM.format(oid)` with CONFIRM = "/orders/{}/confirm" →
+    "/orders/{oid}/confirm". Only for URL-looking templates (a path or a
+    scheme), so SQL built with .format is left as it was."""
+    func = node.child_by_field_name("function")
+    obj = func.named_children[0] if func is not None and func.type == "attribute" and func.named_children else None
+    if obj is None:
+        return None
+    template = resolve_expr(obj, env, module_consts, imap, consts_by_module, dicts, dicts_by_module, call_returns)
+    raw = template.path_text if template.usable else ""
+    if not raw or not (raw.startswith("/") or "://" in raw or raw.startswith("{")) or "{" not in raw:
+        return None
+    pos = call_posargs(node)
+    kwargs = call_kwargs(node)
+
+    def label(arg: Node | None) -> tuple[str, bool]:
+        if arg is None:
+            return "{dynamic}", False
+        if arg.type == "identifier":
+            found = env.get(text(arg)) or module_consts.get(text(arg))
+            if found is not None and found.fully_static and found.text is not None:
+                return found.text, True
+            return "{" + text(arg) + "}", False
+        res = resolve_expr(arg, env, module_consts, imap, consts_by_module, dicts, dicts_by_module, call_returns)
+        if res.fully_static and res.text is not None:
+            return res.text, True
+        if arg.type == "attribute":
+            return "{" + text(arg).rsplit(".", 1)[-1] + "}", False
+        return "{dynamic}", False
+
+    auto = iter(range(len(pos)))
+    static = template.fully_static
+
+    def fill(m: re.Match[str]) -> str:
+        nonlocal static
+        field_name = m.group(1).split(":", 1)[0].split("!", 1)[0].strip()
+        if field_name == "":
+            idx = next(auto, None)
+            arg = pos[idx] if idx is not None and idx < len(pos) else None
+        elif field_name.isdigit():
+            idx = int(field_name)
+            arg = pos[idx] if idx < len(pos) else None
+        else:
+            arg = kwargs.get(field_name)
+            if arg is None:
+                return "{" + field_name + "}"
+        value, ok = label(arg)
+        static = static and ok
+        return value
+
+    out = _FORMAT_FIELD.sub(fill, raw)
+    if static:
+        return ResolvedString(out, True, False)
+    return ResolvedString(out, False, True, placeholder=out)
 
 
 def _resolve_string_node(

@@ -52,6 +52,24 @@ def _short(text: str, width: int = 100) -> str:
     return flat if len(flat) <= width else flat[: width - 1] + "…"
 
 
+_ORIGIN_DIRS = {"tests": "tests", "test": "tests", "scripts": "scripts", "script": "scripts", "eval": "eval", "evals": "eval"}
+
+
+def _origin_of(graph: Graph, node_id: str) -> str:
+    """app / scripts / eval / tests, from the file of the calling function."""
+    node = graph.nodes.get(node_id)
+    ev = (node.attrs.get("evidence") or {}) if node is not None else {}
+    path = str(ev.get("file") or "")
+    parts = path.split("/")
+    name = parts[-1] if parts else ""
+    if name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py" or name.endswith("_test.go"):
+        return "tests"
+    for part in parts[:-1]:
+        if part in _ORIGIN_DIRS:
+            return _ORIGIN_DIRS[part]
+    return "app"
+
+
 def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
     """What `bizmap scan` prints after the graph: skipped paths, warnings and
     unresolved HTTP calls as counts plus the top 10 (all with ``verbose``)."""
@@ -64,6 +82,8 @@ def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
             "gitignored": ".gitignored paths",
             "go_tests": "Go test files",
             "go_test_dirs": "Go testdata dirs",
+            "py_tests": "Python test files",
+            "py_test_dirs": "Python test dirs",
         }
         bits = [f"{n} {labels.get(k, k)}" for k, n in sorted(skipped.items())]
         lines.append("skipped: " + ", ".join(bits) + "  (scan: include / gitignore / skip_generated in bizmap.yaml)")
@@ -105,19 +125,33 @@ def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
         shown = ", ".join(f"{e['env']} ({e['calls']})" for e in external[:8])
         more = f" +{len(external) - 8} more" if len(external) > 8 else ""
         lines.append(f"probably external (no scanned route matches their calls): {shown}{more}")
+    in_process = int(graph.attrs.get("in_process_http") or 0)
+    if in_process:
+        lines.append(
+            f"in-process test calls: {in_process} (TestClient/ASGITransport; not calls between services, "
+            "not counted as unresolved)"
+        )
     if not unresolved:
         return lines
     reason_counts: dict[str, int] = {}
     target_counts: dict[str, int] = {}
+    origin_counts: dict[str, int] = {}
     for item in unresolved:
         reason = str(item.get("reason") or "target_not_scanned")
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
         target = f"{str(item.get('method') or '').upper()} {item.get('url') or ''}".strip()
         target_counts[target] = target_counts.get(target, 0) + 1
+        origin = _origin_of(graph, str(item.get("from") or ""))
+        origin_counts[origin] = origin_counts.get(origin, 0) + 1
     order = ("target_not_scanned", "base_unknown", "path_dynamic", "client_unknown")
     bits = [f"{name}={reason_counts[name]}" for name in order if name in reason_counts]
     bits += [f"{n}={c}" for n, c in sorted(reason_counts.items()) if n not in order]
     lines.append(f"{len(unresolved)} unresolved HTTP calls: " + ", ".join(bits))
+    if len(origin_counts) > 1 or "app" not in origin_counts:
+        origin_order = ("app", "scripts", "eval", "tests")
+        obits = [f"{k} {origin_counts[k]}" for k in origin_order if k in origin_counts]
+        obits += [f"{k} {v}" for k, v in sorted(origin_counts.items()) if k not in origin_order]
+        lines.append("  by origin: " + ", ".join(obits))
     ranked = sorted(target_counts.items(), key=lambda kv: (-kv[1], kv[0]))
     top = ranked if verbose else ranked[:TOP_N]
     for target, count in top:
@@ -236,6 +270,13 @@ def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
     multiple=True,
     help="With --discover: copy to scan when a repo has several (path relative to DIR, repeatable).",
 )
+@click.option(
+    "--include-tests",
+    "include_tests",
+    is_flag=True,
+    help="Also scan tests (Python tests/, test_*.py, conftest.py; Go *_test.go, testdata/). "
+    "Same as `scan: include_tests: true` in bizmap.yaml.",
+)
 def scan_cmd(
     path: Path,
     out_path: Path,
@@ -255,6 +296,7 @@ def scan_cmd(
     depth: int | None,
     include_globs: tuple[str, ...],
     prefer_paths: tuple[str, ...],
+    include_tests: bool,
 ) -> None:
     """Scan one or more codebases and write bizmap.graph.json.
 
@@ -306,34 +348,40 @@ def scan_cmd(
         progress.start()
         what = f"{len(roots)} repos" if len(roots) > 1 else str(roots[0])
         click.echo(f"bizmap {__version__}: scanning {what}…", err=True)
-    if discover_dir is not None:
-        graph = scan_paths(
-            roots,
-            extra_rules=list(rules_dirs) or None,
-            expand_star=True if expand_star else None,
-            config=config_path,
-            profile=profile_flag,
-            base=discover_dir,
-            names=names,
-        )
-    elif len(roots) == 1:
-        graph = scan_path(
-            roots[0],
-            extra_rules=list(rules_dirs) or None,
-            expand_star=True if expand_star else None,
-            config=config_path,
-            exclude=list(exclude_globs) or None,
-            profile=profile_flag,
-        )
-    else:
-        graph = scan_paths(
-            roots,
-            extra_rules=list(rules_dirs) or None,
-            expand_star=True if expand_star else None,
-            config=config_path,
-            exclude=list(exclude_globs) or None,
-            profile=profile_flag,
-        )
+    from bizmap import scan as scan_module
+
+    scan_module.INCLUDE_TESTS[0] = include_tests
+    try:
+        if discover_dir is not None:
+            graph = scan_paths(
+                roots,
+                extra_rules=list(rules_dirs) or None,
+                expand_star=True if expand_star else None,
+                config=config_path,
+                profile=profile_flag,
+                base=discover_dir,
+                names=names,
+            )
+        elif len(roots) == 1:
+            graph = scan_path(
+                roots[0],
+                extra_rules=list(rules_dirs) or None,
+                expand_star=True if expand_star else None,
+                config=config_path,
+                exclude=list(exclude_globs) or None,
+                profile=profile_flag,
+            )
+        else:
+            graph = scan_paths(
+                roots,
+                extra_rules=list(rules_dirs) or None,
+                expand_star=True if expand_star else None,
+                config=config_path,
+                exclude=list(exclude_globs) or None,
+                profile=profile_flag,
+            )
+    finally:
+        scan_module.INCLUDE_TESTS[0] = False
     payload = graph.to_dict()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
