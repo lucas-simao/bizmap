@@ -31,6 +31,15 @@ from collections import defaultdict
 from typing import Any
 
 from bizmap.export.domains import group_entrypoints
+from bizmap.export.openapi import (
+    SchemaTable,
+    comment_text,
+    norm_path,
+    operations_from_spec,
+    parse_swag,
+    plain_summary,
+    resolve_names,
+)
 from bizmap.export.overview import TABLE_TYPES, build_overview, column_tables, data_target
 
 # node type codes
@@ -60,7 +69,9 @@ METHOD_ORDER = {"GET": 0, "POST": 1, "PUT": 2, "PATCH": 3, "DELETE": 4}
 
 
 NOISE = re.compile(
-    r"(\.(test|spec|stories|e2e)\.[^/]+$|\.d\.ts$|(^|/)(__tests__|__mocks__|tests?|spec|e2e|fixtures|generated|__generated__)/)"
+    r"(\.(test|spec|stories|story|e2e|cy|mock)\.[^/]+$|\.d\.ts$|"
+    r"(^|/)(__tests__|__mocks__|mocks?|tests?|testing|test-utils|test_utils|spec|e2e|cypress|playwright|"
+    r"stories|storybook|\.storybook|fixtures|generated|__generated__)/)"
 )
 
 
@@ -162,8 +173,10 @@ def build_book(
     domain_rules: dict[str, list[tuple[str, str, str]]] | None = None,
     domains_by: str = "path",
     lang: str = "en",
+    specs: list[tuple[str | None, dict[str, Any]]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """-> (index, {chunk id: chunk})."""
+    """-> (index, {chunk id: chunk}). `specs`: OpenAPI/Swagger documents, each
+    with the service it describes (None: match any service)."""
     overview = build_overview(data, svc_of)
     services = [s["name"] for s in overview["services"]]
     svc_index = {s: i for i, s in enumerate(services)}
@@ -253,6 +266,23 @@ def build_book(
 
     files = [_file(n) for n in nodes]
     noise = [is_noise(f) for f in files]
+    # functions some entrypoint of their own service reaches (calls / triggers / enqueues)
+    reached = [False] * n_nodes
+    stack = [i for i in range(n_nodes) if ntype[i] == T_ENTRY]
+    for i in stack:
+        reached[i] = True
+    while stack:
+        u = stack.pop()
+        for v in out_calls[u]:
+            if not reached[v] and nsvc[v] == nsvc[u]:
+                reached[v] = True
+                stack.append(v)
+    # a service calling its own routes from code none of its routes reaches is a
+    # generated SDK / client kept in the API repo, not a consumer
+    for a, _b in list(http_pairs_self(http_out, nsvc, ntype)):
+        if not reached[a]:
+            noise[a] = True
+
     has_ui = {s for s, row in enumerate(svc_rows) if row["kind"] == "web"
               and any(is_ui_file(files[i]) for i in range(row_start(nsvc, s), row_end(nsvc, s)) if ntype[i] == T_FUNC)}
 
@@ -314,6 +344,43 @@ def build_book(
             rec.append(sig)
         return rec
 
+    # ── API docs: OpenAPI/Swagger files first, then swag comments, then the comment ──
+    table = SchemaTable()
+    docs: dict[int, dict[str, Any]] = {}
+    routes_by_key: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for i in range(n_nodes):
+        if ntype[i] == T_ENTRY and nodes[i].get("kind") == "http":
+            routes_by_key[(str(nodes[i].get("method") or "").upper(), norm_path(str(nodes[i].get("path") or "")))].append(i)
+    for svc_name, spec in specs or []:
+        target = svc_index.get(svc_name) if svc_name else None
+        for op in operations_from_spec(spec, table):
+            hits = [r for r in routes_by_key.get((op["m"], op["p"]), []) if target is None or nsvc[r] == target]
+            if not hits:  # spec without its base path: match by path end, if unique
+                hits = [r for (m, p), rs in routes_by_key.items() if m == op["m"] and p.endswith(op["p"]) and op["p"] != "/"
+                        for r in rs if target is None or nsvc[r] == target]
+            if len(hits) == 1:
+                doc = {k: v for k, v in op.items() if k not in ("m", "p")}
+                if not doc.get("desc"):  # FastAPI: the docstring has the useful text
+                    r = hits[0]
+                    texts = [str(nodes[r].get("why") or "")] + [str(nodes[h].get("why") or "") for h in out_calls[r] if ntype[h] == T_FUNC]
+                    desc = next((d for d in (comment_text(t) for t in texts) if d), "")
+                    if desc and desc != doc.get("sum"):
+                        doc["desc"] = desc
+                docs[hits[0]] = doc
+    for i in range(n_nodes):
+        if ntype[i] != T_ENTRY or i in docs or nodes[i].get("kind") != "http":
+            continue
+        texts = [str(nodes[i].get("why") or "")] + [str(nodes[h].get("why") or "") for h in out_calls[i] if ntype[h] == T_FUNC]
+        op = next((o for o in (parse_swag(t) for t in texts) if o), None)
+        if op:
+            resolve_names(op, table)
+            op.pop("router", None)
+            docs[i] = op
+        else:
+            summary = next((plain_summary(t) for t in texts if plain_summary(t)), "")
+            if summary:
+                docs[i] = {"sum": summary, "src": "comment"}
+
     # ── domains ──
     domains: list[dict[str, Any]] = []
     route_domain: dict[int, int] = {}
@@ -326,8 +393,9 @@ def build_book(
         for e in eps:
             hs = [h for h in out_calls[e] if ntype[h] == T_FUNC]
             handler_file[e] = _file(nodes[hs[0]]) if hs else _file(nodes[e])
+        tags = {e: docs[e]["tags"][0] for e in eps if e in docs and docs[e].get("tags")}
         groups = group_entrypoints(
-            [(e, nodes[e], handler_file[e]) for e in eps], services[s], domain_rules, domains_by
+            [(e, nodes[e], handler_file[e]) for e in eps], services[s], domain_rules, domains_by, tags
         )
         by_name: dict[str, list[int]] = defaultdict(list)
         rule_of: dict[str, str] = {}
@@ -335,7 +403,7 @@ def build_book(
             name, rule = groups[e]
             by_name[name].append(e)
             rule_of.setdefault(name, rule)
-        ordered = sorted(by_name, key=lambda n: (n == "other", rule_of[n] == "kind", n))
+        ordered = sorted(by_name, key=lambda n: (n == "other", rule_of[n] == "kind", n.lstrip("/").lower(), n))
         for name in ordered:
             routes = by_name[name]
             did = len(domains)
@@ -368,7 +436,12 @@ def build_book(
                 callers_http = [c for c in http_in[e] if not noise[c]]
                 hidden = len(http_in[e]) - len(callers_http)
                 consumers_total += len(callers_http)
-                screens_of = sorted({(nsvc[c], f) for c in callers_http for f in ui_reach.get(c, ())})
+                guess_of: dict[tuple[int, str], int] = {}
+                for c in callers_http:
+                    g = 1 if (c, e) in http_guess else 0
+                    for f in ui_reach.get(c, ()):
+                        guess_of[(nsvc[c], f)] = min(guess_of.get((nsvc[c], f), 1), g)
+                screens_of = sorted((sv, f, g) for (sv, f), g in guess_of.items())
                 route_rows.append(
                     {
                         "i": e,
@@ -380,9 +453,10 @@ def build_book(
                         "c": [[c, 1 if (c, e) in http_guess else 0] for c in callers_http[:CONSUMER_CAP]],
                         "nc": len(callers_http),
                         "nh": hidden,
-                        "sc": [[sv, f] for sv, f in screens_of[:CONSUMER_CAP]],
+                        "sc": [[sv, f, g] for sv, f, g in screens_of[:CONSUMER_CAP]],
                         "ev": _evidence(node),
                         "why": str(node.get("why") or ""),
+                        "doc": docs.get(e),
                     }
                 )
             route_rows.sort(key=lambda r: (r["p"].lower(), METHOD_ORDER.get(r["m"], 9), r["m"]))
@@ -452,11 +526,12 @@ def build_book(
         elif row["kind"] == "web":
             # no UI files (a Vite app with only .ts): the calling files are the screens
             screens = [{"f": c["f"], "g": c["g"], "via": c["fns"], "r": c["r"], "u": c["u"]} for c in clients]
-        linked = sum(1 for c in clients if c["ui"] or is_ui_file(c["f"]))
+        linked = sum(1 for c in clients if c["ui"] or is_ui_file(c["f"])) if s in has_ui else len(clients)
         chunks[cid] = {"screens": screens, "clients": clients, "fns": fns}
         row["screens"] = len(screens)
         row["clients"] = len(clients)
         row["clients_linked"] = linked
+        row["has_ui"] = s in has_ui
         row["unmatched"] = sum(c["u"] for c in clients)
         row["screen_chunk"] = cid
 
@@ -542,6 +617,8 @@ def build_book(
         row["tables"] = len(tabs)
         row["data"] = sorted(([t, rw] for t, rw in tabs.items()), key=lambda x: labels[x[0]])[:SERVICE_TABLES]
 
+    if table.named:
+        chunks["s0"] = {"schemas": table.named}
     chunk_ids = sorted(chunks, key=lambda c: (c[0], int(c[1:]) if c[1:].isdigit() else 0))
     chunk_no = {c: n for n, c in enumerate(chunk_ids)}
     chunks["names"] = {
@@ -570,12 +647,36 @@ def build_book(
         "domains": domains,
         "tables": table_rows,
         "tableNames": {str(r["i"]): labels[r["i"]] for r in table_rows},
-        "connections": [[svc_index[c["from"]], svc_index[c["to"]], c["links"]] for c in overview["connections"]],
+        "connections": clean_connections(http_out, nsvc, noise),
         "risks": risks,
         "chunks": chunk_ids,
         "routeDomain": {str(e): d for e, d in route_domain.items()},
+        "docs": {"spec": sum(1 for v in docs.values() if v.get("src") == "spec"),
+                 "swag": sum(1 for v in docs.values() if v.get("src") == "swag"),
+                 "comment": sum(1 for v in docs.values() if v.get("src") == "comment"),
+                 "schemas": bool(table.named)},
     }
     return index_doc, chunks
+
+
+def http_pairs_self(http_out: list[list[int]], nsvc: list[int], ntype: list[int]):
+    """(caller, route) calls_http pairs inside one service."""
+    for a, targets in enumerate(http_out):
+        for b in targets:
+            if nsvc[a] >= 0 and nsvc[a] == nsvc[b]:
+                yield a, b
+
+
+def clean_connections(http_out: list[list[int]], nsvc: list[int], noise: list[bool]) -> list[list[int]]:
+    """[caller service, callee service, links] without tests, mocks or generated code."""
+    links: dict[tuple[int, int], int] = defaultdict(int)
+    for a, targets in enumerate(http_out):
+        if noise[a] or nsvc[a] < 0:
+            continue
+        for b in targets:
+            if nsvc[b] >= 0 and nsvc[b] != nsvc[a]:
+                links[(nsvc[a], nsvc[b])] += 1
+    return [[a, b, n] for (a, b), n in sorted(links.items())]
 
 
 def row_start(nsvc: list[int], s: int) -> int:

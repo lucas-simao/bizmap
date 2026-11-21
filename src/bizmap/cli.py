@@ -773,8 +773,18 @@ def mcp_cmd(graph_path: Path, repo_root: Path | None) -> None:
     help="bizmap.yaml with `export.services` (split a monorepo into services). "
     "Default: ./bizmap.yaml when present.",
 )
+@click.option(
+    "--openapi",
+    "openapi",
+    multiple=True,
+    metavar="[SERVICE=]FILE",
+    help="OpenAPI/Swagger file (swag's docs/swagger.json, FastAPI's openapi.json) with the "
+    "request and response JSON of each route; repeatable. Default: found next to each repo "
+    "(<repo>/docs/swagger.json, <repo>/openapi.json…) under the current directory.",
+)
 def export_cmd(
-    graph_path: Path, fmt: str, out_path: Path | None, lang: str, config_path: Path | None
+    graph_path: Path, fmt: str, out_path: Path | None, lang: str, config_path: Path | None,
+    openapi: tuple[str, ...],
 ) -> None:
     """Export the graph to share it: `--format html` writes one offline page
     (services first; click to expand, search, filter by table)."""
@@ -791,7 +801,12 @@ def export_cmd(
     except json.JSONDecodeError as exc:
         raise click.ClickException(f"{graph_path}: invalid graph JSON: {exc}") from exc
     try:
-        text = export_graph(data, fmt, lang=lang, config=config_path)
+        notes: list[str] = []
+        text = export_graph(
+            data, fmt, lang=lang, config=config_path, openapi=list(openapi), root=Path("."), notes=notes
+        )
+        for note in notes:
+            click.echo(note, err=True)
     except ExportError as exc:
         raise click.ClickException(str(exc)) from exc
     out = out_path or Path("bizmap.html")

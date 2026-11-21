@@ -174,14 +174,17 @@ def group_entrypoints(
     service: str,
     rules: dict[str, list[tuple[str, str, str]]] | None = None,
     by: str = "path",
+    tags: dict[int, str] | None = None,
 ) -> dict[int, tuple[str, str]]:
     """[(node index, node, handler file)] -> {index: (domain name, rule)}.
 
-    rule is `yaml`, `path`, `folder`, `kind` or `other`.
+    rule is `yaml`, `tag`, `path`, `folder`, `kind` or `other`. `tags` (route
+    index -> first OpenAPI/swag tag) wins over automatic grouping.
     """
     mine = (rules or {}).get(service, []) + (rules or {}).get("*", [])
     out: dict[int, tuple[str, str]] = {}
     auto_http: dict[int, list[str]] = {}
+    tagged: dict[str, list[int]] = defaultdict(list)
     for idx, node, handler_file in routes:
         hit = None
         for kind, prefix, name in mine:
@@ -194,6 +197,9 @@ def group_entrypoints(
         if hit:
             out[idx] = (hit, "yaml")
             continue
+        if tags and tags.get(idx):
+            tagged[tags[idx]].append(idx)  # the API's own grouping (swag @Tags / OpenAPI tags)
+            continue
         if node.get("kind") != "http":
             out[idx] = (JOB_KINDS.get(str(node.get("kind")), str(node.get("kind") or "jobs")), "kind")
             continue
@@ -204,4 +210,25 @@ def group_entrypoints(
     rule = "folder" if by == "folder" else "path"
     for idx, name in _auto_groups(auto_http).items():
         out[idx] = (name, OTHER if name == OTHER else rule)
+    # a path group named like a tag joins it (`/projects` routes without docs go with tag `projects`)
+    tag_names = {t.lower(): t for t in tagged}
+    by_idx = {idx: node for idx, node, _f in routes}
+    for idx, (_name, rule_) in list(out.items()):
+        if rule_ in ("path", "folder", OTHER) and idx in auto_http:
+            # the first path segment named like a tag, after any prefix (/api/v1, /billing…)
+            segs = path_segments(str(by_idx[idx].get("path") or "")) if by == "folder" else auto_http[idx]
+            head = next((seg for seg in segs if seg in tag_names), None)
+            if head:
+                tagged[tag_names[head]].append(idx)
+                del out[idx]
+    for tag, idxs in tagged.items():
+        if len(idxs) <= BIG_GROUP:
+            for idx in idxs:
+                out[idx] = (tag, "tag")
+            continue
+        # a very large tag reads better in sections: the tag, then its path groups
+        sub = _auto_groups({idx: path_segments(str(by_idx[idx].get("path") or "")) for idx in idxs})
+        for idx in idxs:
+            name = sub[idx]
+            out[idx] = (tag if name in (OTHER, ROUTES) else f"{tag} · {name.lstrip('/')}", "tag")
     return out

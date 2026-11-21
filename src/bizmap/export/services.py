@@ -63,14 +63,14 @@ def parse_service_split(raw: Any, source: str = "bizmap.yaml") -> list[tuple[str
     return rules
 
 
-EXPORT_KEYS = ("services", "domains", "domains_by")
+EXPORT_KEYS = ("services", "domains", "domains_by", "openapi")
 
 
 def load_export_config(config: Path | None) -> dict[str, Any]:
     """`export:` of bizmap.yaml -> {"services": split rules, "domains": rules, "domains_by": str}."""
     from bizmap.export.domains import DomainConfigError, parse_domain_rules
 
-    out: dict[str, Any] = {"services": [], "domains": {}, "domains_by": "path"}
+    out: dict[str, Any] = {"services": [], "domains": {}, "domains_by": "path", "openapi": {}}
     export = _export_section(config)
     if not export:
         return out
@@ -83,6 +83,12 @@ def load_export_config(config: Path | None) -> dict[str, Any]:
     if by not in ("path", "folder"):
         raise ExportConfigError(f"{config}: `export.domains_by` must be `path` or `folder`")
     out["domains_by"] = by
+    spec = export.get("openapi") or {}
+    if isinstance(spec, str):
+        spec = {"": spec}
+    if not isinstance(spec, dict) or not all(isinstance(v, str) for v in spec.values()):
+        raise ExportConfigError(f"{config}: `export.openapi` must map a service to a spec file path")
+    out["openapi"] = {str(k): v for k, v in spec.items()}
     return out
 
 

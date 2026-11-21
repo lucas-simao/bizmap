@@ -1,6 +1,6 @@
 # `bizmap export`
 
-*Requires bizmap 0.5.0+; the reading layout below (domains, call trees, screens) since 0.6.0.*
+*Requires bizmap 0.5.0+; the reading layout (domains, call trees, screens) since 0.6.0; API docs since 0.7.0.*
 
 ![bizmap export --format html: system, a domain, a route's call tree, screens](../img/export-html.gif)
 
@@ -16,6 +16,56 @@ to an e-mail or a ticket. Nothing is fetched from a CDN or a server.
 
 `--format llm` (a compact text overview for an AI assistant) is not available yet.
 
+## API docs: what each route receives and returns
+
+A domain page reads like Swagger / Redoc: one line per endpoint (method, path,
+summary). Open one to see its description, parameters, the **JSON request
+body**, each **response with its JSON**, the screens that use it, the data it
+reads and writes in one sentence, and — only if you ask — **See in code** (the
+call tree).
+
+The docs come from, best first:
+
+1. **An OpenAPI / Swagger file**: `swag init`'s `docs/swagger.json`, FastAPI's
+   `openapi.json` (Swagger 2.0 or OpenAPI 3, JSON or YAML). It brings the
+   fields of every request and response. `bizmap export` finds it next to each
+   repo — `<repo>/docs/swagger.json`, `<repo>/docs/openapi.json`,
+   `<repo>/openapi.json`, `<repo>/swagger.json`, `<repo>/api/openapi.json` (or
+   `.yaml`) under the current directory, else every spec in the repo's
+   `openapi/`, `docs/`, `api/`, `spec/` or `specs/` folder (one per area). The
+   repo folder is the graph's `repo_roots` entry when it has one, else the
+   service name. A spec found this way that cannot be read is skipped with a
+   note; `bizmap export` prints the specs it used (`API docs: 2 specs (…)`).
+   Or give them explicitly (repeatable; a bad file or an unknown service is
+   then an error):
+
+    ```bash
+    bizmap export --openapi api=../api/docs/swagger.json --openapi billing=openapi.json
+    ```
+
+    ```yaml
+    export:
+      openapi:
+        api: ../api/docs/swagger.json     # relative to bizmap.yaml
+    ```
+
+   When the spec has no description, the handler's comment or docstring is
+   used (FastAPI's automatic summary comes from the function name; the
+   docstring has the text). Query parameters show their enum and default.
+
+2. **swag comments** above a Go handler (`@Summary`, `@Description`, `@Tags`,
+   `@Param`, `@Success`, `@Failure`, `@Router`) — already in the graph. They
+   give the summary, parameters and the *names* of the request and response
+   types; their fields need the spec file.
+3. **The handler's comment**: its first sentence becomes the summary.
+
+Routes are matched by method and path (`{id}`, `:id` and `<id>` alike), with the
+spec's base path (`basePath`, `servers[0].url`). Domains follow the API's own
+**tags** (`@Tags`, OpenAPI `tags`); routes without docs join the tag named
+like the first matching segment of their path (`/api/v1/products/:id` →
+`products`), and a tag with more than 80 routes is split into sections
+(`client · delivery`).
+
 ## Reading the page
 
 The page reads the system like a book: overview first, detail on click. It
@@ -25,8 +75,8 @@ never draws the whole graph.
 | --- | --- |
 | **System** | One card per service: API, front-end, worker or library, with routes, domains, tables, who it calls and who calls it. "Many depend on it": services and tables used by 3 or more services. |
 | **Service** | Its **domains**: routes grouped by path (`/projects`, `/projects/tasks`…), with how many routes and functions, the tables they read and write, and how many callers use them. Then, for any service: its screens (front-ends), the tables it reads and writes itself, and its **code by folder** (functions, HTTP calls, tables) — for a library or a client with no routes, that is its whole page. A folder opens the list of its functions. |
-| **Domain** | The routes, ordered by path: method, path (parameters highlighted), handler, tables read/written, callers. |
-| **Route** | Its **call tree**: the handler, the functions it calls, and so on, one line per function with its folder and the tables (and columns) it reads (R) or writes (W). Each node opens on click; a function already shown, or one that calls back into the path, is marked instead of repeated. |
+| **Domain** | The endpoints, like API docs: method, path, summary; open one for parameters, request and response JSON, screens that use it and its data (see above). |
+| **Route** (See in code) | Its **call tree**: the handler, the functions it calls, and so on, one line per function with its folder and the tables (and columns) it reads (R) or writes (W). Each node opens on click; a function already shown, or one that calls back into the path, is marked instead of repeated. |
 | **Data** | A table's page: columns and types, the functions that read or write it (by service, with columns and SQL operations), and the routes and jobs that reach it. |
 
 The right panel shows what you clicked: `file:line`, the comment above the
@@ -95,7 +145,7 @@ export:
 ```
 
 Rules from `bizmap.yaml` are applied first (longest prefix wins); the rest is
-grouped automatically.
+grouped automatically. API tags (above) come before automatic grouping.
 
 ## Services
 
@@ -131,10 +181,10 @@ domain, route tree, function, table, screens) opened in under 100 ms.
 `pytest -m perf` regenerates that graph and checks the generation time, the
 index size and the largest block.
 
-Try it on the fictional example:
+Try it on the fictional example (its `api/openapi.json` is found next to it):
 
 ```bash
-bizmap export --graph examples/export/shop.graph.json --out shop.html
+cd examples/export && bizmap export --graph shop.graph.json --out shop.html
 ```
 
 ## What the page is made of
