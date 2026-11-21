@@ -598,6 +598,10 @@ def _object_prop(obj: Node | None, keys: tuple[str, ...], consts: dict[str, str]
     val_n = _object_prop_node(obj, keys)
     if val_n is None:
         return None, False
+    if val_n.type in {"shorthand_property_identifier", "shorthand_property_identifier_pattern"}:
+        # `{ baseURL }`: the variable of that name
+        name = text(val_n)
+        return (consts[name], "{" in consts[name]) if name in consts else (None, False)
     return _resolve_js_string(val_n, consts)
 
 
