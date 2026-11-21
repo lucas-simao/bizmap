@@ -21,7 +21,7 @@
       colFunctions: "Functions", colScreens: "Screens", colDb: "Database", colServices: "Services", colReaders: "Read by",
       colWriters: "Written by", colFile: "File", colUnmatched: "No route",
       openTree: "Click a route to open its call tree.", params: "Parameters", fromPath: "from the path", returns: "Returns",
-      noSig: "Parameters and return types are not in the graph yet; path parameters are shown.",
+      signature: "Signature",
       handler: "Handler", why: "Comment", calls: "Calls", callers: "Called by", readsWrites: "Reads / writes",
       viaCalls: "Through the functions it calls", httpOut: "Calls over HTTP", consumers: "Consumed by", noConsumers: "No scanned front-end or service calls this route.",
       reachedFrom: "Reached from", unresolved: "HTTP calls that matched no route", more: "more", seenAbove: "shown above",
@@ -76,7 +76,7 @@
       colFunctions: "Funções", colScreens: "Telas", colDb: "Banco", colServices: "Serviços", colReaders: "Lida por",
       colWriters: "Escrita por", colFile: "Arquivo", colUnmatched: "Sem rota",
       openTree: "Clique numa rota para abrir a árvore de chamadas.", params: "Parâmetros", fromPath: "do path", returns: "Retorno",
-      noSig: "Parâmetros e tipos de retorno ainda não estão no grafo; aparecem os parâmetros do path.",
+      signature: "Assinatura",
       handler: "Handler", why: "Comentário", calls: "Chama", callers: "Chamada por", readsWrites: "Lê / escreve",
       viaCalls: "Pelas funções que chama", httpOut: "Chamadas HTTP", consumers: "Consumida por", noConsumers: "Nenhum front-end ou serviço escaneado chama esta rota.",
       reachedFrom: "Alcançada a partir de", unresolved: "Chamadas HTTP sem rota", more: "a mais", seenAbove: "já aparece acima",
@@ -532,6 +532,7 @@
   }
   function endpointHtml(r, dm) {
     var doc = r.doc || {}, ch = chunk(dm.chunk), h = "";
+    r.h.forEach(function (f) { h += sigLine(f, ch.fns[f] || fnRecord(f)); });
     var desc = doc.desc || (doc.src === "comment" ? "" : "");
     if (desc) h += '<p class="ep-desc">' + esc(desc) + "</p>";
     // parameters: the docs' own, plus path parameters they don't mention
@@ -608,7 +609,7 @@
         if (rec[8].length) chips += '<span class="chip bad">⚠ ' + rec[8].length + " " + esc(L.unmatched) + "</span>";
       }
       return '<div class="node" data-fn="' + i + '" data-path="' + path.concat([i]).join(",") + '"><span class="tog">' + (kids.length ? (seen ? "▸" : "▾") : "·") + "</span>" +
-        '<span class="mono">' + esc(label(i, rec)) + '</span><span class="dir">' + esc(rec ? dirOf(rec[1]) : "") + "</span>" +
+        '<span class="mono" title="' + esc(sigText(i, rec)) + '">' + esc(label(i, rec)) + '</span><span class="dir">' + esc(rec ? dirOf(rec[1]) : "") + "</span>" +
         (seen && kids.length ? '<span class="seen">' + esc(L.seenAbove) + "</span>" : "") + (cyc ? '<span class="seen">↺ ' + esc(L.cycle) + "</span>" : "") +
         "<span>" + chips + '</span></div><div class="kids" data-for="' + i + '"></div>';
     }
@@ -648,23 +649,20 @@
     };
   }
 
-  function sigHtml(rec, pp) {
-    var h = "<h3>" + esc(L.params) + "</h3>";
-    var sig = rec && rec[9];
-    if (sig && sig.params) {
-      h += "<ul>" + sig.params.map(function (p) { return "<li><code>" + esc(p.name || p) + "</code>" + (p.type ? ' <span class="muted">' + esc(p.type) + "</span>" : "") + "</li>"; }).join("") + "</ul>";
-    }
-    if (pp && pp.length) h += "<ul>" + pp.map(function (p) { return '<li><code class="pp">' + esc(p) + '</code> <span class="muted">' + esc(L.fromPath) + "</span></li>"; }).join("") + "</ul>";
-    if (sig && sig.returns) h += "<h3>" + esc(L.returns) + "</h3><p><code>" + esc(typeof sig.returns === "string" ? sig.returns : JSON.stringify(sig.returns)) + "</code></p>";
-    if (!sig) h += '<p class="muted">' + esc(L.noSig) + "</p>";
-    return h;
+  // `name(id: string, opts?: Options): Promise<Order>`; `name(…)` when the graph has no signature
+  function sigText(i, rec) {
+    var name = label(i, rec), sig = rec && rec[9];
+    if (name.indexOf(" ") < 0) name = name.slice(name.lastIndexOf(".") + 1);
+    if (!sig) return name + "(…)";
+    return name + "(" + sig[0] + ")" + (sig[1] ? ": " + sig[1] : "");
   }
+  function sigLine(i, rec) { return '<div class="sig" title="' + esc(L.signature) + '">' + esc(sigText(i, rec)) + "</div>"; }
 
   function routeDetail(r, dm) {
     var ch = chunk(dm.chunk);
     var h = "<h2>" + (/^[A-Z]+$/.test(r.m) ? methodHtml(r.m) + pathHtml(r.p) : esc(r.m + " " + r.p)) + "</h2>";
     h += '<p class="muted">' + esc(SV[dm.svc].name) + " › " + esc(dm.name === "other" ? L.other : dm.name) + "</p>";
-    if (r.h.length) h += "<h3>" + esc(L.handler) + "</h3><ul>" + r.h.map(function (f) { var rec = ch.fns[f]; return "<li>" + fnLink(f) + (rec ? ' <div class="ev">' + esc(rec[1]) + "</div>" : "") + "</li>"; }).join("") + "</ul>";
+    if (r.h.length) h += "<h3>" + esc(L.handler) + "</h3><ul>" + r.h.map(function (f) { var rec = ch.fns[f]; return "<li>" + fnLink(f) + sigLine(f, rec) + (rec ? ' <div class="ev">' + esc(rec[1]) + "</div>" : "") + "</li>"; }).join("") + "</ul>";
     // the raw comment only when the route has no docs (it would repeat them, annotations included)
     if (r.why && !(r.doc && (r.doc.src === "swag" || r.doc.src === "spec"))) h += '<div class="why">' + esc(r.why.split(/\s@(?=[A-Z]\w+\b)/)[0]) + "</div>";
     h += "<h3>" + esc(L.consumers) + " (" + num(r.nc) + ")</h3>";
@@ -703,10 +701,10 @@
     cid = cid || homeOf(i);
     var nm = getNames(), s = nm.s[i];
     var h = "<h2>" + esc(label(i, rec)) + ' <span class="kind">' + esc(L.function) + "</span></h2>";
+    h += sigLine(i, rec);
     h += '<p class="muted">' + esc(svcName(s)) + "</p>";
     if (rec[1]) h += '<p><span class="muted">' + esc(L.evidence) + ':</span> <span class="ev">' + esc(rec[1]) + "</span></p>";
     if (rec[2]) h += '<div class="why">' + esc(rec[2]) + "</div>";
-    h += sigHtml(rec, null);
     if (rec[6].length) h += "<h3>" + esc(L.readsWrites) + "</h3><ul>" + rec[6].map(function (d) { return "<li>" + rwChip(d[0], d[1]) + (d[2].length ? ' <span class="muted">' + esc(d[2].join(", ")) + "</span>" : "") + (d[3].length ? ' <span class="kind">' + esc(d[3].join(" ")) + "</span>" : "") + "</li>"; }).join("") + "</ul>";
     var via = viaTables(i, cid);
     if (via.length) h += "<h3>" + esc(L.viaCalls) + " (" + via.length + ")</h3><div>" + tableChips(via, 30) + "</div>";
@@ -722,7 +720,7 @@
     var cid = homeOf(i), rec = fnRecord(i), nm = getNames(), s = nm.s[i];
     crumbs(['<a href="#/s/' + s + '">' + esc(svcName(s)) + "</a>", esc(label(i, rec))]);
     toc("s" + s);
-    var h = "<h1 class=mono>" + esc(label(i, rec)) + '</h1><p class="lead">' + esc(L.function) + " · " + esc(svcName(s)) + (rec && rec[1] ? ' · <span class="ev">' + esc(rec[1]) + "</span>" : "") + "</p>";
+    var h = "<h1 class=mono>" + esc(label(i, rec)) + "</h1>" + sigLine(i, rec) + '<p class="lead">' + esc(L.function) + " · " + esc(svcName(s)) + (rec && rec[1] ? ' · <span class="ev">' + esc(rec[1]) + "</span>" : "") + "</p>";
     var reached = [];
     if (cid && cid.charAt(0) === "d") {
       var ch = chunk(cid);

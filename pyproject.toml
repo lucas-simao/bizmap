@@ -69,8 +69,11 @@ exclude = ["docs/assets", "docs/img"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-m 'not perf'"
-markers = ["perf: scale/performance checks (slow; run with `pytest -m perf`)"]
+addopts = "-m 'not perf and not browser'"
+markers = [
+    "perf: scale/performance checks (slow; run with `pytest -m perf`)",
+    "browser: the exported HTML in a real browser (Playwright + Chromium; run with `pytest -m browser`)",
+]
 
 [tool.ruff]
 line-length = 100
