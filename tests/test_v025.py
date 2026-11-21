@@ -53,7 +53,7 @@ def _http_urls(graph) -> set[tuple[str, str]]:
 
 
 def test_graph_version() -> None:
-    assert GRAPH_VERSION == "0.7.0"
+    assert GRAPH_VERSION == "0.8.0"
 
 
 def test_fastapi_factory_and_imported_app_routes(tmp_path: Path) -> None:
