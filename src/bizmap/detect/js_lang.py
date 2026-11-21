@@ -870,6 +870,25 @@ class JsHttpWrapper:
     # `read(url) => api.get(url)` inside a factory: the call site is recorded
     # as a call on that client (its bases come from the factory instances)
     recv: str = ""
+    # `requestWithStatus(config, errs) => api.request(config)`: the argument
+    # at this index is a request config (`{ method, baseURL, url }`)
+    config_index: int | None = None
+
+
+CONFIG_PARAM_NAMES = {"config", "cfg", "options", "opts", "request", "req", "requestconfig", "init"}
+
+
+def _config_call_url(
+    wrap: JsHttpWrapper, config: Node, consts: dict[str, str]
+) -> tuple[str | None, bool, str]:
+    """URL and method of a config wrapper call: the config's own `baseURL`
+    wins over the wrapper's client base."""
+    path_val, unresolved, http_method = _js_client_url_and_method("request", [config], consts)
+    override = _per_call_base("request", [config], consts)
+    base = override if override is not None else wrap.base
+    if path_val is None and override is None:
+        return None, unresolved, http_method
+    return _join_route(base, path_val or ""), unresolved, http_method
 
 
 @dataclass
@@ -949,6 +968,9 @@ class JsRouteLiteral:
     bound_base: str | None = None
     # helper defined as an object property (`paths.site`), called as obj.key()
     member_helper: bool = False
+    # name of the call the literal is an argument of (or whose config object
+    # holds it as `url`): "" when it is not sent anywhere
+    call: str = ""
 
 
 @dataclass
@@ -964,6 +986,7 @@ class JsHelperCall:
     # the call / reference is the whole argument of a call (`http.get(itemPath(id))`)
     direct: bool = False
     kind: str = "call"  # "call" (helper()) or "ref" (module const used by name)
+    call: str = ""  # the call it is an argument of (see JsRouteLiteral.call)
 
 
 @dataclass
@@ -1260,6 +1283,18 @@ class JsAnalyzer:
                 tree, consts_by_mod.get(module) or {}, clients_by_mod.get(module) or {}
             )
         _import_wrappers(wrappers_by_mod, import_specs_by_mod, exports_by_mod, set(trees_by_mod))
+        if any(w.config_index is not None for ws in wrappers_by_mod.values() for w in ws.values()):
+            # helpers that call a config wrapper of another module
+            # (`reportsGet = (url) => requestWithStatus({ baseURL: V2, url })`)
+            visible = {mod: dict(ws) for mod, ws in wrappers_by_mod.items()}
+            for module, tree in trees_by_mod.items():
+                wrappers_by_mod[module] = _collect_wrappers(
+                    tree,
+                    consts_by_mod.get(module) or {},
+                    clients_by_mod.get(module) or {},
+                    known=visible.get(module) or {},
+                )
+            _import_wrappers(wrappers_by_mod, import_specs_by_mod, exports_by_mod, set(trees_by_mod))
 
         for scan_n, (_path, rel_file, module, tree, _src) in enumerate(parsed):
             progress.counter("js/ts: analysing", scan_n, len(parsed))
@@ -1309,6 +1344,12 @@ class JsAnalyzer:
             chain_router = _is_router_factory(node)
             wrap = wrappers.get(raw_method) or wrappers.get(method)
             if wrap and args and not recv:
+                if wrap.config_index is not None:
+                    if wrap.config_index < len(args):
+                        self._record_config_wrapper_call(
+                            analysis, node, wrap, args[wrap.config_index], consts, rel_file, module
+                        )
+                    continue
                 if wrap.recv:
                     if wrap.path_index < len(args):
                         self._record_client_http(
@@ -1583,6 +1624,33 @@ class JsAnalyzer:
                 line=line_of(node),
                 symbol=_enclosing_symbol(node, module),
                 unresolved=path_unresolved or ("{" in composed),
+            )
+        )
+
+    def _record_config_wrapper_call(
+        self,
+        analysis: JsAnalysis,
+        node: Node,
+        wrap: JsHttpWrapper,
+        config: Node,
+        consts: dict[str, str],
+        rel_file: str,
+        module: str,
+    ) -> None:
+        url, unresolved, http_method = _config_call_url(wrap, config, consts)
+        if not url:
+            return
+        composed = _normalize_http_url(url)
+        if not _looks_like_http_path(composed):
+            return
+        analysis.http_calls.append(
+            JsHttpCall(
+                method=http_method,
+                url=composed,
+                file=rel_file,
+                line=line_of(node),
+                symbol=_enclosing_symbol(node, module),
+                unresolved=unresolved or ("{" in composed),
             )
         )
 
@@ -2352,10 +2420,34 @@ def _method_param_index(params: list[str]) -> int | None:
 
 
 def _collect_wrappers(
-    tree: Node, consts: dict[str, str], clients: dict[str, str]
+    tree: Node,
+    consts: dict[str, str],
+    clients: dict[str, str],
+    known: dict[str, JsHttpWrapper] | None = None,
 ) -> dict[str, JsHttpWrapper]:
-    """Functions that prepend a base const/env to a path argument."""
+    """Functions that prepend a base const/env to a path argument.
+
+    ``known``: wrappers visible in the module (own + imported) from an earlier
+    pass, so a helper calling a config wrapper of another module is followed."""
     wrappers: dict[str, JsHttpWrapper] = {}
+    known = known or {}
+
+    def consider_config(name: str, fn_node: Node, params: list[str]) -> None:
+        """`(config, errs) => api.request(config)` — the config is passed through."""
+        for i, pname in enumerate(params):
+            if pname.lower() not in CONFIG_PARAM_NAMES:
+                continue
+            for node in typed_walk(fn_node, frozenset({"call_expression"}), JS_TYPES):
+                if call_callee_name(node).lower() != "request":
+                    continue
+                args = call_args(node)
+                recv = _receiver_ident(node)
+                if not args or text(args[0]) != pname or not _is_known_http_client(recv, clients, node):
+                    continue
+                wrappers[name] = JsHttpWrapper(
+                    method="", base=(clients.get(recv) or "").rstrip("/"), path_index=-1, config_index=i
+                )
+                return
 
     def consider(name: str, fn_node: Node) -> None:
         params = _fn_param_names(fn_node)
@@ -2363,6 +2455,7 @@ def _collect_wrappers(
             return
         path_i = _path_param_index(params)
         if path_i is None:
+            consider_config(name, fn_node, params)
             return
         method_i = _method_param_index(params)
         path_param = params[path_i]
@@ -2384,6 +2477,20 @@ def _collect_wrappers(
             args = call_args(node)
             recv = _receiver_ident(node)
             if _js_call_is_interceptor(node):
+                continue
+            callee_n = node.child_by_field_name("function")
+            cfg_wrap = known.get(text(callee_n)) if callee_n is not None and callee_n.type == "identifier" else None
+            if cfg_wrap is not None and cfg_wrap.config_index is not None and cfg_wrap.config_index < len(args):
+                # `reportsGet = (url) => requestWithStatus({ method: 'GET', baseURL: V2, url })`
+                composed, _u, cfg_method = _config_call_url(cfg_wrap, args[cfg_wrap.config_index], extra)
+                if composed:
+                    wrappers[name] = JsHttpWrapper(
+                        method=cfg_method if method_i is None else "",
+                        base=composed.rstrip("/"),
+                        path_index=path_i,
+                        method_index=method_i,
+                    )
+                    return
                 continue
             http_method = "GET"
             is_http = False
@@ -3968,6 +4075,26 @@ def _literal_is_excluded(top: Node, routers: dict[str, str]) -> bool:
     return False
 
 
+def _literal_call_name(top: Node | None) -> str:
+    """The call ``top`` is sent through: an argument of ``f(...)``, or the
+    ``url`` of a config object passed to ``f({ url })``. "" otherwise."""
+    if top is None:
+        return ""
+    parent = parent_of(top)
+    if parent is not None and parent.type == "pair":
+        key = parent.child_by_field_name("key")
+        if key is None or _unquote(text(key)).lower() not in {"url", "path", "endpoint", "uri"}:
+            return ""
+        obj = parent_of(parent)
+        parent = parent_of(obj) if obj is not None else None
+    if parent is None or parent.type != "arguments":
+        return ""
+    call = parent_of(parent)
+    if call is None or call.type != "call_expression":
+        return ""
+    return call_callee_name(call)
+
+
 def _literal_method_hint(top: Node, consts: dict[str, str]) -> str | None:
     parent = parent_of(top)
     if parent is None:
@@ -4179,6 +4306,7 @@ def _collect_route_literals(
                         method=_literal_method_hint(top, consts),
                         args=[_resolve_js_string(a, consts)[0] for a in call_args(node)],
                         direct=top is not None and parent_of(top) is not None and parent_of(top).type == "arguments",
+                        call=_literal_call_name(top),
                     )
                 )
         elif node.type == "identifier" and parent_of(node) is not None and parent_of(node).type != "variable_declarator":
@@ -4199,6 +4327,7 @@ def _collect_route_literals(
                     method=_literal_method_hint(top, consts),
                     direct=top is node and parent_of(node).type == "arguments",
                     kind="ref",
+                    call=_literal_call_name(top),
                 )
             )
     for node in walk(tree):
@@ -4294,6 +4423,7 @@ def _collect_route_literals(
                 base_hole=(_HOLE.match(value).group(1) if value and _HOLE.match(value) else None),
                 member_helper=member,
                 bound_base=_concrete_base(config_base),
+                call=_literal_call_name(top),
             )
         )
 

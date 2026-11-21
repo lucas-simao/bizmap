@@ -30,6 +30,10 @@ func main() {
 	e.GET("/projects/:projectId/history", h)
 	e.GET("/oauth/callback", h)
 	e.GET("/projects/:projectId/schedule", h)
+	e.GET("/projects/:projectId", h)
+	e.GET("/projects", h)
+	e.GET("/widgets", h)
+	e.POST("/reports", h)
 	e.Start(":1")
 }
 """
@@ -144,3 +148,91 @@ def test_navigation_and_mocks_never_link(tmp_path: Path) -> None:
         (e.from_id, e.to_id) for e in graph.edges.values() if e.type == "calls_http" and e.from_id.startswith("web/")
     ]
     assert links == [], links
+
+
+# Problem 1 of the round-45 review: the v2 base goes through a helper that
+# hands the config to a function of another module (`api.request(config)`).
+CROSS_MODULE_V2 = {
+    "src/api/api.ts": """import axios from 'axios';
+
+export const API_BASE_URL = import.meta.env.VITE_API_URL;
+export const api = axios.create({ baseURL: `${API_BASE_URL}/api/v1` });
+""",
+    "src/api/statusRequest.ts": """import { api } from './api';
+
+export const requestWithStatus = <T>(
+  config: { method: string; baseURL?: string; url: string; params?: object },
+  errs: object,
+) => api.request<T>(config).then((r) => r.data);
+""",
+    "src/api/reports.ts": """import { API_BASE_URL } from './api';
+import { requestWithStatus } from './statusRequest';
+
+const V2 = `${API_BASE_URL}/api/v2`;
+const reportsGet = <T>(url: string, params?: Record<string, unknown>) =>
+  requestWithStatus<T>({ method: 'GET', baseURL: V2, url, params }, {});
+
+export const reportsClient = {
+  getFlow: (p: Record<string, unknown>) => reportsGet('/reports/flow', p),
+};
+""",
+}
+
+
+def test_v2_base_through_a_config_helper_of_another_module(tmp_path: Path) -> None:
+    _workspace(tmp_path, CROSS_MODULE_V2)
+    graph = scan_path(tmp_path)
+    assert _links_from(graph, "getFlow") == set(), _links_from(graph, "getFlow")
+    assert "{VITE_API_URL}/api/v2/reports/flow" in _unresolved_from(graph, "getFlow"), (
+        graph.attrs.get("unresolved_http")
+    )
+
+
+# Problem 2: URL builders, route templates and menu constants are navigation.
+URL_BUILDERS = {
+    "src/utils/links.ts": """export const projectLink = (domain: string, projectId: string) =>
+  (projectId ? `${domain}/projects/${projectId}` : '');
+export const PROJECT_ROUTE_TEMPLATE = '/projects/:projectId';
+export const MENU_ACCESS = { projects: '/projects' };
+""",
+    "src/export/sheet.ts": """import { projectLink, PROJECT_ROUTE_TEMPLATE, MENU_ACCESS } from '../utils/links';
+
+export function rows(domain: string, items: { id: string }[]) {
+  return items.map((it) => ({ link: projectLink(domain, it.id), hyperlink: createHyperlink(projectLink(domain, it.id)) }));
+}
+
+export function tabs() {
+  return [PROJECT_ROUTE_TEMPLATE.replace(':projectId', 'x'), MENU_ACCESS.projects];
+}
+
+function createHyperlink(url: string) {
+  return { url };
+}
+""",
+    # real requests keep linking
+    "src/api/calls.ts": """import axios from 'axios';
+
+declare function apiGet(uid: string, path: string): Promise<unknown>;
+
+export function loadWidgets(uid: string) {
+  return apiGet(uid, '/widgets');
+}
+
+export function sendReport() {
+  return axios.post('/reports', {});
+}
+""",
+}
+
+
+def test_url_builders_templates_and_menus_never_link(tmp_path: Path) -> None:
+    _workspace(tmp_path, URL_BUILDERS)
+    graph = scan_path(tmp_path)
+    nav = [
+        (e.from_id, e.to_id)
+        for e in graph.edges.values()
+        if e.type == "calls_http" and ("/utils/" in e.from_id or "utils.links" in e.from_id or "export.sheet" in e.from_id)
+    ]
+    assert nav == [], nav
+    assert _links_from(graph, "loadWidgets") == {"GET:/widgets"}
+    assert _links_from(graph, "sendReport") == {"POST:/reports"}

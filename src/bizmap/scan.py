@@ -1485,6 +1485,28 @@ def _is_js_test_source(path: str) -> bool:
     return any(part in _JS_TEST_DIRS for part in parts[:-1])
 
 
+# a call that sends a request: `apiGet(uid, '/x')`, `fetchJson`, `doRequest`,
+# `httpClient`, `axios(...)` — not `push`, `navigate`, `open`, `hyperlink`
+_REQUEST_WORDS = frozenset(
+    {"get", "post", "put", "patch", "delete", "del", "fetch", "request", "api", "http",
+     "send", "query", "mutate", "axios", "ky", "ofetch", "got"}
+)
+_WORD_SPLIT = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+
+
+def _literal_is_sent(method: str | None, call: str | None) -> bool:
+    """A path literal counts as a request only with a method hint (client
+    method, `fetch`, config with url and method) or as an argument of a call
+    whose name says it sends one. Anything else (a returned URL, a route
+    template, a menu constant, a hyperlink) is navigation."""
+    if method:
+        return True
+    name = (call or "").rsplit(".", 1)[-1]
+    if not name:
+        return False
+    return any(w.lower() in _REQUEST_WORDS for w in _WORD_SPLIT.findall(name))
+
+
 def _is_ui_source(path: str | None) -> bool:
     """A component file (`.tsx`, `.jsx`, `.vue`, `.svelte`)."""
     return str(path or "").lower().endswith(_UI_SOURCE_EXTS)
@@ -2644,10 +2666,10 @@ def _scan_one(
     for lit in js_analysis.route_literals:
         if _is_js_test_source(lit.file):
             continue  # a test or a mock (msw `rest.get('/x')`) is not the app calling the API
-        if not lit.method and _is_ui_source(lit.file) and not getattr(lit, "helper", False):
-            # a path in a component with nothing saying it is a request (no
-            # client method, no fetch, no `url` + method) is navigation or a
-            # label: not a call to the API
+        if not getattr(lit, "helper", False) and not _literal_is_sent(lit.method, getattr(lit, "call", "")):
+            # a path with nothing saying it is a request (no client method, no
+            # fetch, no `url` + method, no request-like call) is navigation or
+            # a label: not a call to the API
             continue
         base_item = {
             "path": lit.path,
@@ -2667,7 +2689,7 @@ def _scan_one(
         sites = [hc for hc in all_sites or [] if getattr(hc, "direct", False)]
         # a path helper used in a component without any request hint
         # (`navigate(paths.widget(id))` through an unknown wrapper) is navigation
-        sites = [hc for hc in sites if (hc.method or lit.method) or not _is_ui_source(hc.file)]
+        sites = [hc for hc in sites if _literal_is_sent(hc.method or lit.method, getattr(hc, "call", ""))]
         if all_sites and not sites and any(getattr(hc, "direct", False) for hc in all_sites):
             continue
         if all_sites and not sites:
@@ -2687,9 +2709,9 @@ def _scan_one(
                 )
             continue
         if getattr(lit, "helper", False):
-            base_item["origin"] = "path_helper" if is_fn else "module_const"
-            # nobody was found sending it: its base is unknown, match whole only
-            base_item["explicit_base"] = True
+            # a path helper / module const nobody is seen sending (a URL
+            # builder, a route template, a menu entry): navigation, not a call
+            continue
         _stash_route_literal(
             graph,
             function_id(lit.symbol),
