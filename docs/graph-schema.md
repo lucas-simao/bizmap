@@ -56,7 +56,7 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 | `table` | `table:<name>` | `name`; optional `external` (system catalogs / `storage.*` / `vault.*` / `auth.*`), `kind` (`external_relation` \| `unresolved_relation`), `dropped` (still referenced after `DROP TABLE`), `candidates` (dynamic/`unknown`), `rls`, `policies` |
 | `view` | `view:<name>` | `name`, `kind` (`view` \| `unresolved_relation`), optional `materialized` |
 | `column` | `column:<table>.<column>` | `table`, `name`, `data_type`, `nullable`, optional `why` |
-| `db_trigger` | `db_trigger:<name>` | `name`, `table`, `timing`, `events`, `function`, `evidence` |
+| `db_trigger` | `db_trigger:<name>` | `name`, `table`, `timing`, `events`, `function`, `evidence`; optional `columns` (the `UPDATE OF col, …` list, present only when the trigger has that clause) |
 | `collection` | `collection:<name>` | `name` (Firestore collection) |
 | `queue` | `queue:<kind>:<name>` | `kind` (`celery` \| `rq` \| `cloud_tasks` \| `pubsub` \| `firestore`), `name` |
 

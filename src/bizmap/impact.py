@@ -571,8 +571,7 @@ def _trigger_changes(
                    and (graph.get(e.from_id) or Node("", "")).type == "function"}
         fns = sorted(writers)
         eps = sorted({ep for f in fns for ep in _entrypoints_reaching(graph, f, inc)})
-        events = node.attrs.get("events") or []
-        detail = " ".join(x for x in [str(node.attrs.get("timing") or ""), " OR ".join(map(str, events))] if x)
+        detail = _trigger_when(node.attrs)
         out.append(SchemaChange(column=tid, file=path, line=hit[0], entrypoints=eps, functions=fns,
                                 op="trigger", table=table, name=str(node.attrs.get("name") or tid), detail=detail))
     return out
@@ -916,6 +915,7 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
     low: set[str] = set()
     dyn: dict[str, set[str]] = {}
     write_ops: dict[str, set[str]] = {}
+    update_cols: dict[str, set[str]] = {}
     reached_fns: list[str] = []
     while q:
         cur = q.popleft()
@@ -935,6 +935,9 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
                     tname = e.to_id.rpartition("/")[2].split(":", 1)[-1].split(".", 1)[0].lower()
                     ops = {str(o).upper() for o in e.attrs.get("ops") or []}
                     write_ops.setdefault(tname, set()).update(ops or {"?"})  # "?": op not recorded
+                    if "UPDATE" in ops:  # columns an UPDATE sets ("*": the whole row / unknown)
+                        col = _column_of(e.to_id)
+                        update_cols.setdefault(tname, set()).add(col.lower() if col else "*")
                 if str(e.confidence) in _LOW_CONF and not e.attrs.get("derived"):
                     low.add(e.id)
                 if e.to_id.rpartition("/")[2] in {"table:unknown"}:
@@ -984,9 +987,19 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
     for tid in {x for ts in table_triggers.values() for x in ts}:
         node = graph.get(tid) or Node("", "")
         events = {str(ev).upper().split()[0] for ev in node.attrs.get("events") or [] if str(ev).strip()}
-        ops = write_ops.get(str(node.attrs.get("table") or "").lower().split(".")[-1], set())
-        if events and ops and "?" not in ops and not ops & events:
+        tname = str(node.attrs.get("table") or "").lower().split(".")[-1]
+        ops = write_ops.get(tname, set())
+        if not events or not ops or "?" in ops:
+            continue
+        if not ops & events:
             cannot_fire[tid] = f"no {' / '.join(sorted(events))} in these writes ({' / '.join(sorted(ops))} only)"
+            continue
+        of_cols = {str(c).lower() for c in node.attrs.get("columns") or []}
+        set_cols = update_cols.get(tname, set())
+        if ops & events == {"UPDATE"} and of_cols and set_cols and "*" not in set_cols and not of_cols & set_cols:
+            cannot_fire[tid] = (
+                f"`UPDATE OF {', '.join(sorted(of_cols))}`; these writes set {', '.join(sorted(set_cols))} only"
+            )
 
     services: dict[str, list[str]] = {}
     if _multi_repo(graph) and tables:
@@ -1124,6 +1137,16 @@ def _risk(graph: Graph, impact: Impact, facts: _Facts, shared_services: int) -> 
     reasons.sort(key=lambda r: -rank[r[0]])
     level = reasons[0][0] if reasons else "none"
     return level, reasons
+
+
+def _trigger_when(attrs: dict[str, Any]) -> str:
+    """`AFTER UPDATE OF status OR INSERT` from a db_trigger node's attrs."""
+    events = attrs.get("events") or []
+    if not isinstance(events, list):
+        events = [events]
+    cols = [str(c) for c in attrs.get("columns") or []]
+    parts = [f"{e} OF {', '.join(cols)}" if str(e).upper() == "UPDATE" and cols else str(e) for e in events]
+    return " ".join(x for x in [str(attrs.get("timing") or ""), " OR ".join(parts)] if x)
 
 
 def _mid(index: int) -> str:
@@ -1535,10 +1558,7 @@ def render_markdown(
         rows = ["| Trigger | On table | When | Fired by this change | Where |", "|---|---|---|---|---|"]
         for tid in trig[:cap]:
             a = (graph.get(tid) or Node("", "")).attrs
-            events = a.get("events") or []
-            when = " ".join(
-                x for x in [str(a.get("timing") or ""), " OR ".join(str(e) for e in events) if isinstance(events, list) else str(events)] if x
-            )
+            when = _trigger_when(a)
             if tid in facts.fired:
                 fires = "**yes**"
             elif tid in facts.cannot_fire:

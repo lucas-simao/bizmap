@@ -451,3 +451,121 @@ def test_sample_names_are_alphabetical() -> None:
     ids = [_fn(g, "", f"pkg.{n}", "a.py", 1, 2) for n in ("zeta", "alpha", "mid", "beta")]
     assert _first_labels(g, set(ids), 2)[:2] == ["pkg.alpha", "pkg.beta"]
     assert len(_first_labels(g, set(ids), 2)) == 4
+
+
+# ── triggers with `UPDATE OF` columns: the four cases of the brief ──────────
+
+
+def _orders_trigger_graph(*, unscanned: bool) -> Graph:
+    """orders(id, status, note); AFTER UPDATE OF status → audit_status() writes
+    order_audit (as the scan records it), or a trigger whose function is not
+    in the scanned schema."""
+    g = Graph()
+    g.repo = "shop"
+    g.attrs["repo_roots"] = {"shop": "."}
+    set_status = _fn(g, "", "store.Store.SetStatus", "store/store.go", 10, 13)
+    set_note = _fn(g, "", "store.Store.SetNote", "store/store.go", 15, 18)
+    create = _fn(g, "", "store.Store.Create", "store/store.go", 20, 23)
+    for fid, ep, path in [(set_status, "PATCH:/orders/:id/status", "/orders/:id/status"),
+                          (set_note, "PATCH:/orders/:id/note", "/orders/:id/note"),
+                          (create, "POST:/orders", "/orders")]:
+        method, _sep, _p = ep.partition(":")
+        g.add_edge("triggers", _ep(g, "", "http", ep, "main.go", 5, method=method, path=path), fid)
+    g.add_edge("writes", set_status, _col(g, "orders", "status"), ops=["UPDATE"], evidence=_ev("store/store.go", 11))
+    g.add_edge("writes", set_note, _col(g, "orders", "note"), ops=["UPDATE"], evidence=_ev("store/store.go", 16))
+    for c in ("id", "status"):
+        g.add_edge("writes", create, _col(g, "orders", c), ops=["INSERT"], evidence=_ev("store/store.go", 21))
+    name, fn = ("orders_stamp", "stamp") if unscanned else ("orders_audit", "audit_status")
+    tid = f"db_trigger:{name}"
+    g.add_node(tid, "db_trigger", name=name, table="orders", timing="AFTER", events=["UPDATE"],
+               function=fn, columns=["status"], evidence={"file": "schema.sql", "line": 4})
+    if unscanned:
+        g.add_edge("triggers", tid, "table:orders")
+    else:
+        g.add_node("function:sql.audit_status", "function", name="sql.audit_status")
+        g.add_edge("triggers", tid, "function:sql.audit_status")
+        g.add_node("table:order_audit", "table", name="order_audit")
+        g.add_edge("writes", "function:sql.audit_status", "table:order_audit")
+        g.add_edge("writes", set_status, "table:order_audit", via=f"db_trigger:{name}", evidence=_ev("store/store.go", 11))
+    return g
+
+
+_TRIGGER_CASES = [
+    ("status", False, 11, "**yes**"),
+    ("note", False, 16, "no (`UPDATE OF status`; these writes set note only)"),
+    ("insert", False, 21, "no (no UPDATE in these writes (INSERT only))"),
+    ("unscanned", True, 11, "unknown (its function was not scanned or has no known effect)"),
+]
+
+
+@pytest.mark.parametrize(("case", "unscanned", "line", "fired"), _TRIGGER_CASES, ids=[c[0] for c in _TRIGGER_CASES])
+def test_snapshot_trigger_update_of(case: str, unscanned: bool, line: int, fired: str) -> None:
+    g = _orders_trigger_graph(unscanned=unscanned)
+    md = render_markdown(g, compute_impact(g, _diff(("store/store.go", line))), blob_url=BLOB)
+    _snapshot(f"trigger_{case}", md)
+    name = "orders_stamp" if unscanned else "orders_audit"
+    row = next(ln for ln in md.splitlines() if ln.startswith(f"| ⚡ `{name}`"))
+    assert "| AFTER UPDATE OF status |" in row and f"| {fired} |" in row, row
+    assert ("fires trigger" in md.split("<details")[0]) == (fired == "**yes**")
+
+
+TRIGGER_OF_SCHEMA = """
+CREATE TABLE orders (id uuid PRIMARY KEY, status text, note text);
+CREATE TABLE order_audit (order_id uuid, status text);
+CREATE FUNCTION audit_status() RETURNS trigger AS $$ BEGIN
+  INSERT INTO order_audit(order_id, status) VALUES (NEW.id, NEW.status); RETURN NEW; END $$ LANGUAGE plpgsql;
+CREATE TRIGGER orders_audit AFTER UPDATE OF status ON orders
+  FOR EACH ROW EXECUTE FUNCTION audit_status();
+CREATE TRIGGER orders_any AFTER INSERT ON orders
+  FOR EACH ROW EXECUTE FUNCTION audit_status();
+"""
+
+TRIGGER_OF_UNSCANNED = """
+CREATE TABLE orders (id uuid PRIMARY KEY, status text, note text);
+CREATE TRIGGER orders_stamp AFTER UPDATE OF status ON orders
+  FOR EACH ROW EXECUTE FUNCTION stamp();
+"""
+
+TRIGGER_OF_GO = """package store
+
+import (
+	"context"
+	"database/sql"
+)
+
+type Store struct{ db *sql.DB }
+
+func (s *Store) SetStatus(ctx context.Context, id, status string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE orders SET status = $2 WHERE id = $1", id, status)
+	return err
+}
+
+func (s *Store) SetNote(ctx context.Context, id, note string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE orders SET note = $2 WHERE id = $1", id, note)
+	return err
+}
+
+func (s *Store) Create(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "INSERT INTO orders (id, status) VALUES ($1, 'new')", id)
+	return err
+}
+"""
+
+
+@pytest.mark.parametrize(("case", "unscanned", "line", "fired"), _TRIGGER_CASES, ids=[c[0] for c in _TRIGGER_CASES])
+def test_trigger_update_of_end_to_end(tmp_path: Path, case: str, unscanned: bool, line: int, fired: str) -> None:
+    """Real scan of the brief's repro: `columns` on the node, and the four answers."""
+    from bizmap.scan import scan_path
+
+    (tmp_path / "store").mkdir()
+    (tmp_path / "go.mod").write_text("module example.com/shop\n\ngo 1.22\n", encoding="utf-8")
+    (tmp_path / "schema.sql").write_text(TRIGGER_OF_UNSCANNED if unscanned else TRIGGER_OF_SCHEMA, encoding="utf-8")
+    (tmp_path / "store" / "store.go").write_text(TRIGGER_OF_GO, encoding="utf-8")
+    g = scan_path(tmp_path)
+    name = "orders_stamp" if unscanned else "orders_audit"
+    assert g.nodes[f"db_trigger:{name}"].attrs["columns"] == ["status"]
+    if not unscanned:
+        assert "columns" not in g.nodes["db_trigger:orders_any"].attrs  # no OF clause: unchanged node
+    md = render_markdown(g, compute_impact(g, _diff(("store/store.go", line))))
+    row = next(ln for ln in md.splitlines() if ln.startswith(f"| ⚡ `{name}`"))
+    assert "| AFTER UPDATE OF status |" in row and f"| {fired} |" in row, row

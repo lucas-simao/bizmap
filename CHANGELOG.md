@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **PR comment (GitHub Action), triggers:** the Triggers table shows the whole
+  clause (`AFTER UPDATE OF status`), and "Fired by this change" answers
+  **yes**, **no** (with the reason: no matching event in the writes, or the
+  `UPDATE OF` columns are not set) or **unknown** (the trigger's function was
+  not scanned or has no known effect).
+- Graph: `db_trigger` nodes have an optional `columns` list (the
+  `UPDATE OF col, …` columns), only when the trigger has that clause; every
+  other node is unchanged.
+
+### Changed
+
+- The PR comment renders much faster on large diffs (~17× for the whole
+  command on a 32k-function diff); table cells sample the alphabetically first
+  names.
+
 ## 0.8.0 — 2026-11-21
 
 ### Added
