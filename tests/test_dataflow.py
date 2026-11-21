@@ -589,6 +589,65 @@ def test_sql_parser_shapes() -> None:
 # ── outputs ───────────────────────────────────────────────────────────────────
 
 
+def test_why_shows_where_a_column_comes_from_and_goes(tmp_path: Path) -> None:
+    from bizmap.why import format_why
+
+    g = _go_graph(tmp_path)
+    text = format_why(g, "resumo_pedido.total")
+    assert text.endswith(
+        "comes from (data flow):\n"
+        f"  ← orders_db.pedidos.valor_centavos via sync.SyncOrders (exact, sync/orders.go:{_line(GO_SYNC, 'dst.ExecContext')})\n"
+    )
+    text = format_why(g, "pedidos.valor_centavos")
+    assert "goes to (data flow):\n" in text
+    assert "  → orders_db.resumo_mensal.receita via sync.RollupMonthly (heuristic, transform, sync/orders.go:" in text
+    assert "  → summary_db.resumo_pedido.total via sync.SyncOrders (exact, sync/orders.go:" in text
+    table = format_why(g, "pedidos")
+    assert "  → summary_db.resumo_pedido via sync.SyncOrders (exact, sync/orders.go:" in table
+    assert "· 4 columns mapped" in table
+
+
+def test_why_follows_several_hops(tmp_path: Path) -> None:
+    from bizmap.why import format_why
+
+    g = _go_graph(tmp_path)
+    dataflow.add_feed(
+        g, "table:resumo_pedido", "table:resumo_mensal", path=["function:sync.RollupMonthly"], confidence="exact",
+        evidence={"file": "sync/orders.go", "line": 1, "symbol": "x"},
+        entries=[{"from": "resumo_pedido.total", "to": "resumo_mensal.receita", "fn": "function:sync.RollupMonthly",
+                  "confidence": "exact", "evidence": {"file": "sync/orders.go", "line": 1}}],
+    )
+    text = format_why(g, "resumo_mensal.receita")
+    assert "  ← summary_db.resumo_pedido.total via sync.RollupMonthly (exact, sync/orders.go:1)\n" in text
+    assert "    ← orders_db.pedidos.valor_centavos via sync.SyncOrders (exact," in text
+
+
+def test_report_has_a_database_flow_section(tmp_path: Path) -> None:
+    from bizmap.report import build_report, format_report
+
+    g = _go_graph(tmp_path)
+    rep = build_report(g.to_dict())
+    assert rep["data_flow"]["pairs"] == [
+        {"from": "orders_db", "to": "orders_db", "feeds": 1, "tables": 1, "columns": 2, "exact": 0, "heuristic": 2, "feeds_exact": 1},
+        {"from": "orders_db", "to": "summary_db", "feeds": 1, "tables": 1, "columns": 4, "exact": 4, "heuristic": 0, "feeds_exact": 1},
+    ]
+    text = format_report(rep)
+    assert (
+        "data flow between databases: 2 feeds, 2 with columns mapped, 6 column mappings (exact 4, heuristic 2, 67% exact)\n"
+        "  orders_db -> orders_db: 1 table, 2 columns (exact 0, heuristic 2)\n"
+        "  orders_db -> summary_db: 1 table, 4 columns (exact 4, heuristic 0)\n"
+    ) in text
+    redacted = build_report(g.to_dict(), redact=True)
+    assert all(row["from"].startswith("h:") for row in redacted["data_flow"]["pairs"])
+
+
+def test_report_without_feeds_is_unchanged(tmp_path: Path) -> None:
+    from bizmap.report import build_report
+
+    g = Graph()
+    assert "data_flow" not in build_report(g.to_dict())
+
+
 def test_graph_without_flow_is_unchanged(tmp_path: Path) -> None:
     """Same graph with and without the pass when nothing feeds anything."""
     f = "svc/svc.go"

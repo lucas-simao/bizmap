@@ -2413,3 +2413,179 @@ def feeds_into(graph: Graph, table_id: str) -> list[Any]:
 def feeds_from(graph: Graph, table_id: str) -> list[Any]:
     return sorted((e for e in graph.edges.values() if e.type == "feeds" and e.from_id == table_id), key=lambda e: e.to_id)
 
+
+MAX_TRACE_HOPS = 3
+MAX_TRACE_LINES = 60
+
+
+def _table_id_of(graph: Graph, node_id: str) -> tuple[str, str | None]:
+    """(table / collection id, column name or None) for a table, column or collection id."""
+    bare = node_id.split("/", 1)[1] if "/" in node_id.split(":", 1)[0] else node_id
+    prefix = node_id[: len(node_id) - len(bare)]
+    if bare.startswith("column:"):
+        node = graph.nodes.get(node_id)
+        table = str((node.attrs.get("table") if node else None) or bare[len("column:") :].rsplit(".", 1)[0]).lower()
+        col = str((node.attrs.get("name") if node else None) or bare.rsplit(".", 1)[-1]).lower()
+        tid = f"{prefix}table:{table}"
+        if tid not in graph.nodes and f"{prefix}view:{table}" in graph.nodes:
+            tid = f"{prefix}view:{table}"
+        return tid, col
+    return node_id, None
+
+
+def _short_fn(graph: Graph, fid: str) -> str:
+    node = graph.nodes.get(fid)
+    if node is None:
+        return fid.split(":", 1)[-1]
+    if node.type == "queue":
+        return f"queue {node.attrs.get('name') or fid.split(':')[-1]}"
+    name = str(node.attrs.get("name") or fid.split(":", 1)[-1])
+    repo = node.attrs.get("repo")
+    return f"{repo}/{name}" if repo and "/" in fid.split(":", 1)[0] else name
+
+
+def _path_text(graph: Graph, entry: dict[str, Any]) -> str:
+    path = entry.get("path") or ([entry["fn"]] if entry.get("fn") else [])
+    return " → ".join(_short_fn(graph, p) for p in path)
+
+
+@dataclass
+class FlowHop:
+    depth: int
+    other: str  # table id on the other side
+    other_col: str | None
+    entry: dict[str, Any] | None  # column_map entry (None: table-level feeds)
+    edge: Any
+
+
+def trace(graph: Graph, node_id: str, direction: str, max_hops: int = MAX_TRACE_HOPS) -> list[FlowHop]:
+    """Where a column / table comes from (``direction="in"``) or goes to (``"out"``),
+    following ``feeds`` up to ``max_hops`` steps (cycles skipped)."""
+    feeds_by_to: dict[str, list[Any]] = defaultdict(list)
+    feeds_by_from: dict[str, list[Any]] = defaultdict(list)
+    for e in graph.edges.values():
+        if e.type == "feeds":
+            feeds_by_to[e.to_id].append(e)
+            feeds_by_from[e.from_id].append(e)
+    tid, col = _table_id_of(graph, node_id)
+    out: list[FlowHop] = []
+
+    def walk(t: str, c: str | None, depth: int, ancestors: frozenset[tuple[str, str | None]]) -> None:
+        if depth > max_hops or len(out) >= MAX_TRACE_LINES:
+            return
+        edges = feeds_by_to.get(t, []) if direction == "in" else feeds_by_from.get(t, [])
+        for e in sorted(edges, key=lambda x: (x.from_id, x.to_id)):
+            other = e.from_id if direction == "in" else e.to_id
+            entries = e.attrs.get("column_map") or []
+            mine = _name(graph, t)
+            if c is not None:
+                key = f"{mine}.{c}"
+                hits = [x for x in entries if (x["to"] if direction == "in" else x["from"]) == key]
+                for x in sorted(hits, key=lambda x: (-_conf_rank(x["confidence"]), x["from"], x["to"])):
+                    other_col = (x["from"] if direction == "in" else x["to"]).split(".", 1)[1]
+                    if (other, other_col) in ancestors or len(out) >= MAX_TRACE_LINES:
+                        continue
+                    out.append(FlowHop(depth, other, other_col, x, e))
+                    walk(other, other_col, depth + 1, ancestors | {(other, other_col)})
+                continue
+            if (other, None) in ancestors or len(out) >= MAX_TRACE_LINES:
+                continue
+            out.append(FlowHop(depth, other, None, None, e))
+            walk(other, None, depth + 1, ancestors | {(other, None)})
+
+    walk(tid, col, 1, frozenset({(tid, col)}))
+    return out
+
+
+def why_lines(graph: Graph, node_id: str) -> list[str]:
+    """``comes from`` / ``goes to`` sections for ``bizmap why`` (empty without feeds)."""
+    from bizmap.dbident import table_label
+
+    lines: list[str] = []
+    for title, direction in (("comes from (data flow)", "in"), ("goes to (data flow)", "out")):
+        hops = trace(graph, node_id, direction)
+        if not hops:
+            continue
+        lines.append("")
+        lines.append(f"{title}:")
+        for h in hops:
+            indent = "  " * h.depth
+            arrow = "←" if direction == "in" else "→"
+            target = table_label(graph, h.other) + (f".{h.other_col}" if h.other_col else "")
+            if h.entry is not None:
+                ev = h.entry.get("evidence") or {}
+                flags = [h.entry["confidence"]]
+                if h.entry.get("transform"):
+                    flags.append("transform")
+                if h.entry.get("match") == "name":
+                    flags.append("same name")
+                where = f", {ev.get('file')}:{ev.get('line')}" if ev.get("file") else ""
+                lines.append(f"{indent}{arrow} {target} via {_path_text(graph, h.entry)} ({', '.join(flags)}{where})")
+            else:
+                via = (h.edge.attrs.get("via") or [{}])[0]
+                ev = via.get("evidence") or {}
+                n_cols = len(h.edge.attrs.get("column_map") or [])
+                where = f", {ev.get('file')}:{ev.get('line')}" if ev.get("file") else ""
+                more = int(h.edge.attrs.get("via_total") or 1) - 1
+                extra = f" +{more} more" if more > 0 else ""
+                cols = f" · {n_cols} column{'s' if n_cols != 1 else ''} mapped" if n_cols else ""
+                lines.append(
+                    f"{indent}{arrow} {target} via {_path_text(graph, {'path': via.get('path')})}{extra} "
+                    f"({h.edge.confidence.value}{where}){cols}"
+                )
+    return lines
+
+
+def flow_summary(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Database → database pairs for ``bizmap report`` (None without feeds)."""
+    feeds = [e for e in data.get("edges") or [] if e.get("type") == "feeds"]
+    if not feeds:
+        return None
+    nodes = {n["id"]: n for n in data.get("nodes") or []}
+    default_db = data.get("database")
+
+    def db_of(nid: str) -> str:
+        node = nodes.get(nid) or {}
+        if node.get("db"):
+            return str(node["db"])
+        if default_db:
+            return str(default_db)
+        repo = node.get("repo") or (nid.split("/", 1)[0] if "/" in nid.split(":", 1)[0] else data.get("repo"))
+        return f"{repo or '?'} (repo)"
+
+    pairs: dict[tuple[str, str], dict[str, Any]] = {}
+    exact = heuristic = 0
+    with_cols = 0
+    for e in feeds:
+        key = (db_of(e["from"]), db_of(e["to"]))
+        row = pairs.setdefault(key, {"from": key[0], "to": key[1], "feeds": 0, "tables": set(), "columns": 0,
+                                     "exact": 0, "heuristic": 0, "feeds_exact": 0})
+        row["feeds"] += 1
+        row["tables"].add(e["to"])
+        if e.get("confidence") == "exact":
+            row["feeds_exact"] += 1
+        cmap = e.get("column_map") or []
+        if cmap:
+            with_cols += 1
+        for c in cmap:
+            row["columns"] += 1
+            if c.get("confidence") == "exact":
+                row["exact"] += 1
+                exact += 1
+            else:
+                row["heuristic"] += 1
+                heuristic += 1
+    rows = []
+    for key in sorted(pairs):
+        row = pairs[key]
+        row["tables"] = len(row["tables"])
+        rows.append(row)
+    return {
+        "feeds": len(feeds),
+        "feeds_with_columns": with_cols,
+        "columns": exact + heuristic,
+        "columns_exact": exact,
+        "columns_heuristic": heuristic,
+        "pairs": rows,
+    }
+
