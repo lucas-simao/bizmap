@@ -2431,7 +2431,7 @@ def _collect_wrappers(
             if url:
                 base = _join_route(base, url)
             if not base:
-                if recv and recv not in clients and method in CLIENT_HTTP_METHODS and url_node is not None:
+                if recv and not clients.get(recv) and method in CLIENT_HTTP_METHODS and url_node is not None:
                     if text(url_node) == path_param and _is_outer_fn_param(fn_node, recv):
                         wrappers[name] = JsHttpWrapper(
                             method=http_method, base="", path_index=path_i, method_index=method_i, recv=recv
