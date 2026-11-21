@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 
+from bizmap.dataflow import why_lines
 from bizmap.graph import Graph, collection_id, column_id, table_id, view_id
 
 
@@ -356,5 +357,6 @@ def format_why(graph: Graph, table_dot_column: str) -> str:
     dump("readers", runtime_r)
     if schema_w or schema_r:
         dump("defined/altered by", schema_w + schema_r)
+    lines.extend(why_lines(graph, cid))
     lines.append("")
     return "\n".join(lines)

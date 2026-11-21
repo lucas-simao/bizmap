@@ -15,6 +15,8 @@ import hashlib
 from collections import Counter
 from typing import Any
 
+from bizmap.dataflow import flow_summary
+
 DATA_PREFIXES = ("table:", "column:", "view:", "collection:")
 
 REACH_DEFINITION = (
@@ -260,7 +262,11 @@ def build_report(
     total_reach = sum(reaching.values())
     unknown_only = sum(1 for n in entrypoints if not reach[n["id"]] and n["id"] in unknown_reach)
 
-    return {
+    flow = flow_summary(data)
+    if flow is not None:
+        for row in flow["pairs"]:
+            row["from"], row["to"] = r(row["from"]), r(row["to"])
+    rep = {
         "version": data.get("version"),
         "redacted": redact,
         "repos": sorted(r(x) for x in (data.get("repos") or ([data["repo"]] if data.get("repo") else []))),
@@ -298,6 +304,9 @@ def build_report(
         "unresolved_calls": unresolved_calls,
         "unresolved_calls_by_reason": dict(sorted(call_reasons.items())),
     }
+    if flow is not None:
+        rep["data_flow"] = flow  # only when the graph has `feeds` edges
+    return rep
 
 
 _NO_DATA_LABELS = {
@@ -390,6 +399,24 @@ def format_report(rep: dict[str, Any], *, limit: int = 20) -> str:
             f"data links: direct ({direct or 'none'}), copied to callers/entrypoints {links.get('derived_call', 0)}, "
             f"via DB triggers {links.get('db_trigger', 0)}"
         )
+    flow = rep.get("data_flow")
+    if flow:
+        cols = flow["columns"]
+        pct = round(100.0 * flow["columns_exact"] / cols) if cols else 0
+        out.append("")
+        out.append(
+            f"data flow between databases: {flow['feeds']} feeds, {flow['feeds_with_columns']} with columns mapped, "
+            f"{cols} column {'mapping' if cols == 1 else 'mappings'} (exact {flow['columns_exact']}, "
+            f"heuristic {flow['columns_heuristic']}{f', {pct}% exact' if cols else ''})"
+        )
+        for row in flow["pairs"][:limit]:
+            out.append(
+                f"  {row['from']} -> {row['to']}: {row['tables']} {'table' if row['tables'] == 1 else 'tables'}, "
+                f"{row['columns']} {'column' if row['columns'] == 1 else 'columns'} "
+                f"(exact {row['exact']}, heuristic {row['heuristic']})"
+            )
+        if len(flow["pairs"]) > limit:
+            out.append(f"  … {len(flow['pairs']) - limit} more (use --json)")
     by_reason = rep.get("unresolved_calls_by_reason") or {}
     detail = ", ".join(f"{k} {v}" for k, v in by_reason.items())
     out.append(f"unresolved calls: {rep['unresolved_calls']}" + (f"  ({detail})" if detail else ""))
