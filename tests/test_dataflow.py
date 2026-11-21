@@ -648,6 +648,45 @@ def test_report_without_feeds_is_unchanged(tmp_path: Path) -> None:
     assert "data_flow" not in build_report(g.to_dict())
 
 
+def test_impact_lists_downstream_columns(tmp_path: Path) -> None:
+    from bizmap.impact import compute_impact, render_markdown
+
+    g = _go_graph(tmp_path)
+    line = _line(GO_SYNC, "s := Summary")
+    diff = f"diff --git a/sync/orders.go b/sync/orders.go\n--- a/sync/orders.go\n+++ b/sync/orders.go\n@@ -{line},1 +{line},1 @@\n-x\n+y\n"
+    imp = compute_impact(g, diff)
+    assert [(d["from"], d["to"], d["confidence"]) for d in imp.downstream] == [
+        ("orders_db.pedidos.cliente_id", "summary_db.resumo_pedido.cliente", "exact"),
+        ("orders_db.pedidos.criado_em", "summary_db.resumo_pedido.data_pedido", "exact"),
+        ("orders_db.pedidos.id", "summary_db.resumo_pedido.pedido_id", "exact"),
+        ("orders_db.pedidos.valor_centavos", "summary_db.resumo_pedido.total", "exact"),
+    ]
+    assert imp.to_dict()["downstream"]
+    md = render_markdown(g, imp)
+    assert "<b>Downstream</b> · 4 destinations fed from the changed data" in md
+    assert "| `summary_db.resumo_pedido.total` | `orders_db.pedidos.valor_centavos` | `sync.SyncOrders` | exact |" in md
+
+
+def test_impact_of_a_writer_of_the_source_column(tmp_path: Path) -> None:
+    from bizmap.impact import compute_impact
+
+    g = _go_graph(tmp_path)
+    g.add_node("function:orders.Pay", "function", name="orders.Pay", evidence={"file": "orders/pay.go", "line": 3}, end_line=9)
+    g.add_edge("writes", "function:orders.Pay", "column:pedidos.valor_centavos", evidence=Evidence("orders/pay.go", 5, "orders.Pay"))
+    diff = "diff --git a/orders/pay.go b/orders/pay.go\n--- a/orders/pay.go\n+++ b/orders/pay.go\n@@ -5,1 +5,1 @@\n-x\n+y\n"
+    imp = compute_impact(g, diff)
+    assert {(d["from"], d["to"]) for d in imp.downstream} == {
+        ("orders_db.pedidos.valor_centavos", "summary_db.resumo_pedido.total"),
+        ("orders_db.pedidos.valor_centavos", "orders_db.resumo_mensal.receita"),
+    }
+
+
+def test_impact_without_feeds_has_no_downstream_key(tmp_path: Path) -> None:
+    from bizmap.impact import compute_impact
+
+    assert "downstream" not in compute_impact(Graph(), "").to_dict()
+
+
 def test_graph_without_flow_is_unchanged(tmp_path: Path) -> None:
     """Same graph with and without the pass when nothing feeds anything."""
     f = "svc/svc.go"

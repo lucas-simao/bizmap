@@ -2589,3 +2589,53 @@ def flow_summary(data: dict[str, Any]) -> dict[str, Any] | None:
         "pairs": rows,
     }
 
+
+def downstream(graph: Graph, fids: list[str], data_ids: list[str], limit: int = 200) -> list[dict[str, Any]]:
+    """Destination tables / columns a change reaches through ``feeds``.
+
+    A changed function that is on a ``feeds`` path (the sync), or that reads /
+    writes a source column / table, affects what that flow writes downstream
+    (followed up to MAX_TRACE_HOPS)."""
+    from bizmap.dbident import table_label
+
+    fset = set(fids)
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add(src_label: str, hop: FlowHop, cause: str) -> None:
+        to = table_label(graph, hop.other) + (f".{hop.other_col}" if hop.other_col else "")
+        key = (to, src_label)
+        if key in out:
+            return
+        conf = hop.entry["confidence"] if hop.entry else hop.edge.confidence.value
+        via = _path_text(graph, hop.entry) if hop.entry else _path_text(graph, {"path": (hop.edge.attrs.get("via") or [{}])[0].get("path")})
+        out[key] = {"from": src_label, "to": to, "via": via, "confidence": conf, "because": cause, "hops": hop.depth}
+
+    for e in graph.edges.values():
+        if e.type != "feeds":
+            continue
+        on_path = {
+            p for v in e.attrs.get("via") or [] for p in v.get("path") or []
+        } | {c.get("fn") for c in e.attrs.get("column_map") or []}
+        if not (on_path & fset):
+            continue
+        src_label = table_label(graph, e.from_id)
+        entries = [c for c in e.attrs.get("column_map") or [] if (set(c.get("path") or [c.get("fn")]) & fset)]
+        if not entries:
+            entries = list(e.attrs.get("column_map") or [])
+        if entries:
+            for c in entries:
+                hop = FlowHop(1, e.to_id, c["to"].split(".", 1)[1], c, e)
+                add(f"{table_label(graph, e.from_id)}.{c['from'].split('.', 1)[1]}", hop, "changed sync function")
+                for h2 in trace(graph, f"{e.to_id.rsplit('table:', 1)[0]}column:{c['to']}" if "table:" in e.to_id else e.to_id, "out"):
+                    add(src_label, FlowHop(h2.depth + 1, h2.other, h2.other_col, h2.entry, h2.edge), "changed sync function")
+        else:
+            add(src_label, FlowHop(1, e.to_id, None, None, e), "changed sync function")
+    for did in data_ids:
+        tid, col = _table_id_of(graph, did)
+        if not any(e.type == "feeds" and e.from_id == tid for e in graph.edges.values()):
+            continue
+        src = table_label(graph, tid) + (f".{col}" if col else "")
+        for h in trace(graph, did, "out"):
+            add(src, h, "changed source access")
+    rows = sorted(out.values(), key=lambda r: (r["hops"], r["to"], r["from"]))
+    return rows[:limit] if limit else rows
