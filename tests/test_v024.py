@@ -38,7 +38,7 @@ def _http_eps(graph) -> set[tuple[str, str]]:
 
 
 def test_graph_version() -> None:
-    assert GRAPH_VERSION == "0.11.0"
+    assert GRAPH_VERSION == "0.12.0"
 
 
 def test_chained_hono_routes(tmp_path: Path) -> None:
@@ -456,7 +456,7 @@ def submit():
     assert r2.exit_code == 0, r2.output
     assert r3.exit_code == 0, r3.output
     data = json.loads(merged_path.read_text(encoding="utf-8"))
-    assert data["version"] == "0.11.0"
+    assert data["version"] == "0.12.0"
     http_edges = [e for e in data["edges"] if e["type"] == "calls_http"]
     assert http_edges, data["edges"][:12]
     assert any("/api/orders" in (e.get("to") or "") for e in http_edges)
