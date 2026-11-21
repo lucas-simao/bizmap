@@ -1,0 +1,5345 @@
+{
+ "database": "shop",
+ "edges": [
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:GET:/api/v1/orders",
+   "id": "triggers:api/entrypoint:http:GET:/api/v1/orders->api/function:handlers.Orders.List",
+   "to": "api/function:handlers.Orders.List",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.List",
+   "id": "calls:api/function:handlers.Orders.List->api/function:validate.Orders.List",
+   "to": "api/function:validate.Orders.List",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.List",
+   "id": "calls:api/function:handlers.Orders.List->api/function:service.Orders.List",
+   "to": "api/function:service.Orders.List",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Orders.List",
+   "id": "calls:api/function:service.Orders.List->api/function:repository.Orders.List",
+   "to": "api/function:repository.Orders.List",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.List",
+   "id": "reads:api/function:repository.Orders.List->column:orders.id",
+   "ops": [],
+   "to": "column:orders.id",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.List",
+   "id": "reads:api/function:repository.Orders.List->column:orders.status",
+   "ops": [],
+   "to": "column:orders.status",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.List",
+   "id": "reads:api/function:repository.Orders.List->column:orders.total_cents",
+   "ops": [],
+   "to": "column:orders.total_cents",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Orders.List",
+   "id": "reads:api/function:service.Orders.List->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Orders.List",
+   "id": "reads:api/function:handlers.Orders.List->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:GET:/api/v1/orders",
+   "id": "reads:api/entrypoint:http:GET:/api/v1/orders->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.List",
+   "id": "calls:api/function:handlers.Orders.List->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:POST:/api/v1/orders",
+   "id": "triggers:api/entrypoint:http:POST:/api/v1/orders->api/function:handlers.Orders.Create",
+   "to": "api/function:handlers.Orders.Create",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.Create",
+   "id": "calls:api/function:handlers.Orders.Create->api/function:validate.Orders.Create",
+   "to": "api/function:validate.Orders.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.Create",
+   "id": "calls:api/function:handlers.Orders.Create->api/function:service.Orders.Create",
+   "to": "api/function:service.Orders.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Orders.Create",
+   "id": "calls:api/function:service.Orders.Create->api/function:repository.Orders.Create",
+   "to": "api/function:repository.Orders.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.Create",
+   "id": "writes:api/function:repository.Orders.Create->column:orders.user_id",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:orders.user_id",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.Create",
+   "id": "writes:api/function:repository.Orders.Create->column:orders.status",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:orders.status",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.Create",
+   "id": "writes:api/function:repository.Orders.Create->column:orders.total_cents",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:orders.total_cents",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Orders.Create",
+   "id": "writes:api/function:service.Orders.Create->table:orders",
+   "to": "table:orders",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Orders.Create",
+   "id": "writes:api/function:handlers.Orders.Create->table:orders",
+   "to": "table:orders",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/orders",
+   "id": "writes:api/entrypoint:http:POST:/api/v1/orders->table:orders",
+   "to": "table:orders",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.Create",
+   "id": "writes:api/function:repository.Orders.Create->column:order_items.order_id",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:order_items.order_id",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.Create",
+   "id": "writes:api/function:repository.Orders.Create->column:order_items.product_id",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:order_items.product_id",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.Create",
+   "id": "writes:api/function:repository.Orders.Create->column:order_items.qty",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:order_items.qty",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Orders.Create",
+   "id": "writes:api/function:service.Orders.Create->table:order_items",
+   "to": "table:order_items",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Orders.Create",
+   "id": "writes:api/function:handlers.Orders.Create->table:order_items",
+   "to": "table:order_items",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/orders",
+   "id": "writes:api/entrypoint:http:POST:/api/v1/orders->table:order_items",
+   "to": "table:order_items",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.Create",
+   "id": "reads:api/function:repository.Orders.Create->column:products.price_cents",
+   "ops": [],
+   "to": "column:products.price_cents",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Orders.Create",
+   "id": "reads:api/function:service.Orders.Create->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Orders.Create",
+   "id": "reads:api/function:handlers.Orders.Create->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/orders",
+   "id": "reads:api/entrypoint:http:POST:/api/v1/orders->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.Create",
+   "id": "calls:api/function:handlers.Orders.Create->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:GET:/api/v1/orders/:id",
+   "id": "triggers:api/entrypoint:http:GET:/api/v1/orders/:id->api/function:handlers.Orders.Get",
+   "to": "api/function:handlers.Orders.Get",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.Get",
+   "id": "calls:api/function:handlers.Orders.Get->api/function:validate.Orders.Get",
+   "to": "api/function:validate.Orders.Get",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.Get",
+   "id": "calls:api/function:handlers.Orders.Get->api/function:service.Orders.Get",
+   "to": "api/function:service.Orders.Get",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Orders.Get",
+   "id": "calls:api/function:service.Orders.Get->api/function:repository.Orders.Get",
+   "to": "api/function:repository.Orders.Get",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.Get",
+   "id": "reads:api/function:repository.Orders.Get->column:orders.id",
+   "ops": [],
+   "to": "column:orders.id",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.Get",
+   "id": "reads:api/function:repository.Orders.Get->column:orders.status",
+   "ops": [],
+   "to": "column:orders.status",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Orders.Get",
+   "id": "reads:api/function:service.Orders.Get->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Orders.Get",
+   "id": "reads:api/function:handlers.Orders.Get->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:GET:/api/v1/orders/:id",
+   "id": "reads:api/entrypoint:http:GET:/api/v1/orders/:id->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.Get",
+   "id": "reads:api/function:repository.Orders.Get->column:order_items.qty",
+   "ops": [],
+   "to": "column:order_items.qty",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Orders.Get",
+   "id": "reads:api/function:service.Orders.Get->table:order_items",
+   "to": "table:order_items",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Orders.Get",
+   "id": "reads:api/function:handlers.Orders.Get->table:order_items",
+   "to": "table:order_items",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:GET:/api/v1/orders/:id",
+   "id": "reads:api/entrypoint:http:GET:/api/v1/orders/:id->table:order_items",
+   "to": "table:order_items",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.Get",
+   "id": "calls:api/function:handlers.Orders.Get->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:POST:/api/v1/orders/:id/paid",
+   "id": "triggers:api/entrypoint:http:POST:/api/v1/orders/:id/paid->api/function:handlers.Orders.MarkPaid",
+   "to": "api/function:handlers.Orders.MarkPaid",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.MarkPaid",
+   "id": "calls:api/function:handlers.Orders.MarkPaid->api/function:validate.Orders.MarkPaid",
+   "to": "api/function:validate.Orders.MarkPaid",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.MarkPaid",
+   "id": "calls:api/function:handlers.Orders.MarkPaid->api/function:service.Orders.MarkPaid",
+   "to": "api/function:service.Orders.MarkPaid",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Orders.MarkPaid",
+   "id": "calls:api/function:service.Orders.MarkPaid->api/function:repository.Orders.MarkPaid",
+   "to": "api/function:repository.Orders.MarkPaid",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.MarkPaid",
+   "id": "writes:api/function:repository.Orders.MarkPaid->column:orders.status",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:orders.status",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.MarkPaid",
+   "id": "writes:api/function:repository.Orders.MarkPaid->column:orders.paid_at",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:orders.paid_at",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Orders.MarkPaid",
+   "id": "writes:api/function:service.Orders.MarkPaid->table:orders",
+   "to": "table:orders",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Orders.MarkPaid",
+   "id": "writes:api/function:handlers.Orders.MarkPaid->table:orders",
+   "to": "table:orders",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/orders/:id/paid",
+   "id": "writes:api/entrypoint:http:POST:/api/v1/orders/:id/paid->table:orders",
+   "to": "table:orders",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.MarkPaid",
+   "id": "writes:api/function:repository.Orders.MarkPaid->column:audit_log.action",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:audit_log.action",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Orders.MarkPaid",
+   "id": "writes:api/function:service.Orders.MarkPaid->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Orders.MarkPaid",
+   "id": "writes:api/function:handlers.Orders.MarkPaid->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/orders/:id/paid",
+   "id": "writes:api/entrypoint:http:POST:/api/v1/orders/:id/paid->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.MarkPaid",
+   "id": "calls:api/function:handlers.Orders.MarkPaid->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:POST:/api/v1/orders/:id/cancel",
+   "id": "triggers:api/entrypoint:http:POST:/api/v1/orders/:id/cancel->api/function:handlers.Orders.Cancel",
+   "to": "api/function:handlers.Orders.Cancel",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.Cancel",
+   "id": "calls:api/function:handlers.Orders.Cancel->api/function:validate.Orders.Cancel",
+   "to": "api/function:validate.Orders.Cancel",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.Cancel",
+   "id": "calls:api/function:handlers.Orders.Cancel->api/function:service.Orders.Cancel",
+   "to": "api/function:service.Orders.Cancel",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Orders.Cancel",
+   "id": "calls:api/function:service.Orders.Cancel->api/function:repository.Orders.Cancel",
+   "to": "api/function:repository.Orders.Cancel",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.Cancel",
+   "id": "writes:api/function:repository.Orders.Cancel->column:orders.status",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:orders.status",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Orders.Cancel",
+   "id": "writes:api/function:service.Orders.Cancel->table:orders",
+   "to": "table:orders",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Orders.Cancel",
+   "id": "writes:api/function:handlers.Orders.Cancel->table:orders",
+   "to": "table:orders",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/orders/:id/cancel",
+   "id": "writes:api/entrypoint:http:POST:/api/v1/orders/:id/cancel->table:orders",
+   "to": "table:orders",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Orders.Cancel",
+   "id": "writes:api/function:repository.Orders.Cancel->column:inventory.reserved",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:inventory.reserved",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Orders.Cancel",
+   "id": "writes:api/function:service.Orders.Cancel->table:inventory",
+   "to": "table:inventory",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Orders.Cancel",
+   "id": "writes:api/function:handlers.Orders.Cancel->table:inventory",
+   "to": "table:inventory",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/orders/:id/cancel",
+   "id": "writes:api/entrypoint:http:POST:/api/v1/orders/:id/cancel->table:inventory",
+   "to": "table:inventory",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Orders.Cancel",
+   "id": "calls:api/function:handlers.Orders.Cancel->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:GET:/api/v1/users/me",
+   "id": "triggers:api/entrypoint:http:GET:/api/v1/users/me->api/function:handlers.Users.Me",
+   "to": "api/function:handlers.Users.Me",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Users.Me",
+   "id": "calls:api/function:handlers.Users.Me->api/function:validate.Users.Me",
+   "to": "api/function:validate.Users.Me",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Users.Me",
+   "id": "calls:api/function:handlers.Users.Me->api/function:service.Users.Me",
+   "to": "api/function:service.Users.Me",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Users.Me",
+   "id": "calls:api/function:service.Users.Me->api/function:repository.Users.Me",
+   "to": "api/function:repository.Users.Me",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Users.Me",
+   "id": "reads:api/function:repository.Users.Me->column:users.id",
+   "ops": [],
+   "to": "column:users.id",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Users.Me",
+   "id": "reads:api/function:repository.Users.Me->column:users.email",
+   "ops": [],
+   "to": "column:users.email",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Users.Me",
+   "id": "reads:api/function:repository.Users.Me->column:users.name",
+   "ops": [],
+   "to": "column:users.name",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Users.Me",
+   "id": "reads:api/function:service.Users.Me->table:users",
+   "to": "table:users",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Users.Me",
+   "id": "reads:api/function:handlers.Users.Me->table:users",
+   "to": "table:users",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:GET:/api/v1/users/me",
+   "id": "reads:api/entrypoint:http:GET:/api/v1/users/me->table:users",
+   "to": "table:users",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Users.Me",
+   "id": "calls:api/function:handlers.Users.Me->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:POST:/api/v1/users",
+   "id": "triggers:api/entrypoint:http:POST:/api/v1/users->api/function:handlers.Users.Create",
+   "to": "api/function:handlers.Users.Create",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Users.Create",
+   "id": "calls:api/function:handlers.Users.Create->api/function:validate.Users.Create",
+   "to": "api/function:validate.Users.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Users.Create",
+   "id": "calls:api/function:handlers.Users.Create->api/function:service.Users.Create",
+   "to": "api/function:service.Users.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Users.Create",
+   "id": "calls:api/function:service.Users.Create->api/function:repository.Users.Create",
+   "to": "api/function:repository.Users.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Users.Create",
+   "id": "writes:api/function:repository.Users.Create->column:users.email",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:users.email",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Users.Create",
+   "id": "writes:api/function:repository.Users.Create->column:users.name",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:users.name",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Users.Create",
+   "id": "writes:api/function:service.Users.Create->table:users",
+   "to": "table:users",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Users.Create",
+   "id": "writes:api/function:handlers.Users.Create->table:users",
+   "to": "table:users",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/users",
+   "id": "writes:api/entrypoint:http:POST:/api/v1/users->table:users",
+   "to": "table:users",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Users.Create",
+   "id": "calls:api/function:handlers.Users.Create->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:PATCH:/api/v1/users/:id",
+   "id": "triggers:api/entrypoint:http:PATCH:/api/v1/users/:id->api/function:handlers.Users.Update",
+   "to": "api/function:handlers.Users.Update",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Users.Update",
+   "id": "calls:api/function:handlers.Users.Update->api/function:validate.Users.Update",
+   "to": "api/function:validate.Users.Update",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Users.Update",
+   "id": "calls:api/function:handlers.Users.Update->api/function:service.Users.Update",
+   "to": "api/function:service.Users.Update",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Users.Update",
+   "id": "calls:api/function:service.Users.Update->api/function:repository.Users.Update",
+   "to": "api/function:repository.Users.Update",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Users.Update",
+   "id": "writes:api/function:repository.Users.Update->column:users.name",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:users.name",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Users.Update",
+   "id": "writes:api/function:service.Users.Update->table:users",
+   "to": "table:users",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Users.Update",
+   "id": "writes:api/function:handlers.Users.Update->table:users",
+   "to": "table:users",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:PATCH:/api/v1/users/:id",
+   "id": "writes:api/entrypoint:http:PATCH:/api/v1/users/:id->table:users",
+   "to": "table:users",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Users.Update",
+   "id": "calls:api/function:handlers.Users.Update->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:DELETE:/api/v1/users/:id",
+   "id": "triggers:api/entrypoint:http:DELETE:/api/v1/users/:id->api/function:handlers.Users.Delete",
+   "to": "api/function:handlers.Users.Delete",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Users.Delete",
+   "id": "calls:api/function:handlers.Users.Delete->api/function:validate.Users.Delete",
+   "to": "api/function:validate.Users.Delete",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Users.Delete",
+   "id": "calls:api/function:handlers.Users.Delete->api/function:service.Users.Delete",
+   "to": "api/function:service.Users.Delete",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Users.Delete",
+   "id": "calls:api/function:service.Users.Delete->api/function:repository.Users.Delete",
+   "to": "api/function:repository.Users.Delete",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Users.Delete",
+   "id": "writes:api/function:repository.Users.Delete->column:users.id",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:users.id",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Users.Delete",
+   "id": "writes:api/function:service.Users.Delete->table:users",
+   "to": "table:users",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Users.Delete",
+   "id": "writes:api/function:handlers.Users.Delete->table:users",
+   "to": "table:users",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:DELETE:/api/v1/users/:id",
+   "id": "writes:api/entrypoint:http:DELETE:/api/v1/users/:id->table:users",
+   "to": "table:users",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Users.Delete",
+   "id": "writes:api/function:repository.Users.Delete->column:audit_log.action",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:audit_log.action",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Users.Delete",
+   "id": "writes:api/function:service.Users.Delete->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Users.Delete",
+   "id": "writes:api/function:handlers.Users.Delete->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:DELETE:/api/v1/users/:id",
+   "id": "writes:api/entrypoint:http:DELETE:/api/v1/users/:id->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Users.Delete",
+   "id": "calls:api/function:handlers.Users.Delete->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:GET:/api/v1/projects",
+   "id": "triggers:api/entrypoint:http:GET:/api/v1/projects->api/function:handlers.Projects.List",
+   "to": "api/function:handlers.Projects.List",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Projects.List",
+   "id": "calls:api/function:handlers.Projects.List->api/function:validate.Projects.List",
+   "to": "api/function:validate.Projects.List",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Projects.List",
+   "id": "calls:api/function:handlers.Projects.List->api/function:service.Projects.List",
+   "to": "api/function:service.Projects.List",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Projects.List",
+   "id": "calls:api/function:service.Projects.List->api/function:repository.Projects.List",
+   "to": "api/function:repository.Projects.List",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Projects.List",
+   "id": "reads:api/function:repository.Projects.List->column:projects.id",
+   "ops": [],
+   "to": "column:projects.id",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Projects.List",
+   "id": "reads:api/function:repository.Projects.List->column:projects.name",
+   "ops": [],
+   "to": "column:projects.name",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Projects.List",
+   "id": "reads:api/function:service.Projects.List->table:projects",
+   "to": "table:projects",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Projects.List",
+   "id": "reads:api/function:handlers.Projects.List->table:projects",
+   "to": "table:projects",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:GET:/api/v1/projects",
+   "id": "reads:api/entrypoint:http:GET:/api/v1/projects->table:projects",
+   "to": "table:projects",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Projects.List",
+   "id": "calls:api/function:handlers.Projects.List->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:POST:/api/v1/projects",
+   "id": "triggers:api/entrypoint:http:POST:/api/v1/projects->api/function:handlers.Projects.Create",
+   "to": "api/function:handlers.Projects.Create",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Projects.Create",
+   "id": "calls:api/function:handlers.Projects.Create->api/function:validate.Projects.Create",
+   "to": "api/function:validate.Projects.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Projects.Create",
+   "id": "calls:api/function:handlers.Projects.Create->api/function:service.Projects.Create",
+   "to": "api/function:service.Projects.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Projects.Create",
+   "id": "calls:api/function:service.Projects.Create->api/function:repository.Projects.Create",
+   "to": "api/function:repository.Projects.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Projects.Create",
+   "id": "writes:api/function:repository.Projects.Create->column:projects.owner_id",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:projects.owner_id",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Projects.Create",
+   "id": "writes:api/function:repository.Projects.Create->column:projects.name",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:projects.name",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Projects.Create",
+   "id": "writes:api/function:service.Projects.Create->table:projects",
+   "to": "table:projects",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Projects.Create",
+   "id": "writes:api/function:handlers.Projects.Create->table:projects",
+   "to": "table:projects",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/projects",
+   "id": "writes:api/entrypoint:http:POST:/api/v1/projects->table:projects",
+   "to": "table:projects",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Projects.Create",
+   "id": "calls:api/function:handlers.Projects.Create->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:GET:/api/v1/projects/:id",
+   "id": "triggers:api/entrypoint:http:GET:/api/v1/projects/:id->api/function:handlers.Projects.Get",
+   "to": "api/function:handlers.Projects.Get",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Projects.Get",
+   "id": "calls:api/function:handlers.Projects.Get->api/function:validate.Projects.Get",
+   "to": "api/function:validate.Projects.Get",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Projects.Get",
+   "id": "calls:api/function:handlers.Projects.Get->api/function:service.Projects.Get",
+   "to": "api/function:service.Projects.Get",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Projects.Get",
+   "id": "calls:api/function:service.Projects.Get->api/function:repository.Projects.Get",
+   "to": "api/function:repository.Projects.Get",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Projects.Get",
+   "id": "reads:api/function:repository.Projects.Get->column:projects.id",
+   "ops": [],
+   "to": "column:projects.id",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Projects.Get",
+   "id": "reads:api/function:repository.Projects.Get->column:projects.name",
+   "ops": [],
+   "to": "column:projects.name",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Projects.Get",
+   "id": "reads:api/function:service.Projects.Get->table:projects",
+   "to": "table:projects",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Projects.Get",
+   "id": "reads:api/function:handlers.Projects.Get->table:projects",
+   "to": "table:projects",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:GET:/api/v1/projects/:id",
+   "id": "reads:api/entrypoint:http:GET:/api/v1/projects/:id->table:projects",
+   "to": "table:projects",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Projects.Get",
+   "id": "reads:api/function:repository.Projects.Get->column:tasks.title",
+   "ops": [],
+   "to": "column:tasks.title",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Projects.Get",
+   "id": "reads:api/function:repository.Projects.Get->column:tasks.done",
+   "ops": [],
+   "to": "column:tasks.done",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Projects.Get",
+   "id": "reads:api/function:service.Projects.Get->table:tasks",
+   "to": "table:tasks",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Projects.Get",
+   "id": "reads:api/function:handlers.Projects.Get->table:tasks",
+   "to": "table:tasks",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:GET:/api/v1/projects/:id",
+   "id": "reads:api/entrypoint:http:GET:/api/v1/projects/:id->table:tasks",
+   "to": "table:tasks",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Projects.Get",
+   "id": "calls:api/function:handlers.Projects.Get->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:POST:/api/v1/projects/:id/archive",
+   "id": "triggers:api/entrypoint:http:POST:/api/v1/projects/:id/archive->api/function:handlers.Projects.Archive",
+   "to": "api/function:handlers.Projects.Archive",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Projects.Archive",
+   "id": "calls:api/function:handlers.Projects.Archive->api/function:validate.Projects.Archive",
+   "to": "api/function:validate.Projects.Archive",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Projects.Archive",
+   "id": "calls:api/function:handlers.Projects.Archive->api/function:service.Projects.Archive",
+   "to": "api/function:service.Projects.Archive",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Projects.Archive",
+   "id": "calls:api/function:service.Projects.Archive->api/function:repository.Projects.Archive",
+   "to": "api/function:repository.Projects.Archive",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Projects.Archive",
+   "id": "writes:api/function:repository.Projects.Archive->column:projects.archived_at",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:projects.archived_at",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Projects.Archive",
+   "id": "writes:api/function:service.Projects.Archive->table:projects",
+   "to": "table:projects",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Projects.Archive",
+   "id": "writes:api/function:handlers.Projects.Archive->table:projects",
+   "to": "table:projects",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/projects/:id/archive",
+   "id": "writes:api/entrypoint:http:POST:/api/v1/projects/:id/archive->table:projects",
+   "to": "table:projects",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Projects.Archive",
+   "id": "writes:api/function:repository.Projects.Archive->column:audit_log.action",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:audit_log.action",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Projects.Archive",
+   "id": "writes:api/function:repository.Projects.Archive->column:audit_log.entity",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:audit_log.entity",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Projects.Archive",
+   "id": "writes:api/function:service.Projects.Archive->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Projects.Archive",
+   "id": "writes:api/function:handlers.Projects.Archive->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/projects/:id/archive",
+   "id": "writes:api/entrypoint:http:POST:/api/v1/projects/:id/archive->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Projects.Archive",
+   "id": "calls:api/function:handlers.Projects.Archive->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:GET:/api/v1/projects/:id/tasks",
+   "id": "triggers:api/entrypoint:http:GET:/api/v1/projects/:id/tasks->api/function:handlers.Tasks.List",
+   "to": "api/function:handlers.Tasks.List",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Tasks.List",
+   "id": "calls:api/function:handlers.Tasks.List->api/function:validate.Tasks.List",
+   "to": "api/function:validate.Tasks.List",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Tasks.List",
+   "id": "calls:api/function:handlers.Tasks.List->api/function:service.Tasks.List",
+   "to": "api/function:service.Tasks.List",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Tasks.List",
+   "id": "calls:api/function:service.Tasks.List->api/function:repository.Tasks.List",
+   "to": "api/function:repository.Tasks.List",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Tasks.List",
+   "id": "reads:api/function:repository.Tasks.List->column:tasks.id",
+   "ops": [],
+   "to": "column:tasks.id",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Tasks.List",
+   "id": "reads:api/function:repository.Tasks.List->column:tasks.title",
+   "ops": [],
+   "to": "column:tasks.title",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Tasks.List",
+   "id": "reads:api/function:repository.Tasks.List->column:tasks.done",
+   "ops": [],
+   "to": "column:tasks.done",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Tasks.List",
+   "id": "reads:api/function:service.Tasks.List->table:tasks",
+   "to": "table:tasks",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Tasks.List",
+   "id": "reads:api/function:handlers.Tasks.List->table:tasks",
+   "to": "table:tasks",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:GET:/api/v1/projects/:id/tasks",
+   "id": "reads:api/entrypoint:http:GET:/api/v1/projects/:id/tasks->table:tasks",
+   "to": "table:tasks",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Tasks.List",
+   "id": "calls:api/function:handlers.Tasks.List->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:POST:/api/v1/projects/:id/tasks",
+   "id": "triggers:api/entrypoint:http:POST:/api/v1/projects/:id/tasks->api/function:handlers.Tasks.Create",
+   "to": "api/function:handlers.Tasks.Create",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Tasks.Create",
+   "id": "calls:api/function:handlers.Tasks.Create->api/function:validate.Tasks.Create",
+   "to": "api/function:validate.Tasks.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Tasks.Create",
+   "id": "calls:api/function:handlers.Tasks.Create->api/function:service.Tasks.Create",
+   "to": "api/function:service.Tasks.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Tasks.Create",
+   "id": "calls:api/function:service.Tasks.Create->api/function:repository.Tasks.Create",
+   "to": "api/function:repository.Tasks.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Tasks.Create",
+   "id": "writes:api/function:repository.Tasks.Create->column:tasks.project_id",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:tasks.project_id",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Tasks.Create",
+   "id": "writes:api/function:repository.Tasks.Create->column:tasks.title",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:tasks.title",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Tasks.Create",
+   "id": "writes:api/function:service.Tasks.Create->table:tasks",
+   "to": "table:tasks",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Tasks.Create",
+   "id": "writes:api/function:handlers.Tasks.Create->table:tasks",
+   "to": "table:tasks",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/projects/:id/tasks",
+   "id": "writes:api/entrypoint:http:POST:/api/v1/projects/:id/tasks->table:tasks",
+   "to": "table:tasks",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Tasks.Create",
+   "id": "calls:api/function:handlers.Tasks.Create->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:PATCH:/api/v1/projects/:id/tasks/:taskId",
+   "id": "triggers:api/entrypoint:http:PATCH:/api/v1/projects/:id/tasks/:taskId->api/function:handlers.Tasks.Toggle",
+   "to": "api/function:handlers.Tasks.Toggle",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Tasks.Toggle",
+   "id": "calls:api/function:handlers.Tasks.Toggle->api/function:validate.Tasks.Toggle",
+   "to": "api/function:validate.Tasks.Toggle",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Tasks.Toggle",
+   "id": "calls:api/function:handlers.Tasks.Toggle->api/function:service.Tasks.Toggle",
+   "to": "api/function:service.Tasks.Toggle",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Tasks.Toggle",
+   "id": "calls:api/function:service.Tasks.Toggle->api/function:repository.Tasks.Toggle",
+   "to": "api/function:repository.Tasks.Toggle",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Tasks.Toggle",
+   "id": "writes:api/function:repository.Tasks.Toggle->column:tasks.done",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:tasks.done",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Tasks.Toggle",
+   "id": "writes:api/function:service.Tasks.Toggle->table:tasks",
+   "to": "table:tasks",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Tasks.Toggle",
+   "id": "writes:api/function:handlers.Tasks.Toggle->table:tasks",
+   "to": "table:tasks",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:PATCH:/api/v1/projects/:id/tasks/:taskId",
+   "id": "writes:api/entrypoint:http:PATCH:/api/v1/projects/:id/tasks/:taskId->table:tasks",
+   "to": "table:tasks",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Tasks.Toggle",
+   "id": "calls:api/function:handlers.Tasks.Toggle->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:GET:/api/v1/cart",
+   "id": "triggers:api/entrypoint:http:GET:/api/v1/cart->api/function:handlers.Cart.Get",
+   "to": "api/function:handlers.Cart.Get",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Cart.Get",
+   "id": "calls:api/function:handlers.Cart.Get->api/function:validate.Cart.Get",
+   "to": "api/function:validate.Cart.Get",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Cart.Get",
+   "id": "calls:api/function:handlers.Cart.Get->api/function:service.Cart.Get",
+   "to": "api/function:service.Cart.Get",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Cart.Get",
+   "id": "calls:api/function:service.Cart.Get->api/function:repository.Cart.Get",
+   "to": "api/function:repository.Cart.Get",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Cart.Get",
+   "id": "reads:api/function:repository.Cart.Get->column:products.sku",
+   "ops": [],
+   "to": "column:products.sku",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Cart.Get",
+   "id": "reads:api/function:repository.Cart.Get->column:products.name",
+   "ops": [],
+   "to": "column:products.name",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Cart.Get",
+   "id": "reads:api/function:repository.Cart.Get->column:products.price_cents",
+   "ops": [],
+   "to": "column:products.price_cents",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Cart.Get",
+   "id": "reads:api/function:service.Cart.Get->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Cart.Get",
+   "id": "reads:api/function:handlers.Cart.Get->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:GET:/api/v1/cart",
+   "id": "reads:api/entrypoint:http:GET:/api/v1/cart->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Cart.Get",
+   "id": "calls:api/function:handlers.Cart.Get->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:POST:/api/v1/cart/items",
+   "id": "triggers:api/entrypoint:http:POST:/api/v1/cart/items->api/function:handlers.Cart.Add",
+   "to": "api/function:handlers.Cart.Add",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Cart.Add",
+   "id": "calls:api/function:handlers.Cart.Add->api/function:validate.Cart.Add",
+   "to": "api/function:validate.Cart.Add",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Cart.Add",
+   "id": "calls:api/function:handlers.Cart.Add->api/function:service.Cart.Add",
+   "to": "api/function:service.Cart.Add",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Cart.Add",
+   "id": "calls:api/function:service.Cart.Add->api/function:repository.Cart.Add",
+   "to": "api/function:repository.Cart.Add",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Cart.Add",
+   "id": "reads:api/function:repository.Cart.Add->column:products.price_cents",
+   "ops": [],
+   "to": "column:products.price_cents",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Cart.Add",
+   "id": "reads:api/function:service.Cart.Add->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Cart.Add",
+   "id": "reads:api/function:handlers.Cart.Add->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/cart/items",
+   "id": "reads:api/entrypoint:http:POST:/api/v1/cart/items->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:repository.Cart.Add",
+   "id": "reads:api/function:repository.Cart.Add->column:inventory.qty",
+   "ops": [],
+   "to": "column:inventory.qty",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:service.Cart.Add",
+   "id": "reads:api/function:service.Cart.Add->table:inventory",
+   "to": "table:inventory",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/function:handlers.Cart.Add",
+   "id": "reads:api/function:handlers.Cart.Add->table:inventory",
+   "to": "table:inventory",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "api/entrypoint:http:POST:/api/v1/cart/items",
+   "id": "reads:api/entrypoint:http:POST:/api/v1/cart/items->table:inventory",
+   "to": "table:inventory",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Cart.Add",
+   "id": "calls:api/function:handlers.Cart.Add->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:DELETE:/api/v1/cart/items/:sku",
+   "id": "triggers:api/entrypoint:http:DELETE:/api/v1/cart/items/:sku->api/function:handlers.Cart.Remove",
+   "to": "api/function:handlers.Cart.Remove",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Cart.Remove",
+   "id": "calls:api/function:handlers.Cart.Remove->api/function:validate.Cart.Remove",
+   "to": "api/function:validate.Cart.Remove",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Cart.Remove",
+   "id": "calls:api/function:handlers.Cart.Remove->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/entrypoint:http:GET:/api/v1/health",
+   "id": "triggers:api/entrypoint:http:GET:/api/v1/health->api/function:handlers.Health",
+   "to": "api/function:handlers.Health",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Health",
+   "id": "calls:api/function:handlers.Health->api/function:validate.Health",
+   "to": "api/function:validate.Health",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:handlers.Health",
+   "id": "calls:api/function:handlers.Health->api/function:audit.Log",
+   "to": "api/function:audit.Log",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/entrypoint:http:POST:/invoices",
+   "id": "triggers:billing/entrypoint:http:POST:/invoices->billing/function:handlers.create_invoice",
+   "to": "billing/function:handlers.create_invoice",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:handlers.create_invoice",
+   "id": "calls:billing/function:handlers.create_invoice->billing/function:validate.create_invoice",
+   "to": "billing/function:validate.create_invoice",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:handlers.create_invoice",
+   "id": "calls:billing/function:handlers.create_invoice->billing/function:service.create_invoice",
+   "to": "billing/function:service.create_invoice",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:service.create_invoice",
+   "id": "calls:billing/function:service.create_invoice->billing/function:repository.create_invoice",
+   "to": "billing/function:repository.create_invoice",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:repository.create_invoice",
+   "id": "writes:billing/function:repository.create_invoice->column:invoices.order_id",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:invoices.order_id",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:repository.create_invoice",
+   "id": "writes:billing/function:repository.create_invoice->column:invoices.status",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:invoices.status",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:repository.create_invoice",
+   "id": "writes:billing/function:repository.create_invoice->column:invoices.amount_cents",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:invoices.amount_cents",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:service.create_invoice",
+   "id": "writes:billing/function:service.create_invoice->table:invoices",
+   "to": "table:invoices",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:handlers.create_invoice",
+   "id": "writes:billing/function:handlers.create_invoice->table:invoices",
+   "to": "table:invoices",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/entrypoint:http:POST:/invoices",
+   "id": "writes:billing/entrypoint:http:POST:/invoices->table:invoices",
+   "to": "table:invoices",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:repository.create_invoice",
+   "id": "reads:billing/function:repository.create_invoice->column:orders.total_cents",
+   "ops": [],
+   "to": "column:orders.total_cents",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:service.create_invoice",
+   "id": "reads:billing/function:service.create_invoice->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:handlers.create_invoice",
+   "id": "reads:billing/function:handlers.create_invoice->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/entrypoint:http:POST:/invoices",
+   "id": "reads:billing/entrypoint:http:POST:/invoices->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/entrypoint:http:GET:/invoices/:id",
+   "id": "triggers:billing/entrypoint:http:GET:/invoices/:id->billing/function:handlers.get_invoice",
+   "to": "billing/function:handlers.get_invoice",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:handlers.get_invoice",
+   "id": "calls:billing/function:handlers.get_invoice->billing/function:validate.get_invoice",
+   "to": "billing/function:validate.get_invoice",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:handlers.get_invoice",
+   "id": "calls:billing/function:handlers.get_invoice->billing/function:service.get_invoice",
+   "to": "billing/function:service.get_invoice",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:service.get_invoice",
+   "id": "calls:billing/function:service.get_invoice->billing/function:repository.get_invoice",
+   "to": "billing/function:repository.get_invoice",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:repository.get_invoice",
+   "id": "reads:billing/function:repository.get_invoice->column:invoices.id",
+   "ops": [],
+   "to": "column:invoices.id",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:repository.get_invoice",
+   "id": "reads:billing/function:repository.get_invoice->column:invoices.status",
+   "ops": [],
+   "to": "column:invoices.status",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:service.get_invoice",
+   "id": "reads:billing/function:service.get_invoice->table:invoices",
+   "to": "table:invoices",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:handlers.get_invoice",
+   "id": "reads:billing/function:handlers.get_invoice->table:invoices",
+   "to": "table:invoices",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/entrypoint:http:GET:/invoices/:id",
+   "id": "reads:billing/entrypoint:http:GET:/invoices/:id->table:invoices",
+   "to": "table:invoices",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/entrypoint:http:POST:/webhooks/payment",
+   "id": "triggers:billing/entrypoint:http:POST:/webhooks/payment->billing/function:handlers.payment_webhook",
+   "to": "billing/function:handlers.payment_webhook",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:handlers.payment_webhook",
+   "id": "calls:billing/function:handlers.payment_webhook->billing/function:validate.payment_webhook",
+   "to": "billing/function:validate.payment_webhook",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:handlers.payment_webhook",
+   "id": "calls:billing/function:handlers.payment_webhook->billing/function:service.payment_webhook",
+   "to": "billing/function:service.payment_webhook",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:service.payment_webhook",
+   "id": "calls:billing/function:service.payment_webhook->billing/function:repository.payment_webhook",
+   "to": "billing/function:repository.payment_webhook",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:repository.payment_webhook",
+   "id": "writes:billing/function:repository.payment_webhook->column:payments.status",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:payments.status",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:repository.payment_webhook",
+   "id": "writes:billing/function:repository.payment_webhook->column:payments.captured_at",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:payments.captured_at",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:service.payment_webhook",
+   "id": "writes:billing/function:service.payment_webhook->table:payments",
+   "to": "table:payments",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:handlers.payment_webhook",
+   "id": "writes:billing/function:handlers.payment_webhook->table:payments",
+   "to": "table:payments",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/entrypoint:http:POST:/webhooks/payment",
+   "id": "writes:billing/entrypoint:http:POST:/webhooks/payment->table:payments",
+   "to": "table:payments",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:repository.payment_webhook",
+   "id": "reads:billing/function:repository.payment_webhook->column:invoices.id",
+   "ops": [],
+   "to": "column:invoices.id",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:service.payment_webhook",
+   "id": "reads:billing/function:service.payment_webhook->table:invoices",
+   "to": "table:invoices",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:handlers.payment_webhook",
+   "id": "reads:billing/function:handlers.payment_webhook->table:invoices",
+   "to": "table:invoices",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/entrypoint:http:POST:/webhooks/payment",
+   "id": "reads:billing/entrypoint:http:POST:/webhooks/payment->table:invoices",
+   "to": "table:invoices",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/entrypoint:http:POST:/refunds",
+   "id": "triggers:billing/entrypoint:http:POST:/refunds->billing/function:handlers.create_refund",
+   "to": "billing/function:handlers.create_refund",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:handlers.create_refund",
+   "id": "calls:billing/function:handlers.create_refund->billing/function:validate.create_refund",
+   "to": "billing/function:validate.create_refund",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:handlers.create_refund",
+   "id": "calls:billing/function:handlers.create_refund->billing/function:service.create_refund",
+   "to": "billing/function:service.create_refund",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:service.create_refund",
+   "id": "calls:billing/function:service.create_refund->billing/function:repository.create_refund",
+   "to": "billing/function:repository.create_refund",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:repository.create_refund",
+   "id": "writes:billing/function:repository.create_refund->column:payments.status",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:payments.status",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:service.create_refund",
+   "id": "writes:billing/function:service.create_refund->table:payments",
+   "to": "table:payments",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:handlers.create_refund",
+   "id": "writes:billing/function:handlers.create_refund->table:payments",
+   "to": "table:payments",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/entrypoint:http:POST:/refunds",
+   "id": "writes:billing/entrypoint:http:POST:/refunds->table:payments",
+   "to": "table:payments",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:repository.create_refund",
+   "id": "writes:billing/function:repository.create_refund->column:audit_log.action",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:audit_log.action",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:repository.create_refund",
+   "id": "writes:billing/function:repository.create_refund->column:audit_log.entity",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:audit_log.entity",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:service.create_refund",
+   "id": "writes:billing/function:service.create_refund->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/function:handlers.create_refund",
+   "id": "writes:billing/function:handlers.create_refund->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "billing/entrypoint:http:POST:/refunds",
+   "id": "writes:billing/entrypoint:http:POST:/refunds->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/entrypoint:http:GET:/products",
+   "id": "triggers:catalog/entrypoint:http:GET:/products->catalog/function:handlers.list_products",
+   "to": "catalog/function:handlers.list_products",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:handlers.list_products",
+   "id": "calls:catalog/function:handlers.list_products->catalog/function:validate.list_products",
+   "to": "catalog/function:validate.list_products",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:handlers.list_products",
+   "id": "calls:catalog/function:handlers.list_products->catalog/function:service.list_products",
+   "to": "catalog/function:service.list_products",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:service.list_products",
+   "id": "calls:catalog/function:service.list_products->catalog/function:repository.list_products",
+   "to": "catalog/function:repository.list_products",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:repository.list_products",
+   "id": "reads:catalog/function:repository.list_products->column:products.id",
+   "ops": [],
+   "to": "column:products.id",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:repository.list_products",
+   "id": "reads:catalog/function:repository.list_products->column:products.sku",
+   "ops": [],
+   "to": "column:products.sku",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:repository.list_products",
+   "id": "reads:catalog/function:repository.list_products->column:products.name",
+   "ops": [],
+   "to": "column:products.name",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:repository.list_products",
+   "id": "reads:catalog/function:repository.list_products->column:products.price_cents",
+   "ops": [],
+   "to": "column:products.price_cents",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:repository.list_products",
+   "id": "reads:catalog/function:repository.list_products->column:products.active",
+   "ops": [],
+   "to": "column:products.active",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/function:service.list_products",
+   "id": "reads:catalog/function:service.list_products->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/function:handlers.list_products",
+   "id": "reads:catalog/function:handlers.list_products->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/entrypoint:http:GET:/products",
+   "id": "reads:catalog/entrypoint:http:GET:/products->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/entrypoint:http:GET:/products/:sku",
+   "id": "triggers:catalog/entrypoint:http:GET:/products/:sku->catalog/function:handlers.get_product",
+   "to": "catalog/function:handlers.get_product",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:handlers.get_product",
+   "id": "calls:catalog/function:handlers.get_product->catalog/function:validate.get_product",
+   "to": "catalog/function:validate.get_product",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:handlers.get_product",
+   "id": "calls:catalog/function:handlers.get_product->catalog/function:service.get_product",
+   "to": "catalog/function:service.get_product",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:service.get_product",
+   "id": "calls:catalog/function:service.get_product->catalog/function:repository.get_product",
+   "to": "catalog/function:repository.get_product",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:repository.get_product",
+   "id": "reads:catalog/function:repository.get_product->column:products.sku",
+   "ops": [],
+   "to": "column:products.sku",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/function:service.get_product",
+   "id": "reads:catalog/function:service.get_product->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/function:handlers.get_product",
+   "id": "reads:catalog/function:handlers.get_product->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/entrypoint:http:GET:/products/:sku",
+   "id": "reads:catalog/entrypoint:http:GET:/products/:sku->table:products",
+   "to": "table:products",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:repository.get_product",
+   "id": "reads:catalog/function:repository.get_product->column:inventory.qty",
+   "ops": [],
+   "to": "column:inventory.qty",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/function:service.get_product",
+   "id": "reads:catalog/function:service.get_product->table:inventory",
+   "to": "table:inventory",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/function:handlers.get_product",
+   "id": "reads:catalog/function:handlers.get_product->table:inventory",
+   "to": "table:inventory",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/entrypoint:http:GET:/products/:sku",
+   "id": "reads:catalog/entrypoint:http:GET:/products/:sku->table:inventory",
+   "to": "table:inventory",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/entrypoint:http:PUT:/products/:sku",
+   "id": "triggers:catalog/entrypoint:http:PUT:/products/:sku->catalog/function:handlers.update_product",
+   "to": "catalog/function:handlers.update_product",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:handlers.update_product",
+   "id": "calls:catalog/function:handlers.update_product->catalog/function:validate.update_product",
+   "to": "catalog/function:validate.update_product",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:handlers.update_product",
+   "id": "calls:catalog/function:handlers.update_product->catalog/function:service.update_product",
+   "to": "catalog/function:service.update_product",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:service.update_product",
+   "id": "calls:catalog/function:service.update_product->catalog/function:repository.update_product",
+   "to": "catalog/function:repository.update_product",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:repository.update_product",
+   "id": "writes:catalog/function:repository.update_product->column:products.name",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:products.name",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:repository.update_product",
+   "id": "writes:catalog/function:repository.update_product->column:products.price_cents",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:products.price_cents",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/function:service.update_product",
+   "id": "writes:catalog/function:service.update_product->table:products",
+   "to": "table:products",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/function:handlers.update_product",
+   "id": "writes:catalog/function:handlers.update_product->table:products",
+   "to": "table:products",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/entrypoint:http:PUT:/products/:sku",
+   "id": "writes:catalog/entrypoint:http:PUT:/products/:sku->table:products",
+   "to": "table:products",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:repository.update_product",
+   "id": "writes:catalog/function:repository.update_product->column:audit_log.action",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:audit_log.action",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/function:service.update_product",
+   "id": "writes:catalog/function:service.update_product->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/function:handlers.update_product",
+   "id": "writes:catalog/function:handlers.update_product->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/entrypoint:http:PUT:/products/:sku",
+   "id": "writes:catalog/entrypoint:http:PUT:/products/:sku->table:audit_log",
+   "to": "table:audit_log",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/entrypoint:http:POST:/inventory/reserve",
+   "id": "triggers:catalog/entrypoint:http:POST:/inventory/reserve->catalog/function:handlers.reserve_stock",
+   "to": "catalog/function:handlers.reserve_stock",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:handlers.reserve_stock",
+   "id": "calls:catalog/function:handlers.reserve_stock->catalog/function:validate.reserve_stock",
+   "to": "catalog/function:validate.reserve_stock",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:handlers.reserve_stock",
+   "id": "calls:catalog/function:handlers.reserve_stock->catalog/function:service.reserve_stock",
+   "to": "catalog/function:service.reserve_stock",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:service.reserve_stock",
+   "id": "calls:catalog/function:service.reserve_stock->catalog/function:repository.reserve_stock",
+   "to": "catalog/function:repository.reserve_stock",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "catalog/function:repository.reserve_stock",
+   "id": "writes:catalog/function:repository.reserve_stock->column:inventory.reserved",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:inventory.reserved",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/function:service.reserve_stock",
+   "id": "writes:catalog/function:service.reserve_stock->table:inventory",
+   "to": "table:inventory",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/function:handlers.reserve_stock",
+   "id": "writes:catalog/function:handlers.reserve_stock->table:inventory",
+   "to": "table:inventory",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "catalog/entrypoint:http:POST:/inventory/reserve",
+   "id": "writes:catalog/entrypoint:http:POST:/inventory/reserve->table:inventory",
+   "to": "table:inventory",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/entrypoint:http:POST:/shipments",
+   "id": "triggers:shipping/entrypoint:http:POST:/shipments->shipping/function:handlers.create_shipment",
+   "to": "shipping/function:handlers.create_shipment",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/function:handlers.create_shipment",
+   "id": "calls:shipping/function:handlers.create_shipment->shipping/function:validate.create_shipment",
+   "to": "shipping/function:validate.create_shipment",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/function:handlers.create_shipment",
+   "id": "calls:shipping/function:handlers.create_shipment->shipping/function:service.create_shipment",
+   "to": "shipping/function:service.create_shipment",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/function:service.create_shipment",
+   "id": "calls:shipping/function:service.create_shipment->shipping/function:repository.create_shipment",
+   "to": "shipping/function:repository.create_shipment",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/function:repository.create_shipment",
+   "id": "writes:shipping/function:repository.create_shipment->column:shipments.order_id",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:shipments.order_id",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/function:repository.create_shipment",
+   "id": "writes:shipping/function:repository.create_shipment->column:shipments.carrier",
+   "ops": [
+    "UPDATE"
+   ],
+   "to": "column:shipments.carrier",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "shipping/function:service.create_shipment",
+   "id": "writes:shipping/function:service.create_shipment->table:shipments",
+   "to": "table:shipments",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "shipping/function:handlers.create_shipment",
+   "id": "writes:shipping/function:handlers.create_shipment->table:shipments",
+   "to": "table:shipments",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "shipping/entrypoint:http:POST:/shipments",
+   "id": "writes:shipping/entrypoint:http:POST:/shipments->table:shipments",
+   "to": "table:shipments",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/function:repository.create_shipment",
+   "id": "reads:shipping/function:repository.create_shipment->column:orders.status",
+   "ops": [],
+   "to": "column:orders.status",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "shipping/function:service.create_shipment",
+   "id": "reads:shipping/function:service.create_shipment->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "shipping/function:handlers.create_shipment",
+   "id": "reads:shipping/function:handlers.create_shipment->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "shipping/entrypoint:http:POST:/shipments",
+   "id": "reads:shipping/entrypoint:http:POST:/shipments->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/entrypoint:http:GET:/shipments/:id",
+   "id": "triggers:shipping/entrypoint:http:GET:/shipments/:id->shipping/function:handlers.track",
+   "to": "shipping/function:handlers.track",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/function:handlers.track",
+   "id": "calls:shipping/function:handlers.track->shipping/function:validate.track",
+   "to": "shipping/function:validate.track",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/function:handlers.track",
+   "id": "calls:shipping/function:handlers.track->shipping/function:service.track",
+   "to": "shipping/function:service.track",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/function:service.track",
+   "id": "calls:shipping/function:service.track->shipping/function:repository.track",
+   "to": "shipping/function:repository.track",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/function:repository.track",
+   "id": "reads:shipping/function:repository.track->column:shipments.tracking",
+   "ops": [],
+   "to": "column:shipments.tracking",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "shipping/function:repository.track",
+   "id": "reads:shipping/function:repository.track->column:shipments.status",
+   "ops": [],
+   "to": "column:shipments.status",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "shipping/function:service.track",
+   "id": "reads:shipping/function:service.track->table:shipments",
+   "to": "table:shipments",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "shipping/function:handlers.track",
+   "id": "reads:shipping/function:handlers.track->table:shipments",
+   "to": "table:shipments",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "shipping/entrypoint:http:GET:/shipments/:id",
+   "id": "reads:shipping/entrypoint:http:GET:/shipments/:id->table:shipments",
+   "to": "table:shipments",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Orders.Create",
+   "id": "calls:api/function:service.Orders.Create->api/function:clients.Billing.CreateInvoice",
+   "to": "api/function:clients.Billing.CreateInvoice",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "api/function:clients.Billing.CreateInvoice",
+   "id": "calls_http:api/function:clients.Billing.CreateInvoice->billing/entrypoint:http:POST:/invoices",
+   "to": "billing/entrypoint:http:POST:/invoices",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Orders.Create",
+   "id": "calls:api/function:service.Orders.Create->api/function:clients.Catalog.Reserve",
+   "to": "api/function:clients.Catalog.Reserve",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "api/function:clients.Catalog.Reserve",
+   "id": "calls_http:api/function:clients.Catalog.Reserve->catalog/entrypoint:http:POST:/inventory/reserve",
+   "to": "catalog/entrypoint:http:POST:/inventory/reserve",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "api/function:service.Orders.MarkPaid",
+   "id": "calls:api/function:service.Orders.MarkPaid->api/function:clients.Shipping.Create",
+   "to": "api/function:clients.Shipping.Create",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "api/function:clients.Shipping.Create",
+   "id": "calls_http:api/function:clients.Shipping.Create->shipping/entrypoint:http:POST:/shipments",
+   "to": "shipping/entrypoint:http:POST:/shipments",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "billing/function:handlers.payment_webhook",
+   "id": "calls:billing/function:handlers.payment_webhook->billing/function:clients.notify_paid",
+   "to": "billing/function:clients.notify_paid",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "billing/function:clients.notify_paid",
+   "id": "calls_http:billing/function:clients.notify_paid->api/entrypoint:http:POST:/api/v1/orders/:id/paid",
+   "to": "api/entrypoint:http:POST:/api/v1/orders/:id/paid",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "worker/entrypoint:scheduled_job:expire_pending",
+   "id": "triggers:worker/entrypoint:scheduled_job:expire_pending->worker/function:jobs.expire_pending",
+   "to": "worker/function:jobs.expire_pending",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "worker/function:jobs.expire_pending",
+   "id": "writes:worker/function:jobs.expire_pending->column:orders.status",
+   "to": "column:orders.status",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "worker/entrypoint:scheduled_job:expire_pending",
+   "id": "writes:worker/entrypoint:scheduled_job:expire_pending->table:orders",
+   "to": "table:orders",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "worker/function:jobs.expire_pending",
+   "id": "writes:worker/function:jobs.expire_pending->column:inventory.reserved",
+   "to": "column:inventory.reserved",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "worker/entrypoint:scheduled_job:expire_pending",
+   "id": "writes:worker/entrypoint:scheduled_job:expire_pending->table:inventory",
+   "to": "table:inventory",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "worker/entrypoint:scheduled_job:nightly_invoices",
+   "id": "triggers:worker/entrypoint:scheduled_job:nightly_invoices->worker/function:jobs.nightly_invoices",
+   "to": "worker/function:jobs.nightly_invoices",
+   "type": "triggers"
+  },
+  {
+   "confidence": "exact",
+   "from": "worker/function:jobs.nightly_invoices",
+   "id": "reads:worker/function:jobs.nightly_invoices->column:orders.paid_at",
+   "to": "column:orders.paid_at",
+   "type": "reads"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "worker/entrypoint:scheduled_job:nightly_invoices",
+   "id": "reads:worker/entrypoint:scheduled_job:nightly_invoices->table:orders",
+   "to": "table:orders",
+   "type": "reads"
+  },
+  {
+   "confidence": "exact",
+   "from": "worker/function:jobs.nightly_invoices",
+   "id": "writes:worker/function:jobs.nightly_invoices->column:invoices.status",
+   "to": "column:invoices.status",
+   "type": "writes"
+  },
+  {
+   "confidence": "inferred",
+   "derived": "call",
+   "from": "worker/entrypoint:scheduled_job:nightly_invoices",
+   "id": "writes:worker/entrypoint:scheduled_job:nightly_invoices->table:invoices",
+   "to": "table:invoices",
+   "type": "writes"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.orders.OrdersPage.OrdersPage",
+   "id": "calls:web/function:src.pages.orders.OrdersPage.OrdersPage->web/function:src.pages.orders.OrdersPage.loadOrders",
+   "to": "web/function:src.pages.orders.OrdersPage.loadOrders",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.orders.OrdersPage.loadOrders",
+   "id": "calls_http:web/function:src.pages.orders.OrdersPage.loadOrders->api/entrypoint:http:GET:/api/v1/orders",
+   "to": "api/entrypoint:http:GET:/api/v1/orders",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.orders.OrderDetail.OrderDetail",
+   "id": "calls:web/function:src.pages.orders.OrderDetail.OrderDetail->web/function:src.pages.orders.OrderDetail.loadOrder",
+   "to": "web/function:src.pages.orders.OrderDetail.loadOrder",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.orders.OrderDetail.loadOrder",
+   "id": "calls_http:web/function:src.pages.orders.OrderDetail.loadOrder->api/entrypoint:http:GET:/api/v1/orders/:id",
+   "to": "api/entrypoint:http:GET:/api/v1/orders/:id",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.orders.OrderDetail.OrderDetail",
+   "id": "calls:web/function:src.pages.orders.OrderDetail.OrderDetail->web/function:src.pages.orders.OrderDetail.cancelOrder",
+   "to": "web/function:src.pages.orders.OrderDetail.cancelOrder",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.orders.OrderDetail.cancelOrder",
+   "id": "calls_http:web/function:src.pages.orders.OrderDetail.cancelOrder->api/entrypoint:http:POST:/api/v1/orders/:id/cancel",
+   "to": "api/entrypoint:http:POST:/api/v1/orders/:id/cancel",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.orders.OrderDetail.OrderDetail",
+   "id": "calls:web/function:src.pages.orders.OrderDetail.OrderDetail->web/function:src.pages.orders.OrderDetail.loadInvoice",
+   "to": "web/function:src.pages.orders.OrderDetail.loadInvoice",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.orders.OrderDetail.loadInvoice",
+   "id": "calls_http:web/function:src.pages.orders.OrderDetail.loadInvoice->billing/entrypoint:http:GET:/invoices/:id",
+   "to": "billing/entrypoint:http:GET:/invoices/:id",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.checkout.Checkout.Checkout",
+   "id": "calls:web/function:src.pages.checkout.Checkout.Checkout->web/function:src.pages.checkout.Checkout.placeOrder",
+   "to": "web/function:src.pages.checkout.Checkout.placeOrder",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.checkout.Checkout.placeOrder",
+   "id": "calls_http:web/function:src.pages.checkout.Checkout.placeOrder->api/entrypoint:http:POST:/api/v1/orders",
+   "to": "api/entrypoint:http:POST:/api/v1/orders",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.checkout.Checkout.Checkout",
+   "id": "calls:web/function:src.pages.checkout.Checkout.Checkout->web/function:src.pages.checkout.Checkout.loadCart",
+   "to": "web/function:src.pages.checkout.Checkout.loadCart",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.checkout.Checkout.loadCart",
+   "id": "calls_http:web/function:src.pages.checkout.Checkout.loadCart->api/entrypoint:http:GET:/api/v1/cart",
+   "to": "api/entrypoint:http:GET:/api/v1/cart",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.checkout.Checkout.Checkout",
+   "id": "calls:web/function:src.pages.checkout.Checkout.Checkout->web/function:src.pages.checkout.Checkout.applyCoupon",
+   "to": "web/function:src.pages.checkout.Checkout.applyCoupon",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.cart.CartDrawer.CartDrawer",
+   "id": "calls:web/function:src.pages.cart.CartDrawer.CartDrawer->web/function:src.pages.cart.CartDrawer.addItem",
+   "to": "web/function:src.pages.cart.CartDrawer.addItem",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.cart.CartDrawer.addItem",
+   "id": "calls_http:web/function:src.pages.cart.CartDrawer.addItem->api/entrypoint:http:POST:/api/v1/cart/items",
+   "to": "api/entrypoint:http:POST:/api/v1/cart/items",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.cart.CartDrawer.CartDrawer",
+   "id": "calls:web/function:src.pages.cart.CartDrawer.CartDrawer->web/function:src.pages.cart.CartDrawer.removeItem",
+   "to": "web/function:src.pages.cart.CartDrawer.removeItem",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.cart.CartDrawer.removeItem",
+   "id": "calls_http:web/function:src.pages.cart.CartDrawer.removeItem->api/entrypoint:http:DELETE:/api/v1/cart/items/:sku",
+   "to": "api/entrypoint:http:DELETE:/api/v1/cart/items/:sku",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.projects.ProjectsPage.ProjectsPage",
+   "id": "calls:web/function:src.pages.projects.ProjectsPage.ProjectsPage->web/function:src.pages.projects.ProjectsPage.loadProjects",
+   "to": "web/function:src.pages.projects.ProjectsPage.loadProjects",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.projects.ProjectsPage.loadProjects",
+   "id": "calls_http:web/function:src.pages.projects.ProjectsPage.loadProjects->api/entrypoint:http:GET:/api/v1/projects",
+   "to": "api/entrypoint:http:GET:/api/v1/projects",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.projects.ProjectsPage.ProjectsPage",
+   "id": "calls:web/function:src.pages.projects.ProjectsPage.ProjectsPage->web/function:src.pages.projects.ProjectsPage.createProject",
+   "to": "web/function:src.pages.projects.ProjectsPage.createProject",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.projects.ProjectsPage.createProject",
+   "id": "calls_http:web/function:src.pages.projects.ProjectsPage.createProject->api/entrypoint:http:POST:/api/v1/projects",
+   "to": "api/entrypoint:http:POST:/api/v1/projects",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.projects.ProjectBoard.ProjectBoard",
+   "id": "calls:web/function:src.pages.projects.ProjectBoard.ProjectBoard->web/function:src.pages.projects.ProjectBoard.loadProject",
+   "to": "web/function:src.pages.projects.ProjectBoard.loadProject",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.projects.ProjectBoard.loadProject",
+   "id": "calls_http:web/function:src.pages.projects.ProjectBoard.loadProject->api/entrypoint:http:GET:/api/v1/projects/:id",
+   "to": "api/entrypoint:http:GET:/api/v1/projects/:id",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.projects.ProjectBoard.ProjectBoard",
+   "id": "calls:web/function:src.pages.projects.ProjectBoard.ProjectBoard->web/function:src.pages.projects.ProjectBoard.loadTasks",
+   "to": "web/function:src.pages.projects.ProjectBoard.loadTasks",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.projects.ProjectBoard.loadTasks",
+   "id": "calls_http:web/function:src.pages.projects.ProjectBoard.loadTasks->api/entrypoint:http:GET:/api/v1/projects/:id/tasks",
+   "to": "api/entrypoint:http:GET:/api/v1/projects/:id/tasks",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.projects.ProjectBoard.ProjectBoard",
+   "id": "calls:web/function:src.pages.projects.ProjectBoard.ProjectBoard->web/function:src.pages.projects.ProjectBoard.addTask",
+   "to": "web/function:src.pages.projects.ProjectBoard.addTask",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.projects.ProjectBoard.addTask",
+   "id": "calls_http:web/function:src.pages.projects.ProjectBoard.addTask->api/entrypoint:http:POST:/api/v1/projects/:id/tasks",
+   "to": "api/entrypoint:http:POST:/api/v1/projects/:id/tasks",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.projects.ProjectBoard.ProjectBoard",
+   "id": "calls:web/function:src.pages.projects.ProjectBoard.ProjectBoard->web/function:src.pages.projects.ProjectBoard.toggleTask",
+   "to": "web/function:src.pages.projects.ProjectBoard.toggleTask",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.projects.ProjectBoard.toggleTask",
+   "id": "calls_http:web/function:src.pages.projects.ProjectBoard.toggleTask->api/entrypoint:http:PATCH:/api/v1/projects/:id/tasks/:taskId",
+   "to": "api/entrypoint:http:PATCH:/api/v1/projects/:id/tasks/:taskId",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.projects.ProjectBoard.ProjectBoard",
+   "id": "calls:web/function:src.pages.projects.ProjectBoard.ProjectBoard->web/function:src.pages.projects.ProjectBoard.archive",
+   "to": "web/function:src.pages.projects.ProjectBoard.archive",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.projects.ProjectBoard.archive",
+   "id": "calls_http:web/function:src.pages.projects.ProjectBoard.archive->api/entrypoint:http:POST:/api/v1/projects/:id/archive",
+   "to": "api/entrypoint:http:POST:/api/v1/projects/:id/archive",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.projects.ProjectBoard.ProjectBoard",
+   "id": "calls:web/function:src.pages.projects.ProjectBoard.ProjectBoard->web/function:src.pages.projects.ProjectBoard.exportCsv",
+   "to": "web/function:src.pages.projects.ProjectBoard.exportCsv",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.account.Profile.Profile",
+   "id": "calls:web/function:src.pages.account.Profile.Profile->web/function:src.pages.account.Profile.loadMe",
+   "to": "web/function:src.pages.account.Profile.loadMe",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.account.Profile.loadMe",
+   "id": "calls_http:web/function:src.pages.account.Profile.loadMe->api/entrypoint:http:GET:/api/v1/users/me",
+   "to": "api/entrypoint:http:GET:/api/v1/users/me",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.account.Profile.Profile",
+   "id": "calls:web/function:src.pages.account.Profile.Profile->web/function:src.pages.account.Profile.saveProfile",
+   "to": "web/function:src.pages.account.Profile.saveProfile",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.account.Profile.saveProfile",
+   "id": "calls_http:web/function:src.pages.account.Profile.saveProfile->api/entrypoint:http:PATCH:/api/v1/users/:id",
+   "to": "api/entrypoint:http:PATCH:/api/v1/users/:id",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.account.Profile.Profile",
+   "id": "calls:web/function:src.pages.account.Profile.Profile->web/function:src.pages.account.Profile.loadAvatar",
+   "to": "web/function:src.pages.account.Profile.loadAvatar",
+   "type": "calls"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.account.SignUp.SignUp",
+   "id": "calls:web/function:src.pages.account.SignUp.SignUp->web/function:src.pages.account.SignUp.signUp",
+   "to": "web/function:src.pages.account.SignUp.signUp",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.account.SignUp.signUp",
+   "id": "calls_http:web/function:src.pages.account.SignUp.signUp->api/entrypoint:http:POST:/api/v1/users",
+   "to": "api/entrypoint:http:POST:/api/v1/users",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.catalog.ProductPage.ProductPage",
+   "id": "calls:web/function:src.pages.catalog.ProductPage.ProductPage->web/function:src.pages.catalog.ProductPage.loadProduct",
+   "to": "web/function:src.pages.catalog.ProductPage.loadProduct",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.catalog.ProductPage.loadProduct",
+   "id": "calls_http:web/function:src.pages.catalog.ProductPage.loadProduct->catalog/entrypoint:http:GET:/products/:sku",
+   "to": "catalog/entrypoint:http:GET:/products/:sku",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.catalog.Catalog.Catalog",
+   "id": "calls:web/function:src.pages.catalog.Catalog.Catalog->web/function:src.pages.catalog.Catalog.loadCatalog",
+   "to": "web/function:src.pages.catalog.Catalog.loadCatalog",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.catalog.Catalog.loadCatalog",
+   "id": "calls_http:web/function:src.pages.catalog.Catalog.loadCatalog->catalog/entrypoint:http:GET:/products",
+   "to": "catalog/entrypoint:http:GET:/products",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.shipping.Tracking.Tracking",
+   "id": "calls:web/function:src.pages.shipping.Tracking.Tracking->web/function:src.pages.shipping.Tracking.track",
+   "to": "web/function:src.pages.shipping.Tracking.track",
+   "type": "calls"
+  },
+  {
+   "confidence": "inferred",
+   "from": "web/function:src.pages.shipping.Tracking.track",
+   "id": "calls_http:web/function:src.pages.shipping.Tracking.track->shipping/entrypoint:http:GET:/shipments/:id",
+   "to": "shipping/entrypoint:http:GET:/shipments/:id",
+   "type": "calls_http"
+  },
+  {
+   "confidence": "exact",
+   "from": "web/function:src.pages.checkout.Checkout.placeOrder",
+   "id": "calls:web/function:src.pages.checkout.Checkout.placeOrder->web/function:src.lib.api.useApi",
+   "to": "web/function:src.lib.api.useApi",
+   "type": "calls"
+  }
+ ],
+ "generated_at": "2026-11-20T12:00:00Z",
+ "nodes": [
+  {
+   "id": "table:orders",
+   "name": "orders",
+   "type": "table"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:orders.id",
+   "name": "id",
+   "table": "orders",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:orders.user_id",
+   "name": "user_id",
+   "table": "orders",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:orders.status",
+   "name": "status",
+   "table": "orders",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:orders.total_cents",
+   "name": "total_cents",
+   "table": "orders",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:orders.created_at",
+   "name": "created_at",
+   "table": "orders",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:orders.paid_at",
+   "name": "paid_at",
+   "table": "orders",
+   "type": "column"
+  },
+  {
+   "id": "table:order_items",
+   "name": "order_items",
+   "type": "table"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:order_items.id",
+   "name": "id",
+   "table": "order_items",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:order_items.order_id",
+   "name": "order_id",
+   "table": "order_items",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:order_items.product_id",
+   "name": "product_id",
+   "table": "order_items",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:order_items.qty",
+   "name": "qty",
+   "table": "order_items",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:order_items.price_cents",
+   "name": "price_cents",
+   "table": "order_items",
+   "type": "column"
+  },
+  {
+   "id": "table:users",
+   "name": "users",
+   "type": "table"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:users.id",
+   "name": "id",
+   "table": "users",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:users.email",
+   "name": "email",
+   "table": "users",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:users.name",
+   "name": "name",
+   "table": "users",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:users.created_at",
+   "name": "created_at",
+   "table": "users",
+   "type": "column"
+  },
+  {
+   "id": "table:projects",
+   "name": "projects",
+   "type": "table"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:projects.id",
+   "name": "id",
+   "table": "projects",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:projects.owner_id",
+   "name": "owner_id",
+   "table": "projects",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:projects.name",
+   "name": "name",
+   "table": "projects",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:projects.archived_at",
+   "name": "archived_at",
+   "table": "projects",
+   "type": "column"
+  },
+  {
+   "id": "table:tasks",
+   "name": "tasks",
+   "type": "table"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:tasks.id",
+   "name": "id",
+   "table": "tasks",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:tasks.project_id",
+   "name": "project_id",
+   "table": "tasks",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:tasks.title",
+   "name": "title",
+   "table": "tasks",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:tasks.done",
+   "name": "done",
+   "table": "tasks",
+   "type": "column"
+  },
+  {
+   "id": "table:invoices",
+   "name": "invoices",
+   "type": "table"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:invoices.id",
+   "name": "id",
+   "table": "invoices",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:invoices.order_id",
+   "name": "order_id",
+   "table": "invoices",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:invoices.status",
+   "name": "status",
+   "table": "invoices",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:invoices.amount_cents",
+   "name": "amount_cents",
+   "table": "invoices",
+   "type": "column"
+  },
+  {
+   "id": "table:payments",
+   "name": "payments",
+   "type": "table"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:payments.id",
+   "name": "id",
+   "table": "payments",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:payments.invoice_id",
+   "name": "invoice_id",
+   "table": "payments",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:payments.status",
+   "name": "status",
+   "table": "payments",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:payments.captured_at",
+   "name": "captured_at",
+   "table": "payments",
+   "type": "column"
+  },
+  {
+   "id": "table:products",
+   "name": "products",
+   "type": "table"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:products.id",
+   "name": "id",
+   "table": "products",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:products.sku",
+   "name": "sku",
+   "table": "products",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:products.name",
+   "name": "name",
+   "table": "products",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:products.price_cents",
+   "name": "price_cents",
+   "table": "products",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:products.active",
+   "name": "active",
+   "table": "products",
+   "type": "column"
+  },
+  {
+   "id": "table:inventory",
+   "name": "inventory",
+   "type": "table"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:inventory.product_id",
+   "name": "product_id",
+   "table": "inventory",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:inventory.qty",
+   "name": "qty",
+   "table": "inventory",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:inventory.reserved",
+   "name": "reserved",
+   "table": "inventory",
+   "type": "column"
+  },
+  {
+   "id": "table:audit_log",
+   "name": "audit_log",
+   "type": "table"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:audit_log.id",
+   "name": "id",
+   "table": "audit_log",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:audit_log.actor",
+   "name": "actor",
+   "table": "audit_log",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:audit_log.action",
+   "name": "action",
+   "table": "audit_log",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:audit_log.entity",
+   "name": "entity",
+   "table": "audit_log",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:audit_log.created_at",
+   "name": "created_at",
+   "table": "audit_log",
+   "type": "column"
+  },
+  {
+   "id": "table:shipments",
+   "name": "shipments",
+   "type": "table"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:shipments.id",
+   "name": "id",
+   "table": "shipments",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:shipments.order_id",
+   "name": "order_id",
+   "table": "shipments",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:shipments.carrier",
+   "name": "carrier",
+   "table": "shipments",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:shipments.tracking",
+   "name": "tracking",
+   "table": "shipments",
+   "type": "column"
+  },
+  {
+   "data_type": "TEXT",
+   "id": "column:shipments.status",
+   "name": "status",
+   "table": "shipments",
+   "type": "column"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 10
+   },
+   "id": "api/entrypoint:http:GET:/api/v1/orders",
+   "kind": "http",
+   "method": "GET",
+   "path": "/api/v1/orders",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/orders.go",
+    "line": 20
+   },
+   "id": "api/function:handlers.Orders.List",
+   "name": "List",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/orders.go",
+    "line": 5
+   },
+   "id": "api/function:validate.Orders.List",
+   "name": "List",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/orders.go",
+    "line": 12
+   },
+   "id": "api/function:service.Orders.List",
+   "name": "List",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/orders.go",
+    "line": 30
+   },
+   "id": "api/function:repository.Orders.List",
+   "name": "List",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/audit/log.go",
+    "line": 3
+   },
+   "id": "api/function:audit.Log",
+   "name": "Log",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 11
+   },
+   "id": "api/entrypoint:http:POST:/api/v1/orders",
+   "kind": "http",
+   "method": "POST",
+   "path": "/api/v1/orders",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/orders.go",
+    "line": 30
+   },
+   "id": "api/function:handlers.Orders.Create",
+   "name": "Create",
+   "type": "function",
+   "why": "Creates an order and reserves stock."
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/orders.go",
+    "line": 9
+   },
+   "id": "api/function:validate.Orders.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/orders.go",
+    "line": 21
+   },
+   "id": "api/function:service.Orders.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/orders.go",
+    "line": 42
+   },
+   "id": "api/function:repository.Orders.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 12
+   },
+   "id": "api/entrypoint:http:GET:/api/v1/orders/:id",
+   "kind": "http",
+   "method": "GET",
+   "path": "/api/v1/orders/:id",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/orders.go",
+    "line": 40
+   },
+   "id": "api/function:handlers.Orders.Get",
+   "name": "Get",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/orders.go",
+    "line": 13
+   },
+   "id": "api/function:validate.Orders.Get",
+   "name": "Get",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/orders.go",
+    "line": 30
+   },
+   "id": "api/function:service.Orders.Get",
+   "name": "Get",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/orders.go",
+    "line": 54
+   },
+   "id": "api/function:repository.Orders.Get",
+   "name": "Get",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 13
+   },
+   "id": "api/entrypoint:http:POST:/api/v1/orders/:id/paid",
+   "kind": "http",
+   "method": "POST",
+   "path": "/api/v1/orders/:id/paid",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/orders.go",
+    "line": 50
+   },
+   "id": "api/function:handlers.Orders.MarkPaid",
+   "name": "MarkPaid",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/orders.go",
+    "line": 17
+   },
+   "id": "api/function:validate.Orders.MarkPaid",
+   "name": "MarkPaid",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/orders.go",
+    "line": 39
+   },
+   "id": "api/function:service.Orders.MarkPaid",
+   "name": "MarkPaid",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/orders.go",
+    "line": 66
+   },
+   "id": "api/function:repository.Orders.MarkPaid",
+   "name": "MarkPaid",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 14
+   },
+   "id": "api/entrypoint:http:POST:/api/v1/orders/:id/cancel",
+   "kind": "http",
+   "method": "POST",
+   "path": "/api/v1/orders/:id/cancel",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/orders.go",
+    "line": 60
+   },
+   "id": "api/function:handlers.Orders.Cancel",
+   "name": "Cancel",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/orders.go",
+    "line": 21
+   },
+   "id": "api/function:validate.Orders.Cancel",
+   "name": "Cancel",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/orders.go",
+    "line": 48
+   },
+   "id": "api/function:service.Orders.Cancel",
+   "name": "Cancel",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/orders.go",
+    "line": 78
+   },
+   "id": "api/function:repository.Orders.Cancel",
+   "name": "Cancel",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 15
+   },
+   "id": "api/entrypoint:http:GET:/api/v1/users/me",
+   "kind": "http",
+   "method": "GET",
+   "path": "/api/v1/users/me",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/users.go",
+    "line": 70
+   },
+   "id": "api/function:handlers.Users.Me",
+   "name": "Me",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/users.go",
+    "line": 25
+   },
+   "id": "api/function:validate.Users.Me",
+   "name": "Me",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/users.go",
+    "line": 57
+   },
+   "id": "api/function:service.Users.Me",
+   "name": "Me",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/users.go",
+    "line": 90
+   },
+   "id": "api/function:repository.Users.Me",
+   "name": "Me",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 16
+   },
+   "id": "api/entrypoint:http:POST:/api/v1/users",
+   "kind": "http",
+   "method": "POST",
+   "path": "/api/v1/users",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/users.go",
+    "line": 80
+   },
+   "id": "api/function:handlers.Users.Create",
+   "name": "Create",
+   "type": "function",
+   "why": "Signs a user up."
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/users.go",
+    "line": 29
+   },
+   "id": "api/function:validate.Users.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/users.go",
+    "line": 66
+   },
+   "id": "api/function:service.Users.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/users.go",
+    "line": 102
+   },
+   "id": "api/function:repository.Users.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 17
+   },
+   "id": "api/entrypoint:http:PATCH:/api/v1/users/:id",
+   "kind": "http",
+   "method": "PATCH",
+   "path": "/api/v1/users/:id",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/users.go",
+    "line": 90
+   },
+   "id": "api/function:handlers.Users.Update",
+   "name": "Update",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/users.go",
+    "line": 33
+   },
+   "id": "api/function:validate.Users.Update",
+   "name": "Update",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/users.go",
+    "line": 75
+   },
+   "id": "api/function:service.Users.Update",
+   "name": "Update",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/users.go",
+    "line": 114
+   },
+   "id": "api/function:repository.Users.Update",
+   "name": "Update",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 18
+   },
+   "id": "api/entrypoint:http:DELETE:/api/v1/users/:id",
+   "kind": "http",
+   "method": "DELETE",
+   "path": "/api/v1/users/:id",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/users.go",
+    "line": 100
+   },
+   "id": "api/function:handlers.Users.Delete",
+   "name": "Delete",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/users.go",
+    "line": 37
+   },
+   "id": "api/function:validate.Users.Delete",
+   "name": "Delete",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/users.go",
+    "line": 84
+   },
+   "id": "api/function:service.Users.Delete",
+   "name": "Delete",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/users.go",
+    "line": 126
+   },
+   "id": "api/function:repository.Users.Delete",
+   "name": "Delete",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 19
+   },
+   "id": "api/entrypoint:http:GET:/api/v1/projects",
+   "kind": "http",
+   "method": "GET",
+   "path": "/api/v1/projects",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/projects.go",
+    "line": 110
+   },
+   "id": "api/function:handlers.Projects.List",
+   "name": "List",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/projects.go",
+    "line": 41
+   },
+   "id": "api/function:validate.Projects.List",
+   "name": "List",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/projects.go",
+    "line": 93
+   },
+   "id": "api/function:service.Projects.List",
+   "name": "List",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/projects.go",
+    "line": 138
+   },
+   "id": "api/function:repository.Projects.List",
+   "name": "List",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 20
+   },
+   "id": "api/entrypoint:http:POST:/api/v1/projects",
+   "kind": "http",
+   "method": "POST",
+   "path": "/api/v1/projects",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/projects.go",
+    "line": 120
+   },
+   "id": "api/function:handlers.Projects.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/projects.go",
+    "line": 45
+   },
+   "id": "api/function:validate.Projects.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/projects.go",
+    "line": 102
+   },
+   "id": "api/function:service.Projects.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/projects.go",
+    "line": 150
+   },
+   "id": "api/function:repository.Projects.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 21
+   },
+   "id": "api/entrypoint:http:GET:/api/v1/projects/:id",
+   "kind": "http",
+   "method": "GET",
+   "path": "/api/v1/projects/:id",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/projects.go",
+    "line": 130
+   },
+   "id": "api/function:handlers.Projects.Get",
+   "name": "Get",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/projects.go",
+    "line": 49
+   },
+   "id": "api/function:validate.Projects.Get",
+   "name": "Get",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/projects.go",
+    "line": 111
+   },
+   "id": "api/function:service.Projects.Get",
+   "name": "Get",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/projects.go",
+    "line": 162
+   },
+   "id": "api/function:repository.Projects.Get",
+   "name": "Get",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 22
+   },
+   "id": "api/entrypoint:http:POST:/api/v1/projects/:id/archive",
+   "kind": "http",
+   "method": "POST",
+   "path": "/api/v1/projects/:id/archive",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/projects.go",
+    "line": 140
+   },
+   "id": "api/function:handlers.Projects.Archive",
+   "name": "Archive",
+   "type": "function",
+   "why": "Archives a project; its tasks stay readable."
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/projects.go",
+    "line": 53
+   },
+   "id": "api/function:validate.Projects.Archive",
+   "name": "Archive",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/projects.go",
+    "line": 120
+   },
+   "id": "api/function:service.Projects.Archive",
+   "name": "Archive",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/projects.go",
+    "line": 174
+   },
+   "id": "api/function:repository.Projects.Archive",
+   "name": "Archive",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 23
+   },
+   "id": "api/entrypoint:http:GET:/api/v1/projects/:id/tasks",
+   "kind": "http",
+   "method": "GET",
+   "path": "/api/v1/projects/:id/tasks",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/tasks.go",
+    "line": 150
+   },
+   "id": "api/function:handlers.Tasks.List",
+   "name": "List",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/tasks.go",
+    "line": 57
+   },
+   "id": "api/function:validate.Tasks.List",
+   "name": "List",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/tasks.go",
+    "line": 129
+   },
+   "id": "api/function:service.Tasks.List",
+   "name": "List",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/tasks.go",
+    "line": 186
+   },
+   "id": "api/function:repository.Tasks.List",
+   "name": "List",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 24
+   },
+   "id": "api/entrypoint:http:POST:/api/v1/projects/:id/tasks",
+   "kind": "http",
+   "method": "POST",
+   "path": "/api/v1/projects/:id/tasks",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/tasks.go",
+    "line": 160
+   },
+   "id": "api/function:handlers.Tasks.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/tasks.go",
+    "line": 61
+   },
+   "id": "api/function:validate.Tasks.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/tasks.go",
+    "line": 138
+   },
+   "id": "api/function:service.Tasks.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/tasks.go",
+    "line": 198
+   },
+   "id": "api/function:repository.Tasks.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 25
+   },
+   "id": "api/entrypoint:http:PATCH:/api/v1/projects/:id/tasks/:taskId",
+   "kind": "http",
+   "method": "PATCH",
+   "path": "/api/v1/projects/:id/tasks/:taskId",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/tasks.go",
+    "line": 170
+   },
+   "id": "api/function:handlers.Tasks.Toggle",
+   "name": "Toggle",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/tasks.go",
+    "line": 65
+   },
+   "id": "api/function:validate.Tasks.Toggle",
+   "name": "Toggle",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/tasks.go",
+    "line": 147
+   },
+   "id": "api/function:service.Tasks.Toggle",
+   "name": "Toggle",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/tasks.go",
+    "line": 210
+   },
+   "id": "api/function:repository.Tasks.Toggle",
+   "name": "Toggle",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 26
+   },
+   "id": "api/entrypoint:http:GET:/api/v1/cart",
+   "kind": "http",
+   "method": "GET",
+   "path": "/api/v1/cart",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/cart.go",
+    "line": 180
+   },
+   "id": "api/function:handlers.Cart.Get",
+   "name": "Get",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/cart.go",
+    "line": 69
+   },
+   "id": "api/function:validate.Cart.Get",
+   "name": "Get",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/cart.go",
+    "line": 156
+   },
+   "id": "api/function:service.Cart.Get",
+   "name": "Get",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/cart.go",
+    "line": 222
+   },
+   "id": "api/function:repository.Cart.Get",
+   "name": "Get",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 27
+   },
+   "id": "api/entrypoint:http:POST:/api/v1/cart/items",
+   "kind": "http",
+   "method": "POST",
+   "path": "/api/v1/cart/items",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/cart.go",
+    "line": 190
+   },
+   "id": "api/function:handlers.Cart.Add",
+   "name": "Add",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/cart.go",
+    "line": 73
+   },
+   "id": "api/function:validate.Cart.Add",
+   "name": "Add",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/cart.go",
+    "line": 165
+   },
+   "id": "api/function:service.Cart.Add",
+   "name": "Add",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/cart.go",
+    "line": 234
+   },
+   "id": "api/function:repository.Cart.Add",
+   "name": "Add",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 28
+   },
+   "id": "api/entrypoint:http:DELETE:/api/v1/cart/items/:sku",
+   "kind": "http",
+   "method": "DELETE",
+   "path": "/api/v1/cart/items/:sku",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/cart.go",
+    "line": 200
+   },
+   "id": "api/function:handlers.Cart.Remove",
+   "name": "Remove",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/cart.go",
+    "line": 77
+   },
+   "id": "api/function:validate.Cart.Remove",
+   "name": "Remove",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.go",
+    "line": 29
+   },
+   "id": "api/entrypoint:http:GET:/api/v1/health",
+   "kind": "http",
+   "method": "GET",
+   "path": "/api/v1/health",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/health.go",
+    "line": 210
+   },
+   "id": "api/function:handlers.Health",
+   "name": "Health",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/health.go",
+    "line": 81
+   },
+   "id": "api/function:validate.Health",
+   "name": "Health",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.py",
+    "line": 10
+   },
+   "id": "billing/entrypoint:http:POST:/invoices",
+   "kind": "http",
+   "method": "POST",
+   "path": "/invoices",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/create_invoice.py",
+    "line": 20
+   },
+   "id": "billing/function:handlers.create_invoice",
+   "name": "create_invoice",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/create_invoice.py",
+    "line": 5
+   },
+   "id": "billing/function:validate.create_invoice",
+   "name": "create_invoice",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/create_invoice.py",
+    "line": 12
+   },
+   "id": "billing/function:service.create_invoice",
+   "name": "create_invoice",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/create_invoice.py",
+    "line": 30
+   },
+   "id": "billing/function:repository.create_invoice",
+   "name": "create_invoice",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.py",
+    "line": 11
+   },
+   "id": "billing/entrypoint:http:GET:/invoices/:id",
+   "kind": "http",
+   "method": "GET",
+   "path": "/invoices/:id",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/get_invoice.py",
+    "line": 30
+   },
+   "id": "billing/function:handlers.get_invoice",
+   "name": "get_invoice",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/get_invoice.py",
+    "line": 9
+   },
+   "id": "billing/function:validate.get_invoice",
+   "name": "get_invoice",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/get_invoice.py",
+    "line": 21
+   },
+   "id": "billing/function:service.get_invoice",
+   "name": "get_invoice",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/get_invoice.py",
+    "line": 42
+   },
+   "id": "billing/function:repository.get_invoice",
+   "name": "get_invoice",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.py",
+    "line": 12
+   },
+   "id": "billing/entrypoint:http:POST:/webhooks/payment",
+   "kind": "http",
+   "method": "POST",
+   "path": "/webhooks/payment",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/payment_webhook.py",
+    "line": 40
+   },
+   "id": "billing/function:handlers.payment_webhook",
+   "name": "payment_webhook",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/payment_webhook.py",
+    "line": 13
+   },
+   "id": "billing/function:validate.payment_webhook",
+   "name": "payment_webhook",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/payment_webhook.py",
+    "line": 30
+   },
+   "id": "billing/function:service.payment_webhook",
+   "name": "payment_webhook",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/payment_webhook.py",
+    "line": 54
+   },
+   "id": "billing/function:repository.payment_webhook",
+   "name": "payment_webhook",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.py",
+    "line": 13
+   },
+   "id": "billing/entrypoint:http:POST:/refunds",
+   "kind": "http",
+   "method": "POST",
+   "path": "/refunds",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/create_refund.py",
+    "line": 50
+   },
+   "id": "billing/function:handlers.create_refund",
+   "name": "create_refund",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/create_refund.py",
+    "line": 17
+   },
+   "id": "billing/function:validate.create_refund",
+   "name": "create_refund",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/create_refund.py",
+    "line": 39
+   },
+   "id": "billing/function:service.create_refund",
+   "name": "create_refund",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/create_refund.py",
+    "line": 66
+   },
+   "id": "billing/function:repository.create_refund",
+   "name": "create_refund",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.py",
+    "line": 10
+   },
+   "id": "catalog/entrypoint:http:GET:/products",
+   "kind": "http",
+   "method": "GET",
+   "path": "/products",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/list_products.py",
+    "line": 20
+   },
+   "id": "catalog/function:handlers.list_products",
+   "name": "list_products",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/list_products.py",
+    "line": 5
+   },
+   "id": "catalog/function:validate.list_products",
+   "name": "list_products",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/list_products.py",
+    "line": 12
+   },
+   "id": "catalog/function:service.list_products",
+   "name": "list_products",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/list_products.py",
+    "line": 30
+   },
+   "id": "catalog/function:repository.list_products",
+   "name": "list_products",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.py",
+    "line": 11
+   },
+   "id": "catalog/entrypoint:http:GET:/products/:sku",
+   "kind": "http",
+   "method": "GET",
+   "path": "/products/:sku",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/get_product.py",
+    "line": 30
+   },
+   "id": "catalog/function:handlers.get_product",
+   "name": "get_product",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/get_product.py",
+    "line": 9
+   },
+   "id": "catalog/function:validate.get_product",
+   "name": "get_product",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/get_product.py",
+    "line": 21
+   },
+   "id": "catalog/function:service.get_product",
+   "name": "get_product",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/get_product.py",
+    "line": 42
+   },
+   "id": "catalog/function:repository.get_product",
+   "name": "get_product",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.py",
+    "line": 12
+   },
+   "id": "catalog/entrypoint:http:PUT:/products/:sku",
+   "kind": "http",
+   "method": "PUT",
+   "path": "/products/:sku",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/update_product.py",
+    "line": 40
+   },
+   "id": "catalog/function:handlers.update_product",
+   "name": "update_product",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/update_product.py",
+    "line": 13
+   },
+   "id": "catalog/function:validate.update_product",
+   "name": "update_product",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/update_product.py",
+    "line": 30
+   },
+   "id": "catalog/function:service.update_product",
+   "name": "update_product",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/update_product.py",
+    "line": 54
+   },
+   "id": "catalog/function:repository.update_product",
+   "name": "update_product",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.py",
+    "line": 13
+   },
+   "id": "catalog/entrypoint:http:POST:/inventory/reserve",
+   "kind": "http",
+   "method": "POST",
+   "path": "/inventory/reserve",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/reserve_stock.py",
+    "line": 50
+   },
+   "id": "catalog/function:handlers.reserve_stock",
+   "name": "reserve_stock",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/reserve_stock.py",
+    "line": 17
+   },
+   "id": "catalog/function:validate.reserve_stock",
+   "name": "reserve_stock",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/reserve_stock.py",
+    "line": 39
+   },
+   "id": "catalog/function:service.reserve_stock",
+   "name": "reserve_stock",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/reserve_stock.py",
+    "line": 66
+   },
+   "id": "catalog/function:repository.reserve_stock",
+   "name": "reserve_stock",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.py",
+    "line": 10
+   },
+   "id": "shipping/entrypoint:http:POST:/shipments",
+   "kind": "http",
+   "method": "POST",
+   "path": "/shipments",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/create_shipment.py",
+    "line": 20
+   },
+   "id": "shipping/function:handlers.create_shipment",
+   "name": "create_shipment",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/create_shipment.py",
+    "line": 5
+   },
+   "id": "shipping/function:validate.create_shipment",
+   "name": "create_shipment",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/create_shipment.py",
+    "line": 12
+   },
+   "id": "shipping/function:service.create_shipment",
+   "name": "create_shipment",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/create_shipment.py",
+    "line": 30
+   },
+   "id": "shipping/function:repository.create_shipment",
+   "name": "create_shipment",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "router.py",
+    "line": 11
+   },
+   "id": "shipping/entrypoint:http:GET:/shipments/:id",
+   "kind": "http",
+   "method": "GET",
+   "path": "/shipments/:id",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "internal/handlers/track.py",
+    "line": 30
+   },
+   "id": "shipping/function:handlers.track",
+   "name": "track",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/validate/track.py",
+    "line": 9
+   },
+   "id": "shipping/function:validate.track",
+   "name": "track",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/service/track.py",
+    "line": 21
+   },
+   "id": "shipping/function:service.track",
+   "name": "track",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/repository/track.py",
+    "line": 42
+   },
+   "id": "shipping/function:repository.track",
+   "name": "track",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/clients/billing.go",
+    "line": 8
+   },
+   "id": "api/function:clients.Billing.CreateInvoice",
+   "name": "CreateInvoice",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/clients/catalog.go",
+    "line": 8
+   },
+   "id": "api/function:clients.Catalog.Reserve",
+   "name": "Reserve",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "internal/clients/shipping.go",
+    "line": 8
+   },
+   "id": "api/function:clients.Shipping.Create",
+   "name": "Create",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "app/clients.py",
+    "line": 4
+   },
+   "id": "billing/function:clients.notify_paid",
+   "name": "notify_paid",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "worker/jobs.py",
+    "line": 4
+   },
+   "id": "worker/entrypoint:scheduled_job:expire_pending",
+   "kind": "scheduled_job",
+   "symbol": "expire_pending",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "worker/jobs.py",
+    "line": 5
+   },
+   "id": "worker/function:jobs.expire_pending",
+   "name": "expire_pending",
+   "type": "function",
+   "why": "Cancels orders unpaid for 24 h."
+  },
+  {
+   "evidence": {
+    "file": "worker/jobs.py",
+    "line": 14
+   },
+   "id": "worker/entrypoint:scheduled_job:nightly_invoices",
+   "kind": "scheduled_job",
+   "symbol": "nightly_invoices",
+   "type": "entrypoint"
+  },
+  {
+   "evidence": {
+    "file": "worker/jobs.py",
+    "line": 15
+   },
+   "id": "worker/function:jobs.nightly_invoices",
+   "name": "nightly_invoices",
+   "type": "function",
+   "why": "Runs every night at 02:00."
+  },
+  {
+   "evidence": {
+    "file": "src/pages/orders/OrdersPage.tsx",
+    "line": 1
+   },
+   "id": "web/function:src.pages.orders.OrdersPage.OrdersPage",
+   "name": "OrdersPage",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/orders/OrdersPage.tsx",
+    "line": 10
+   },
+   "id": "web/function:src.pages.orders.OrdersPage.loadOrders",
+   "name": "loadOrders",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/orders/OrderDetail.tsx",
+    "line": 1
+   },
+   "id": "web/function:src.pages.orders.OrderDetail.OrderDetail",
+   "name": "OrderDetail",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/orders/OrderDetail.tsx",
+    "line": 10
+   },
+   "id": "web/function:src.pages.orders.OrderDetail.loadOrder",
+   "name": "loadOrder",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/orders/OrderDetail.tsx",
+    "line": 16
+   },
+   "id": "web/function:src.pages.orders.OrderDetail.cancelOrder",
+   "name": "cancelOrder",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/orders/OrderDetail.tsx",
+    "line": 22
+   },
+   "id": "web/function:src.pages.orders.OrderDetail.loadInvoice",
+   "name": "loadInvoice",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/checkout/Checkout.tsx",
+    "line": 1
+   },
+   "id": "web/function:src.pages.checkout.Checkout.Checkout",
+   "name": "Checkout",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/checkout/Checkout.tsx",
+    "line": 10
+   },
+   "id": "web/function:src.pages.checkout.Checkout.placeOrder",
+   "name": "placeOrder",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/checkout/Checkout.tsx",
+    "line": 16
+   },
+   "id": "web/function:src.pages.checkout.Checkout.loadCart",
+   "name": "loadCart",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/checkout/Checkout.tsx",
+    "line": 22
+   },
+   "id": "web/function:src.pages.checkout.Checkout.applyCoupon",
+   "name": "applyCoupon",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/cart/CartDrawer.tsx",
+    "line": 1
+   },
+   "id": "web/function:src.pages.cart.CartDrawer.CartDrawer",
+   "name": "CartDrawer",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/cart/CartDrawer.tsx",
+    "line": 10
+   },
+   "id": "web/function:src.pages.cart.CartDrawer.addItem",
+   "name": "addItem",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/cart/CartDrawer.tsx",
+    "line": 16
+   },
+   "id": "web/function:src.pages.cart.CartDrawer.removeItem",
+   "name": "removeItem",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/projects/ProjectsPage.tsx",
+    "line": 1
+   },
+   "id": "web/function:src.pages.projects.ProjectsPage.ProjectsPage",
+   "name": "ProjectsPage",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/projects/ProjectsPage.tsx",
+    "line": 10
+   },
+   "id": "web/function:src.pages.projects.ProjectsPage.loadProjects",
+   "name": "loadProjects",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/projects/ProjectsPage.tsx",
+    "line": 16
+   },
+   "id": "web/function:src.pages.projects.ProjectsPage.createProject",
+   "name": "createProject",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/projects/ProjectBoard.tsx",
+    "line": 1
+   },
+   "id": "web/function:src.pages.projects.ProjectBoard.ProjectBoard",
+   "name": "ProjectBoard",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/projects/ProjectBoard.tsx",
+    "line": 10
+   },
+   "id": "web/function:src.pages.projects.ProjectBoard.loadProject",
+   "name": "loadProject",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/projects/ProjectBoard.tsx",
+    "line": 16
+   },
+   "id": "web/function:src.pages.projects.ProjectBoard.loadTasks",
+   "name": "loadTasks",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/projects/ProjectBoard.tsx",
+    "line": 22
+   },
+   "id": "web/function:src.pages.projects.ProjectBoard.addTask",
+   "name": "addTask",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/projects/ProjectBoard.tsx",
+    "line": 28
+   },
+   "id": "web/function:src.pages.projects.ProjectBoard.toggleTask",
+   "name": "toggleTask",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/projects/ProjectBoard.tsx",
+    "line": 34
+   },
+   "id": "web/function:src.pages.projects.ProjectBoard.archive",
+   "name": "archive",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/projects/ProjectBoard.tsx",
+    "line": 40
+   },
+   "id": "web/function:src.pages.projects.ProjectBoard.exportCsv",
+   "name": "exportCsv",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/account/Profile.tsx",
+    "line": 1
+   },
+   "id": "web/function:src.pages.account.Profile.Profile",
+   "name": "Profile",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/account/Profile.tsx",
+    "line": 10
+   },
+   "id": "web/function:src.pages.account.Profile.loadMe",
+   "name": "loadMe",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/account/Profile.tsx",
+    "line": 16
+   },
+   "id": "web/function:src.pages.account.Profile.saveProfile",
+   "name": "saveProfile",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/account/Profile.tsx",
+    "line": 22
+   },
+   "id": "web/function:src.pages.account.Profile.loadAvatar",
+   "name": "loadAvatar",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/account/SignUp.tsx",
+    "line": 1
+   },
+   "id": "web/function:src.pages.account.SignUp.SignUp",
+   "name": "SignUp",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/account/SignUp.tsx",
+    "line": 10
+   },
+   "id": "web/function:src.pages.account.SignUp.signUp",
+   "name": "signUp",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/catalog/ProductPage.tsx",
+    "line": 1
+   },
+   "id": "web/function:src.pages.catalog.ProductPage.ProductPage",
+   "name": "ProductPage",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/catalog/ProductPage.tsx",
+    "line": 10
+   },
+   "id": "web/function:src.pages.catalog.ProductPage.loadProduct",
+   "name": "loadProduct",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/catalog/Catalog.tsx",
+    "line": 1
+   },
+   "id": "web/function:src.pages.catalog.Catalog.Catalog",
+   "name": "Catalog",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/catalog/Catalog.tsx",
+    "line": 10
+   },
+   "id": "web/function:src.pages.catalog.Catalog.loadCatalog",
+   "name": "loadCatalog",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/shipping/Tracking.tsx",
+    "line": 1
+   },
+   "id": "web/function:src.pages.shipping.Tracking.Tracking",
+   "name": "Tracking",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/pages/shipping/Tracking.tsx",
+    "line": 10
+   },
+   "id": "web/function:src.pages.shipping.Tracking.track",
+   "name": "track",
+   "type": "function"
+  },
+  {
+   "evidence": {
+    "file": "src/lib/api.ts",
+    "line": 3
+   },
+   "id": "web/function:src.lib.api.useApi",
+   "name": "useApi",
+   "type": "function",
+   "why": "Shared fetch wrapper."
+  }
+ ],
+ "repos": [
+  "api",
+  "billing",
+  "catalog",
+  "shipping",
+  "web",
+  "worker"
+ ],
+ "unresolved_http": [
+  {
+   "from": "web/function:src.pages.account.Profile.loadAvatar",
+   "keys": [],
+   "method": "GET",
+   "reason": "base_unknown",
+   "url": "/avatars/me"
+  },
+  {
+   "from": "web/function:src.pages.checkout.Checkout.applyCoupon",
+   "keys": [],
+   "method": "POST",
+   "reason": "target_not_scanned",
+   "url": "/api/v1/coupons/apply"
+  },
+  {
+   "from": "web/function:src.pages.projects.ProjectBoard.exportCsv",
+   "keys": [],
+   "method": "GET",
+   "reason": "path_dynamic",
+   "url": "`${base}/projects/${id}/export`"
+  }
+ ],
+ "version": "0.5.1"
+}

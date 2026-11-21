@@ -134,11 +134,12 @@ Tools (`search`, `call_graph`, `function_data`, `table_usage`, `impact`,
 bizmap export --graph bizmap.graph.json --format html --out bizmap.html   # --lang pt-BR
 ```
 
-One self-contained, offline HTML file: it opens on the services and the HTTP links
-between them; click a service to expand its routes, functions and tables, search any
-route, function, table or column, and filter by a table across services.
+One self-contained, offline HTML file that reads the system like a book: services,
+then domains (routes grouped by path), then a route's call tree down to the tables and
+columns it reads and writes. Front-ends list their screens, the routes each one uses
+and the calls that matched no route. Search finds any route, function, table or column.
 
-![bizmap export --format html: services, expand, search, filter by table](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/img/export-html.gif)
+![bizmap export --format html: system, a domain, a route's call tree, screens](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/img/export-html.gif)
 
 Details: [export](https://lucas-simao.github.io/bizmap/commands/export/).
 

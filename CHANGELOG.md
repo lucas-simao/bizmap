@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **`bizmap export --format html` reads the system like a book.** Overview
+  first, detail on click, never the whole graph: system (one card per service:
+  API, front-end, worker, library) → service (**domains**: routes grouped by
+  the first useful path segment, large groups split into sections, small ones
+  in `other`) → domain (routes by path, handler, tables read/written, callers)
+  → route (**call tree**, opened node by node, with the tables and columns each
+  function reads or writes) → table (columns, who reads/writes it, routes that
+  reach it). Detail panel: `file:line`, `why`, path parameters (and `params` /
+  `returns` when the graph has them), calls, callers, data access, HTTP calls
+  and who consumes a route.
+- **Front-ends**: screens (files that call the API, grouped by folder) with the
+  routes each uses, and the **calls with no route** from `unresolved_http`, by
+  reason. Each API route lists the screens and services that call it.
+- `bizmap.yaml`: `export.domains` (`{service: {domain: [path prefixes |
+  "folder:…"]}}`) and `export.domains_by: path | folder`.
+- Faster on large graphs: one small index read at open, one JSON block per
+  domain / front-end / table batch / folder read on first use, no derived
+  edges shipped. Synthetic 107k nodes / 628k edges: 31 MB, ready in ~0.4 s,
+  every level under 100 ms in headless Chrome.
+- The service graph stays under **Map**; the graph expand/filter view is gone
+  (a table's page lists who reads and writes it).
+- Fictional example: `examples/export/shop.graph.json`
+  (`scripts/export_demo_graph.py`).
+
 ## 0.5.1 — 2026-11-20
 
 ### Fixed

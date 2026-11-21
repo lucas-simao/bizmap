@@ -75,5 +75,6 @@ minor versions; breaking changes are called out in the
 ## Is there an HTML view?
 
 Yes, since 0.5.0: `bizmap export --format html` writes one self-contained,
-offline page (services first, click to expand, search, filter by table) —
+offline page to read the system: services, domains, routes and their call
+trees, tables, and the screens of each front-end —
 see [export](commands/export.md).

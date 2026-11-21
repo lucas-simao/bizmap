@@ -701,7 +701,7 @@ def mcp_cmd(graph_path: Path, repo_root: Path | None) -> None:
     type=click.Choice(["html", "llm"]),
     default="html",
     show_default=True,
-    help="html: one self-contained interactive page (offline). llm: arrives in 0.5.1.",
+    help="html: one self-contained, offline page to read the system (services, domains, routes, tables). llm: not available yet.",
 )
 @click.option(
     "--out",
