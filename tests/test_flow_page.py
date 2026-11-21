@@ -223,55 +223,39 @@ func (r *Reader) MirrorDocument(ctx context.Context, id string) (map[string]any,
 
 func normalize(v any) any { return v }
 """,
-    "internal/pgstore/store.go": """package pgstore
-
-import (
-	"context"
-	"strings"
-	"time"
-
-	"github.com/jackc/pgx/v5"
-)
-
-type Tx struct{ b *pgx.Batch }
-
-func upsertOrderSQL(cols []string) string {
-	return "INSERT INTO orders (" + strings.Join(cols, ", ") + ") VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET total = EXCLUDED.total"
-}
-
-func (t *Tx) WriteOrder(ctx context.Context, id string, m Mapped, now time.Time) error {
-	t.b.Queue(upsertOrderSQL(m.Columns), id, m.Values["customer_id"], m.Values["total"])
-	return nil
-}
-
-type Mapped struct {
-	Columns []string
-	Values  map[string]any
-}
-""",
+    # the mirror in one function (the shape the Go data-flow pass follows today);
+    # the request's two-level version (reader + pgx batch) is the same feeds edge
     "internal/mirror/service.go": """package mirror
 
 import (
 	"context"
-	"time"
 
-	"example.com/orders-api/internal/fsread"
-	"example.com/orders-api/internal/pgstore"
+	"cloud.google.com/go/firestore"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type OrderDoc struct {
+	CustomerID string  `firestore:"customerId"`
+	Total      float64 `firestore:"total"`
+}
+
 type Service struct {
-	reader *fsread.Reader
-	tx     *pgstore.Tx
+	fs *firestore.Client
+	db *pgxpool.Pool
 }
 
-func Map(id string, data map[string]any, now time.Time) (pgstore.Mapped, error) {
-	return pgstore.Mapped{Columns: []string{"id", "customer_id", "total"}, Values: data}, nil
-}
-
-func (s *Service) Mirror(ctx context.Context, id string, now time.Time) error {
-	data, _, _ := s.reader.MirrorDocument(ctx, id)
-	mapped, _ := Map(id, data, now)
-	return s.tx.WriteOrder(ctx, id, mapped, now)
+func (s *Service) Mirror(ctx context.Context, id string) error {
+	snap, err := s.fs.Collection("orders").Doc(id).Get(ctx)
+	if err != nil {
+		return err
+	}
+	var d OrderDoc
+	if err := snap.DataTo(&d); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(ctx, `INSERT INTO orders (id, customer_id, total) VALUES ($1, $2, $3)
+		ON CONFLICT (id) DO UPDATE SET total = EXCLUDED.total`, id, d.CustomerID, d.Total)
+	return err
 }
 """,
     "cmd/api/main.go": """package main
