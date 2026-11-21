@@ -1,4 +1,4 @@
-# nodes (94)
+# nodes (93)
 collection collection:events
 collection collection:jobs
 collection collection:notifications
@@ -84,16 +84,15 @@ function worker/function:main.ping
 function worker/function:main.sweep
 queue catalog/queue:celery:tasks.refresh_orders
 queue catalog/queue:cloud_tasks:ingest
-queue storefront/queue:pubsub:jobs
+queue queue:pubsub:jobs
 queue worker/queue:cloud_tasks:handle_task
 queue worker/queue:firestore:jobs
-queue worker/queue:pubsub:jobs
 table table:audit_log
 table table:documents
 table table:orders
 table table:tenants
 table table:users
-# edges (131)
+# edges (130)
 calls catalog/function:app.get_order -> catalog/function:db.fetch_order [inferred]
 calls catalog/function:app.pay_order -> catalog/function:db.mark_paid [inferred]
 calls catalog/function:app.post_order -> catalog/function:db.create_order [inferred]
@@ -110,7 +109,7 @@ calls_http storefront/function:client.pay_order -> catalog/entrypoint:http:POST:
 calls_http web/function:server.module -> catalog/entrypoint:http:POST:/api/orders [inferred]
 enqueues catalog/function:app.post_order -> catalog/queue:celery:tasks.refresh_orders [inferred]
 enqueues catalog/function:tasks.enqueue_ingest -> catalog/queue:cloud_tasks:ingest [inferred]
-enqueues storefront/function:client.publish_job -> storefront/queue:pubsub:jobs [inferred]
+enqueues storefront/function:client.publish_job -> queue:pubsub:jobs [inferred]
 reads catalog/entrypoint:http:DELETE:/api/orders/{id} -> table:orders [inferred]
 reads catalog/entrypoint:http:GET:/api/orders/{id} -> table:orders [inferred]
 reads catalog/entrypoint:http:GET:/v1/api/orders/{id} -> table:orders [inferred]
@@ -147,8 +146,9 @@ triggers catalog/queue:celery:tasks.refresh_orders -> catalog/entrypoint:celery:
 triggers catalog/queue:celery:tasks.refresh_orders -> catalog/function:tasks.refresh_orders [exact]
 triggers catalog/queue:cloud_tasks:ingest -> worker/entrypoint:firebase_http:POST:/ingest [inferred]
 triggers db_trigger:trg_orders_audit -> catalog/function:sql.log_order_write [exact]
+triggers queue:pubsub:jobs -> worker/entrypoint:pubsub:jobs [inferred]
+triggers queue:pubsub:jobs -> worker/function:main.on_jobs_topic [exact]
 triggers storefront/entrypoint:worker:loop.run_forever_loop -> storefront/function:loop.run_forever_loop [exact]
-triggers storefront/queue:pubsub:jobs -> worker/entrypoint:pubsub:jobs [inferred]
 triggers web/entrypoint:http:GET:/health -> web/function:server.GET /health [inferred]
 triggers web/entrypoint:http:GET:/rpc/tax -> web/function:server.GET /rpc/tax [inferred]
 triggers web/entrypoint:http:POST:/proxy/orders -> web/function:server.POST /proxy/orders [inferred]
@@ -177,8 +177,6 @@ triggers worker/queue:firestore:jobs -> worker/entrypoint:firestore:jobs:created
 triggers worker/queue:firestore:jobs -> worker/entrypoint:firestore:jobs:updated [inferred]
 triggers worker/queue:firestore:jobs -> worker/function:main.on_job_created [exact]
 triggers worker/queue:firestore:jobs -> worker/function:main.on_job_updated [exact]
-triggers worker/queue:pubsub:jobs -> worker/entrypoint:pubsub:jobs [inferred]
-triggers worker/queue:pubsub:jobs -> worker/function:main.on_jobs_topic [exact]
 writes catalog/entrypoint:http:DELETE:/api/orders/{id} -> table:orders [inferred]
 writes catalog/entrypoint:http:POST:/api/orders -> table:audit_log [inferred]
 writes catalog/entrypoint:http:POST:/api/orders -> table:documents [inferred]
