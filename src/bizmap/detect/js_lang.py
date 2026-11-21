@@ -1113,7 +1113,16 @@ class JsAnalyzer:
                     }:
                         qual = _fn_qual(value, module)
                         parent_qual = qual.rsplit(".", 1)[0] if qual else None
-                        if qual and parent_qual and parent_qual != module and _returned_member_key(value):
+                        if qual and _object_member_key(value) and not _returned_member_key(value):
+                            # `export const X = { m: (..) => .. }`: X.m is a function
+                            analysis.functions[qual] = (rel_file, line_of(value))
+                            analysis.function_ends[qual] = value.end_point[0] + 1
+                            fn_nodes[qual] = value
+                            file_quals.append(qual)
+                            why = _js_why(value)
+                            if why:
+                                analysis.function_why[qual] = why
+                        elif qual and parent_qual and parent_qual != module and _returned_member_key(value):
                             analysis.functions[qual] = (rel_file, line_of(value))
                             analysis.function_ends[qual] = value.end_point[0] + 1
                             fn_nodes[qual] = value
@@ -1887,7 +1896,7 @@ def _fn_own_name(cur: Node) -> str | None:
         parent = parent_of(cur)
         if parent is not None and parent.type == "variable_declarator":
             return _declarator_name(parent) or None
-        key = _returned_member_key(cur)
+        key = _returned_member_key(cur) or _object_member_key(cur)
         if key:
             return key
     if cur.type in _NAMED_FN_TYPES:
@@ -1898,10 +1907,55 @@ def _fn_own_name(cur: Node) -> str | None:
         parent = parent_of(cur)
         if parent is not None and parent.type == "variable_declarator":
             return _declarator_name(parent) or None
-        key = _returned_member_key(cur)
+        key = _returned_member_key(cur) or _object_member_key(cur)
         if key:
             return key
     return None
+
+
+_OBJECT_WRAPPERS = frozenset({"parenthesized_expression", "as_expression", "satisfies_expression"})
+
+
+def _declared_object_name(obj: Node | None) -> str | None:
+    """`X` for the object of a module-level `[export] const X = { ... }`
+    (also `{ ... } as const` / `satisfies T`): an object of methods, as an
+    API client module is (`export const widgetsHttpClient = { list: ... }`)."""
+    if obj is None or obj.type != "object":
+        return None
+    up = parent_of(obj)
+    while up is not None and up.type in _OBJECT_WRAPPERS:
+        up = parent_of(up)
+    if up is None or up.type != "variable_declarator":
+        return None
+    decl = parent_of(up)
+    if decl is None or decl.type not in {"lexical_declaration", "variable_declaration"}:
+        return None
+    top = parent_of(decl)
+    if top is not None and top.type == "export_statement":
+        top = parent_of(top)
+    if top is None or top.type != "program":
+        return None
+    name = _declarator_name(up)
+    return name if name and name.isidentifier() else None
+
+
+def _object_member_key(fn: Node) -> str | None:
+    """`list` for the function in `const X = { list: (p) => ... }` at module
+    level (also `list() {}` / `list: function () {}`): a member of an object of
+    methods, known as `X.list`."""
+    if fn.type == "method_definition":
+        obj = parent_of(fn)
+        key = fn.child_by_field_name("name")
+    else:
+        pair = parent_of(fn)
+        if pair is None or pair.type != "pair" or pair.child_by_field_name("value") != fn:
+            return None
+        obj = parent_of(pair)
+        key = pair.child_by_field_name("key")
+    if _declared_object_name(obj) is None:
+        return None
+    name = _unquote(text(key)) if key is not None else ""
+    return name if name.isidentifier() else None
 
 
 def _returned_member_key(fn: Node) -> str | None:
@@ -1945,6 +1999,10 @@ def _fn_qual(fn: Node, module: str) -> str | None:
             name = _fn_own_name(cur)
             if name and cur.type != "method_definition":
                 chain.append(name)
+        elif cur.type == "object":
+            obj_name = _declared_object_name(cur)
+            if obj_name:
+                chain.append(obj_name)  # `const X = { m: ... }` -> X.m
         cur = parent_of(cur)
     return ".".join([module, *reversed(chain)])
 
@@ -3894,9 +3952,11 @@ def _collect_route_literals(
         if const_name and symbol.endswith(".module"):
             symbol = f"{module}.{const_name}"
             is_helper = True
-        elif is_helper and symbol.endswith(".module"):
+        elif is_helper:
             owner = _object_member_owner(top)
-            if owner:
+            # the member may already be a function of its own (`X.m`, a
+            # method of a module-level object): it is still a member helper
+            if owner and (symbol.endswith(".module") or symbol == f"{module}.{owner}"):
                 # `export const paths = { summary: (id) => `/items/${id}/...` }`
                 symbol = f"{module}.{owner}"
                 member = True
