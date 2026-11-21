@@ -183,6 +183,8 @@ def _graph(
             evidence={"file": rel, "line": start, "symbol": fid.split(":", 1)[1]}, end_line=end,
         )
     for etype, frm, to, rel, needle in edges:
+        if to.startswith("collection:") and to not in g.nodes:
+            g.add_node(to, "collection", name=to.split(":", 1)[1], kind="collection")
         line = _line(files[rel], needle) if needle else 1
         g.add_edge(etype, frm, to, evidence=Evidence(rel, line, frm.split(":", 1)[1]))
     texts = source_texts(root, [root / r for r in files])
@@ -469,10 +471,11 @@ def test_reader_and_writer_linked_through_calls(tmp_path: Path) -> None:
         ],
         {"pedidos": PEDIDOS, "resumo_pedido": RESUMO},
     )
+    # the edge is heuristic (through calls); the values go through unchanged, so the columns are exact
     assert _feeds(g) == {
         ("table:pedidos", "table:resumo_pedido"): (
             "heuristic",
-            {("id", "pedido_id", "heuristic", False), ("valor_centavos", "total", "heuristic", False)},
+            {("id", "pedido_id", "exact", False), ("valor_centavos", "total", "exact", False)},
         ),
     }
     edge = g.edges["feeds:table:pedidos->table:resumo_pedido"]

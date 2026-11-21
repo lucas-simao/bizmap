@@ -485,6 +485,25 @@ class Msg:
 
 
 @dataclass
+class Fs:
+    """A Firestore value: ``ref`` (collection / query), ``docref``, ``doc``
+    (a snapshot), ``query`` (a query snapshot), ``change`` (before / after),
+    ``event`` (a trigger's event / context), ``params`` (its path params)."""
+
+    coll: str  # collection node id
+    kind: str
+    id_param: str | None = None
+    hops: tuple[str, ...] = ()
+
+
+def _doc_data(coll: str, hops: tuple[str, ...] = ()) -> Row:
+    """``snap.data()`` / ``to_dict()``: a row whose fields are the document's."""
+    # an unnamed item carries the hops (functions the document crossed)
+    carrier = frozenset({Src(table=coll, col=None, hops=hops)})
+    return Row(ResolvedSelect(items=[(None, carrier)], star_tables=[coll], tables=[coll]))
+
+
+@dataclass
 class Str:
     value: str
     dynamic: bool = False
@@ -562,11 +581,15 @@ def _hop_value(value: Any, hop: str) -> Any:
         )
         return Row(sel) if isinstance(value, Row) else Rows(sel, value.kind)
     if isinstance(value, Msg):
-        return Msg(value.topic, (hop, *value.hops))
+        return Msg(value.topic, (hop, *value.hops), value.local)
+    if isinstance(value, Fs):
+        return Fs(value.coll, value.kind, value.id_param, (hop, *value.hops))
     return value
 
 
 def _elem(value: Any) -> Any:
+    if isinstance(value, Fs):
+        return Fs(value.coll, "doc", value.id_param, value.hops) if value.kind in ("query", "ref") else None
     if isinstance(value, Rows):
         return Row(value.sel)
     if isinstance(value, ListOf):
@@ -633,6 +656,9 @@ class RepoContext:
         self.reads_any: set[str] = set()
         self.writes_any: set[str] = set()
         self.budget = 0  # sub-analyses (calls followed) left for the current function
+        self.triggers: dict[str, dict[str, Any]] = {}  # fid -> firestore_trigger (TS handlers)
+        self.push_topics: dict[str, str] = {}  # fid -> Pub/Sub topic delivered to it (push / subscription)
+        self.aliases: dict[str, str] = {}  # Pydantic `Field(alias=…)`: alias -> attribute
         self.calls: dict[str, set[str]] = defaultdict(set)
         self.write_lines: dict[tuple[str, str], set[int]] = defaultdict(set)  # (file, table) -> lines
         self.queue_targets: dict[str, list[tuple[str, str]]] = defaultdict(list)  # fid -> [(queue, fn)]
@@ -665,6 +691,10 @@ class RepoContext:
             self.fns[node.id] = info
             self.by_file[info.file].append(info)
         triggers: dict[str, set[str]] = defaultdict(set)
+        for node in g.nodes.values():
+            trig = node.attrs.get("firestore_trigger")
+            if node.type == "function" and isinstance(trig, dict) and trig.get("collection"):
+                self.triggers[node.id] = trig
         for e in g.edges.values():
             if e.type in ("reads", "writes"):
                 t = _table_of(g, e.to_id)
@@ -678,12 +708,26 @@ class RepoContext:
                         self.write_lines[(e.evidence.file, t)].add(int(e.evidence.line or 0))
             elif e.type == "calls":
                 self.calls[e.from_id].add(e.to_id)
-            elif e.type == "triggers" and e.from_id.split("/")[-1].startswith("queue:"):
+            elif e.type == "triggers" and _bare(e.from_id).startswith("queue:"):
                 triggers[e.from_id].add(e.to_id)
         for e in g.edges.values():
             if e.type == "enqueues":
                 for consumer in triggers.get(e.to_id, ()):
                     self.queue_targets[e.from_id].append((e.to_id, consumer))
+        # a Pub/Sub topic delivered to a function: queue -> fn, or queue -> route -> fn (push)
+        ep_handlers: dict[str, set[str]] = defaultdict(set)
+        for e in g.edges.values():
+            if e.type == "triggers" and _bare(e.from_id).startswith("entrypoint:"):
+                ep_handlers[e.from_id].add(e.to_id)
+        for qid, targets in triggers.items():
+            qnode = g.nodes.get(qid)
+            if qnode is None or qnode.attrs.get("kind") != "pubsub" or not qnode.attrs.get("name"):
+                continue
+            topic = str(qnode.attrs["name"])
+            for t in targets:
+                for fid in ep_handlers.get(t, {t}):
+                    if _bare(fid).startswith("function:"):
+                        self.push_topics.setdefault(fid, topic)
 
     def spend(self) -> bool:
         """One more callee analysis for the function being read (bounded)."""
@@ -729,6 +773,12 @@ class RepoContext:
         if not spec:
             return None
         return [str(c).lower() for c in (spec.get("columns") or {})]
+
+
+def _bare(node_id: str) -> str:
+    """The id without its repo prefix (``repo/table:x`` → ``table:x``)."""
+    head = node_id.split(":", 1)[0]
+    return node_id.split("/", 1)[1] if "/" in head else node_id
 
 
 def _lang(value: str) -> str:
@@ -1017,6 +1067,8 @@ _ORM_WRITE = {
     "create", "createmany", "insert", "insertone", "insertmany", "upsert", "update", "updatemany", "save",
     "bulkcreate", "values", "insert_one", "bulk_insert_mappings", "add", "merge",
 }
+_V1_TRIGGERS = {"onwrite", "oncreate", "onupdate", "ondelete"}
+DOC_ID = "__id__"  # a Firestore document's id, as a field of its collection
 _MSG_WRAPPERS = {"data", "body", "payload", "value", "message", "attributes", "params", "detail", "content"}
 _ASSIGN_KW = re.compile(r"^(?:export\s+)?(?:const|let|var)\s+")
 
@@ -1059,6 +1111,7 @@ class Analyzer:
         self.hop = hop
         self.line = fn.start
         self.strings = ctx.file_strings.get(fn.file) or {}
+        self._chain_topic: str | None = None
         self.callees = self._callee_index()
 
     # --- env
@@ -1122,6 +1175,19 @@ class Analyzer:
             if lit is not None and not lit.dynamic:
                 topic = lit.value
         is_worker = bool(re.search(r"(?:^|\s|\.)Worker$", cb.callee.strip()))
+        trig = self.ctx.triggers.get(self.fn.fid)
+        if trig is not None and cb.params and (method.startswith("ondocument") or method in _V1_TRIGGERS):
+            coll = f"collection:{trig.get('collection')}"
+            idp = trig.get("id_param")
+            if method.startswith("ondocument"):
+                self.assign(cb.params[0], Fs(coll, "event", idp))
+            else:
+                first = "change" if method in ("onwrite", "onupdate") else "doc"
+                self.assign(cb.params[0], Fs(coll, first, idp))
+                if len(cb.params) > 1:
+                    self.assign(cb.params[1], Fs(coll, "event", idp))
+            self.run(cb.body)
+            return
         if topic and cb.params and (method in _CONSUME or is_worker):
             local = method in ("on", "once", "addlistener")
             self.assign(cb.params[0], Msg(topic, local=local))
@@ -1253,6 +1319,12 @@ class Analyzer:
     # --- expressions
     def _field(self, value: Any, name: str) -> Any:
         key = name.lower()
+        if isinstance(value, Fs):
+            return self._fs_field(value, name)
+        if isinstance(value, Row) and any(_bare(t).startswith("collection:") for t in value.sel.star_tables):
+            # a Firestore document's fields keep their case and need no schema
+            t = next(t for t in value.sel.star_tables if _bare(t).startswith("collection:"))
+            return Scalar(frozenset({Src(table=t, col=name, hops=_hops_of_sel(value.sel))}))
         if isinstance(value, Row):
             for item_name, srcs in value.sel.items:
                 if item_name == key:
@@ -1284,6 +1356,95 @@ class Analyzer:
                 return None
             return Scalar(_with(value.srcs, transform=True))
         return None
+
+    def _fs_field(self, v: Fs, name: str) -> Any:
+        if v.kind == "doc":
+            if name == "id":
+                return Scalar(frozenset({Src(table=v.coll, col=DOC_ID, hops=v.hops)}))
+            if name == "ref":
+                return Fs(v.coll, "docref", v.id_param, v.hops)
+            return None
+        if v.kind == "query":
+            return ListOf(Fs(v.coll, "doc", v.id_param, v.hops)) if name == "docs" else None
+        if v.kind == "change":
+            return Fs(v.coll, "doc", v.id_param, v.hops) if name in ("after", "before") else None
+        if v.kind == "event":
+            if name == "data":
+                return Fs(v.coll, "change", v.id_param, v.hops)
+            if name == "params":
+                return Fs(v.coll, "params", v.id_param, v.hops)
+            return None
+        if v.kind == "params":
+            if v.id_param and name == v.id_param:
+                return Scalar(frozenset({Src(table=v.coll, col=DOC_ID, hops=v.hops)}))
+            return None
+        return None
+
+    def _fs_call(self, v: Fs | None, ml: str, recv_text: str, args: list[str], fs_collection: str | None) -> Any:
+        """Firestore reads: refs, queries, snapshots, ``data()`` / ``to_dict()``."""
+        touched = self.ctx.touch.get(self.fn.fid, set())
+
+        def ref(name: str) -> Fs | None:
+            cid = f"collection:{name.lower()}"
+            return Fs(cid, "ref") if cid in touched else None
+
+        def mark_id(arg: str, coll: str) -> None:
+            a = arg.strip()
+            if re.fullmatch(r"[A-Za-z_$][\w$]*", a) and self.lookup(a) is None:
+                self.assign(a, Scalar(frozenset({Src(table=coll, col=DOC_ID)})))
+
+        if v is None:
+            if ml == "collection" and fs_collection and recv_text:
+                return ref(fs_collection)
+            if ml in ("collection", "collectiongroup") and not recv_text and len(args) >= 2:
+                lit = self.m.lit(args[-1] if ml == "collection" else args[1])
+                if lit is not None and not lit.dynamic:
+                    return ref(lit.value.strip("/").split("/")[-1])
+                return None
+            if ml == "doc" and not recv_text and args:
+                base = self.eval(args[0])
+                if isinstance(base, Fs) and base.kind == "ref":
+                    if len(args) > 1:
+                        mark_id(args[1], base.coll)
+                    return Fs(base.coll, "docref", None, base.hops)
+                if len(args) >= 3:
+                    lit = self.m.lit(args[1])
+                    if lit is not None and not lit.dynamic:
+                        r = ref(lit.value)
+                        if r is not None:
+                            mark_id(args[2], r.coll)
+                            return Fs(r.coll, "docref")
+                return None
+            if ml in ("getdoc", "getdocfromserver", "getdocfromcache", "getdocs", "getdocsfromserver",
+                      "getdocsfromcache", "query") and args and not recv_text:
+                base = self.eval(args[0])
+                if not isinstance(base, Fs):
+                    return _NO_CALL
+                if ml == "query":
+                    return Fs(base.coll, "ref", None, base.hops)
+                kind = "doc" if base.kind == "docref" else "query"
+                return Fs(base.coll, kind, None, base.hops)
+            return _NO_CALL
+        if ml in ("to_dict", "data", "todict"):
+            if v.kind in ("doc", "change"):
+                return _doc_data(v.coll, v.hops)
+            return None
+        if ml == "get" and args and v.kind == "doc":
+            lit = self.m.lit(args[0])
+            return Scalar(frozenset({Src(table=v.coll, col=lit.value, hops=v.hops)})) if lit is not None else None
+        if ml in ("get", "stream", "list", "getall") and not args:
+            return Fs(v.coll, "doc" if v.kind == "docref" else "query", v.id_param, v.hops)
+        if ml in ("doc", "document"):
+            if args and v.kind == "ref":
+                mark_id(args[0], v.coll)
+            return Fs(v.coll, "docref", v.id_param, v.hops)
+        if ml == "collection" and fs_collection:
+            return ref(fs_collection)
+        if ml in ("where", "order_by", "orderby", "limit", "limittolast", "offset", "select", "withconverter",
+                  "with_converter", "start_at", "start_after", "end_at", "end_before", "startat", "startafter",
+                  "endat", "endbefore"):
+            return Fs(v.coll, "ref", v.id_param, v.hops)
+        return _NO_CALL
 
     def _index(self, value: Any, k: int) -> Any:
         if isinstance(value, Row):
@@ -1322,6 +1483,8 @@ class Analyzer:
             return None
         # ternary / binary operators at depth 0 → transform of every operand
         ops = _top_operands(e, self.fn.lang)
+        if ops is not None and len(ops) == 2 and ops[1].strip() in ("{}", "[]", "None", "null", "undefined", "dict()"):
+            return self.eval(ops[0], depth + 1)  # `doc.to_dict() or {}`: the value, or nothing
         if ops is not None:
             acc: set[Src] = set()
             for o in ops:
@@ -1479,6 +1642,12 @@ class Analyzer:
                     lit = self.m.lit(args[0])
                     if lit is not None and not lit.dynamic:
                         fs_collection = lit.value
+                if method == "topic" and args:
+                    lit = self.m.lit(args[0])
+                    if lit is not None and not lit.dynamic:
+                        self._chain_topic = lit.value
+                elif method not in ("publishMessage", "publishJSON", "publish"):
+                    self._chain_topic = None
                 result = self.call(chain_text, method, recv_text, recv_val, val, args, fs_collection, depth)
                 if method in ("doc", "document", "collection", "Collection", "Doc", "where", "Where"):
                     result = result if result is not None else None
@@ -1510,9 +1679,26 @@ class Analyzer:
         sql_idx, sql = self._sql_arg(args)
         if sql is not None and (ml in _QUERY_METHODS or ml.startswith(("query", "exec", "select", "get", "fetch"))):
             return self._sql_call(sql, args[sql_idx + 1 :], recv_text)
+        if ml in ("publishmessage", "publishjson", "publish") and self._chain_topic and args:
+            payload = self.eval(args[0], depth + 1)
+            if ml == "publishmessage" and isinstance(payload, Obj):
+                payload = payload.fields.get("json") if isinstance(payload.fields.get("json"), Obj) else None
+            if isinstance(payload, Obj) and sources(payload):
+                self.publishes.append(
+                    PublishEvent(fn=self.fn.fid, topic=self._chain_topic, payload=payload, file=self.fn.file, line=self.line)
+                )
+            return None
+        if isinstance(cur_val, Msg) and ml not in _PUBLISH:
+            return cur_val  # envelope.order_record(), request.json(): still the message
+        if ml not in _FS_WRITE or not isinstance(cur_val, Fs):
+            fsv = self._fs_call(cur_val if isinstance(cur_val, Fs) else None, ml, recv_text, args, fs_collection)
+            if fsv is not _NO_CALL:
+                return fsv
+        if ml == "get" and isinstance(cur_val, Row) and args:
+            lit = self.m.lit(args[0])
+            if lit is not None:
+                return self._field(cur_val, lit.value)
         on_rows = cur_val if isinstance(cur_val, (Rows, Row)) else (recv_val if isinstance(recv_val, (Rows, Row)) else None)
-        if on_rows is None and recv_text and not chain.endswith(")"):
-            on_rows = None
         target_rows = self._receiver_rows(chain)
         if target_rows is not None:
             on_rows = target_rows
@@ -1605,8 +1791,14 @@ class Analyzer:
             return result
         # unknown function of tainted values: a transformation
         acc: set[Src] = set()
+        msg = None
         for a in args:
-            acc |= sources(self.eval(a, depth + 1))
+            v = self.eval(a, depth + 1)
+            if isinstance(v, Msg):
+                msg = v
+            acc |= sources(v)
+        if msg is not None and not acc:
+            return msg  # json.loads(base64.b64decode(message.data)): the message, decoded
         if isinstance(cur_val, Scalar):
             acc |= cur_val.srcs
         return Scalar(_with(frozenset(acc), transform=True)) if acc else None
@@ -1802,7 +1994,7 @@ class Analyzer:
         if queues:
             hop_ids = (self.fn.fid, queues[0])
         arg_vals = [self.eval(a, depth + 1) for a in args]
-        tainted = any(sources(v) for v in arg_vals)
+        tainted = any(sources(v) or isinstance(v, (Msg, Fs)) for v in arg_vals)
         result: Any = None
         if tainted and cid in self.ctx.writes_any and self.ctx.spend():
             sub = _analyze(self.ctx, info, depth=self.depth + 1, hop=(*self.hop, *hop_ids), args=arg_vals, method_call=True)
@@ -1856,6 +2048,9 @@ def _top_operands(e: str, lang: str) -> list[str] | None:
                 continue
             if two in ("=>",):
                 return None
+            if c == "?" and e[i + 1 : i + 2] == ".":
+                i += 2  # optional chaining, not a ternary
+                continue
             if c in "+-*/%?|" and i > 0:
                 prev = e[:i].rstrip()
                 if prev and prev[-1] not in "([{,=:?+-*/%!&|<>" and not (c == "-" and prev[-1] == "e"):
@@ -2019,6 +2214,12 @@ def _analyze(
                     an.bind(p, val)
                 else:
                     an.assign(p, val)
+    topic = ctx.push_topics.get(info.fid)
+    if args is None and topic and header:
+        # the route / subscriber a Pub/Sub topic is delivered to: its first parameter is the message
+        params = [p for p in _header_params(header, info) if p not in ("self", "cls")]
+        if params:
+            an.assign(params[0], Msg(topic))
     an.run(stmts)
     return an
 
@@ -2055,7 +2256,7 @@ def _fk_only(graph: Graph, src: str, dst: str, entries: list[dict]) -> bool:
     return all(e["to"].split(".", 1)[1] in fk_cols for e in entries)
 
 
-_ID_COL = re.compile(r"(?i:(?:^|_)(?:id|uuid|key)$)|[a-z0-9]Id$")
+_ID_COL = re.compile(r"(?i:(?:^|_)(?:id|uuid|key)$)|[a-z0-9]Id$|^__id__$")
 
 
 def _ids_only(entries: list[dict]) -> bool:
@@ -2165,7 +2366,8 @@ def _build_feeds(ctx: RepoContext, writes: list[WriteEvent], skip_queue: bool = 
                     "from": f"{_name(graph, s.table)}.{s.col}",
                     "to": f"{_name(graph, w.target)}.{w.col}",
                     "fn": w.fn,
-                    "confidence": "exact" if direct and not transform else "heuristic",
+                    # a value passed through calls unchanged is still the same value
+                    "confidence": "exact" if not transform else "heuristic",
                     "evidence": ev,
                 }
                 if transform:
@@ -2259,6 +2461,12 @@ def _stash_flows(ctx: RepoContext, publishes: list[PublishEvent], writes: list[W
             lst = entry["fields"].setdefault(s.field, [])
             if item not in lst:
                 lst.append(item)
+            path = [*reversed(s.hops), w.fn]
+            if len(path) > 1 and len(path) > len(entry.get("path") or []):
+                entry["path"] = path
+            alias = next((a for a, attr in ctx.aliases.items() if attr == s.field), None)
+            if alias is not None:
+                entry.setdefault("aliases", {})[alias] = s.field
     for (fn, _t, _l), entry in sorted(consumed.items()):
         node = graph.nodes.get(fn)
         if node is None:
@@ -2278,6 +2486,10 @@ def _resolve_in(graph: Graph, node_id: str, local: str) -> str | None:
     if local in graph.nodes:
         return local
     return None
+
+
+def _norm_field(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
 def _repo_of(graph: Graph, node_id: str) -> str | None:
@@ -2314,8 +2526,18 @@ def link_queue_flows(graph: Graph) -> None:
                 if pe.get("local") and _repo_of(graph, prod) != _repo_of(graph, cons):
                     continue
                 pairs: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+                cfields = ce.get("fields") or {}
+                by_norm: dict[str, list[str]] = defaultdict(list)
+                for cf in cfields:
+                    by_norm[_norm_field(cf)].append(cf)
+                aliases = ce.get("aliases") or {}
                 for fname, srcs in sorted((pe.get("fields") or {}).items()):
-                    dests = (ce.get("fields") or {}).get(fname) or []
+                    # the same field, or the same name in another case (`customerId` / `customer_id`),
+                    # or a declared alias (Pydantic `Field(alias="customerId")`)
+                    names = [fname] if fname in cfields else by_norm.get(_norm_field(fname), [])
+                    if not names and fname in aliases:
+                        names = [aliases[fname]]
+                    dests = [d for n in names for d in cfields.get(n) or []]
                     for s in srcs:
                         st = _resolve_in(graph, prod, s["table"])
                         if st is None:
@@ -2341,8 +2563,10 @@ def link_queue_flows(graph: Graph) -> None:
                     continue
                 if qid is None:
                     qid = _queue_node(graph, topic)
+                cons_path = [p for p in (ce.get("path") or [cons]) if p]
+                cons_path = [_resolve_in(graph, cons, p) or p for p in cons_path] if cons_path != [cons] else [cons]
                 for (st, dt), entries in sorted(pairs.items()):
-                    path = [prod, qid, cons]
+                    path = [prod, qid, *cons_path]
                     for e in entries:
                         e["path"] = path
                     add_feed(graph, st, dt, path=path, confidence="heuristic", evidence=ce.get("evidence") or {}, entries=entries)
@@ -2350,7 +2574,9 @@ def link_queue_flows(graph: Graph) -> None:
 
 # ------------------------------------------------------------ entry ----
 
-_PRODUCE_HINT = re.compile(r"\.(?:publish|publishJSON|send|sendMessage|emit|enqueue|produce|add)\(\s*['\"`]")
+_PRODUCE_HINT = re.compile(
+    r"\.(?:publish|publishJSON|send|sendMessage|emit|enqueue|produce|add)\(\s*['\"`]|\.topic\(\s*['\"`]"
+)
 _CONSUME_HINT = re.compile(r"\.(?:subscribe|on|once|consume|process|handle|listen|addListener)\(\s*['\"`]|\bWorker\(\s*['\"`]")
 _FS_HINT = re.compile(r"\.(?:collection|Collection)\(\s*['\"`]")
 # one statement that copies: INSERT … SELECT / UPDATE … SET … FROM (no reads edge needed)
@@ -2359,6 +2585,9 @@ _COPY_HINT = re.compile(
     r"|\bupdate\s+[\w.\"]+\s+(?:as\s+\w+\s+)?set\b[^;]{0,600}?\bfrom\b",
     re.I | re.S,
 )
+
+
+_PYDANTIC_ALIAS = re.compile(r"^\s+([A-Za-z_]\w*)\s*:\s*[^=\n]+=\s*Field\([^)\n]*\balias\s*=\s*[\"']([^\"']+)[\"']", re.M)
 
 
 @dataclass
@@ -2407,6 +2636,7 @@ def _candidates(ctx: RepoContext, firestore: bool) -> list[FnInfo]:
                 (writes and _in_span(h.copy, info))
                 or (reads and (_in_span(h.produce, info) or _in_span(h.fs, info)))
                 or _in_span(h.consume, info)
+                or fid in ctx.push_topics
             )
         if ok:
             out.append(info)
@@ -2416,6 +2646,10 @@ def _candidates(ctx: RepoContext, firestore: bool) -> list[FnInfo]:
 def apply(graph: Graph, root: Path, texts: dict[str, str] | None = None, *, firestore: bool = False) -> None:
     """Add ``feeds`` edges (with ``column_map``) to a freshly scanned graph."""
     ctx = RepoContext(graph, root, texts, firestore=firestore)
+    for rel, text in (texts or {}).items():
+        if rel.endswith(".py") and "alias" in text:
+            for m in _PYDANTIC_ALIAS.finditer(text):
+                ctx.aliases.setdefault(m.group(2), m.group(1))
     candidates = _candidates(ctx, bool(firestore))
     writes: list[WriteEvent] = []
     publishes: list[PublishEvent] = []
