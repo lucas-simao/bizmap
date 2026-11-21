@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-11-20
 
 ### Changed
 
@@ -34,6 +34,9 @@
   (a table's page lists who reads and writes it).
 - Fictional example: `examples/export/shop.graph.json`
   (`scripts/export_demo_graph.py`).
+- `--format llm` now says it is not available yet (it did not ship in 0.5.1).
+- Graph format version `0.6.0` (no field changed; it follows the release).
+  GitHub Action examples pin `@v0.6.0`.
 
 ## 0.5.1 — 2026-11-20
 
