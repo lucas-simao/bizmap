@@ -158,6 +158,15 @@ def apply_go_cloud(
                 bucket.append(item)
             node.attrs["unresolved_queues"] = bucket
         names = sorted({t.name for t in named if t.name})
+        if p.candidates:
+            # which of several wrapper instances is the receiver is unknown: no edges
+            if names:
+                bucket = list(node.attrs.get("unresolved_queues") or [])
+                item = {"kind": "pubsub", "candidates": names, "evidence": Evidence(p.file, p.line, p.symbol).to_dict()}
+                if item not in bucket:
+                    bucket.append(item)
+                node.attrs["unresolved_queues"] = bucket
+            continue
         for t in named:
             qid = queue_id("pubsub", str(t.name))
             graph.add_node(qid, "queue", kind="pubsub", name=t.name)
@@ -166,10 +175,9 @@ def apply_go_cloud(
             attrs: dict[str, Any] = {}
             if p.via:
                 attrs["via"] = p.via
-            if len(names) > 1:
-                attrs["candidates"] = names
             edge = graph.add_edge(
-                "enqueues", fid, qid, confidence=Confidence.EXACT if len(names) == 1 else Confidence.INFERRED,
+                "enqueues", fid, qid,
+                confidence=Confidence.EXACT if p.confidence == "exact" else Confidence.INFERRED,
                 evidence=Evidence(p.file, p.line, p.symbol), **attrs,
             )
             if p.fields:

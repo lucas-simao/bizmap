@@ -72,7 +72,7 @@ _CHAIN_PASS = {"Doc", "Collection", "Where", "WhereEntity", "OrderBy", "Limit", 
 _TOPIC_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~%+-]{0,254}$")
 
 
-@dataclass
+@dataclass(frozen=True)
 class GoTopic:
     name: str | None  # None: dynamic (an env var without a default)
     env: str | None = None
@@ -86,6 +86,8 @@ class GoPublish:
     topics: list[GoTopic]
     fields: list[str] = field(default_factory=list)
     via: str | None = None  # the wrapper type
+    candidates: bool = False  # several wrapper instances could be the receiver: which one is unknown
+    confidence: str = "exact"
 
 
 @dataclass
@@ -150,6 +152,14 @@ class _Index:
         self.fs_tags: dict[str, dict[str, str]] = {}
         self.returns: dict[str, str] = {}
         self.env_values = env_values
+        self.env_defaults: dict[str, str] = {}  # env var -> its default wherever one is given
+        self.field_values: dict[str, set[str]] = {}  # struct field -> literal / constant values set to it
+        for gf in files.values():
+            for em in _ENV_CALL.finditer(gf.text):
+                env = _lit(gf.m, em.group(1))
+                default = _lit(gf.m, em.group(2)) if em.group(2) else None
+                if env and default:
+                    self.env_defaults.setdefault(env, default)
         for gf in files.values():
             self._scan(gf)
 
@@ -167,7 +177,8 @@ class _Index:
         if not env:
             return None
         default = _lit(gf.m, em.group(2)) if em.group(2) else None
-        name = self.env_values.get(env) or default or None
+        # `os.Getenv("X")` in a command, `getEnv("X", "d")` in the config package: the same default
+        name = self.env_values.get(env) or default or self.env_defaults.get(env) or None
         return GoTopic(name, env)
 
     def _scan(self, gf: _GoFile) -> None:
@@ -177,6 +188,14 @@ class _Index:
             if v is not None:
                 self._put_const(mm.group(1), v)
         for mm in _FIELD_START.finditer(t):
+            expr = _expr_at(t, mm.end()).strip()
+            fname = mm.group(1) or mm.group(2)
+            if fname and expr:
+                v = _lit(gf.m, expr)
+                if v is None and re.fullmatch(_IDENT, expr):
+                    v = "\x01" + expr  # a constant: resolved once every file is read
+                if v is not None:
+                    self.field_values.setdefault(fname, set()).add(v)
             if "nv(" not in t[mm.end() : mm.end() + 60] and "Getenv" not in t[mm.end() : mm.end() + 60]:
                 continue
             topic = self.env_topic(gf, _expr_at(t, mm.end()))
@@ -204,7 +223,7 @@ class _Index:
                     dm = re.search(r'\benvDefault:"([^"]*)"', tag)
                     env = em.group(1)
                     self.fields.setdefault(fm.group(1), []).append(
-                        GoTopic(self.env_values.get(env) or (dm.group(1) if dm else None) or None, env)
+                        GoTopic(self.env_values.get(env) or (dm.group(1) if dm else None) or self.env_defaults.get(env), env)
                     )
             if jt:
                 self.json_tags[mm.group(1)] = jt
@@ -216,6 +235,18 @@ class _Index:
             rm = re.match(rf"^\(?\s*\*?(?:{_IDENT}\.)?({_IDENT})", rest)
             if rm and rm.group(1) not in ("error", "string", "bool", "int", "int64", "float64", "any"):
                 self.returns.setdefault(mm.group(1), rm.group(1))
+
+    def field_value(self, name: str) -> str | None:
+        """The one value a struct field is set to (`collection: "orders"` in its constructor)."""
+        vals = set()
+        for v in self.field_values.get(name, ()):
+            if v.startswith("\x01"):
+                c = self.consts.get(v[1:])
+                if c is None:
+                    continue
+                v = c
+            vals.add(v)
+        return next(iter(vals)) if len(vals) == 1 else None
 
     def topics(self, gf: _GoFile, expr: str, fn_body: str = "") -> list[GoTopic] | None:
         """Topics an expression names (None: not resolvable)."""
@@ -350,9 +381,14 @@ def _chain(gf: _GoFile, idx: _Index, start: int, base: list[str] | None) -> tupl
         if name == "Collection":
             if not args:
                 return None, i, None, []
-            v = _lit(gf.m, args[0])
-            if v is None and re.fullmatch(_IDENT, args[0].strip()):
-                v = idx.consts.get(args[0].strip())
+            a0 = args[0].strip()
+            v = _lit(gf.m, a0)
+            if v is None and re.fullmatch(_IDENT, a0):
+                v = idx.consts.get(a0)
+            if v is None:
+                fm = re.fullmatch(rf"{_IDENT}\.({_IDENT})", a0)
+                if fm:
+                    v = idx.consts.get(fm.group(1)) or idx.field_value(fm.group(1))  # pkg.Const / r.collection
             if v is None:
                 return None, i, None, []
             colls.append(v.strip("/").split("/")[-1] if "/" in v else v)
@@ -386,14 +422,8 @@ def _write_fields(gf: _GoFile, idx: _Index, args: list[str], body: str) -> list[
 
 def _firestore(gf: _GoFile, idx: _Index, res: GoCloudResult) -> None:
     t = gf.text
-    refs: dict[str, list[str]] = {}  # var -> collections
-    for mm in re.finditer(rf"\b({_IDENT})\s*(?:,\s*{_IDENT}\s*)?:?=\s*[\w.()\[\]]*?(?=\.\s*Collection\s*\()", t):
-        start = mm.end()
-        colls, end, op, _ = _chain(gf, idx, start, None)
-        if colls and op is None:
-            refs[mm.group(1)] = colls
-    used: set[int] = set()
     sites: list[tuple[str, list[str], int, list[str]]] = []
+    used: set[int] = set()
     for mm in re.finditer(r"\.\s*Collection\s*\(", t):
         if mm.start() in used:
             continue
@@ -402,17 +432,30 @@ def _firestore(gf: _GoFile, idx: _Index, res: GoCloudResult) -> None:
             used.add(mm.start() + sub.start())
         if colls and op:
             sites.append((op, colls, mm.start(), last))
-    for name, colls in refs.items():
-        for mm in re.finditer(rf"(?<![\w.]){re.escape(name)}\s*(?=\.)", t):
-            got, end, op, last = _chain(gf, idx, mm.end(), colls)
-            if got and op:
-                sites.append((op, got, mm.start(), last))
-        # tx.Get(ref) / tx.Set(ref, …) / batch.Create(ref, …)
-        for mm in re.finditer(rf"\.\s*(Get|Set|Update|Delete|Create)\s*\(\s*{re.escape(name)}\b", t):
-            j = match_close(t, t.index("(", mm.start()))
-            args = split_top(t[t.index("(", mm.start()) + 1 : j])
-            op = "read" if mm.group(1) == "Get" else "write"
-            sites.append((op, colls, mm.start(), args[1:]))
+    # references kept in a variable (or a slice element), per function
+    spans = [(gf.lines_at[f.start - 1], gf.lines_at[f.end] if f.end < len(gf.lines_at) else len(t)) for f in gf.fns] or [(0, len(t))]
+    for a, b in spans:
+        body = t[a:b]
+        refs: dict[str, list[str]] = {}
+        for mm in re.finditer(rf"\b({_IDENT})(?:\s*\[[^\]\n]*\])?\s*(?:,\s*{_IDENT}\s*)?:?=\s*[\w.()\[\]]*?(?=\.\s*Collection\s*\()", body):
+            colls, _end, op, _ = _chain(gf, idx, a + mm.end(), None)
+            if colls and op is None:
+                refs[mm.group(1)] = colls
+        for name, colls in refs.items():
+            for mm in re.finditer(rf"(?<![\w.]){re.escape(name)}(?:\s*\[[^\]\n]*\])?\s*(?=\.)", body):
+                got, _end, op, last = _chain(gf, idx, a + mm.end(), colls)
+                if got and op:
+                    sites.append((op, got, a + mm.start(), last))
+            # client.GetAll(ctx, refs): the references built above (in a loop)
+            for mm in re.finditer(rf"\.\s*GetAll\s*\(\s*{_IDENT}\s*,\s*{re.escape(name)}\b", body):
+                sites.append(("read", colls, a + mm.start(), []))
+            # tx.Get(ref) / tx.Set(ref, …) / batch.Update(refs[i], …)
+            for mm in re.finditer(rf"\.\s*(Get|Set|Update|Delete|Create)\s*\(\s*{re.escape(name)}\b", body):
+                op_paren = body.index("(", mm.start())
+                j = match_close(body, op_paren)
+                args = split_top(body[op_paren + 1 : j])
+                op = "read" if mm.group(1) == "Get" else "write"
+                sites.append((op, colls, a + mm.start(), args[1:]))
     for op, colls, pos, last in sites:
         line = gf.line(pos)
         fn = gf.fn_at(line)
@@ -428,102 +471,419 @@ def _firestore(gf: _GoFile, idx: _Index, res: GoCloudResult) -> None:
 
 _DIRECT = re.compile(r"\.\s*(Publisher|Topic)\s*\(\s*([^()]*?)\s*\)\s*\.\s*Publish\s*\(")
 _PUB_VAR = re.compile(rf"\b({_IDENT})\s*(?:,\s*{_IDENT}\s*)?:?=\s*[\w.]+\s*\.\s*(Publisher|Topic)\s*\(\s*([^()]*?)\s*\)")
+_HEADER = re.compile(rf"\bfunc\s*(?:\(\s*({_IDENT})?\s*\*?\s*({_IDENT})\s*(?:\[[^\]]*\])?\s*\)\s*)?({_IDENT})\s*\(")
+_IFACE = re.compile(rf"\btype\s+({_IDENT})\s+interface\s*\{{")
+_BUILTIN_TYPES = {"string", "bool", "int", "int64", "int32", "float64", "float32", "byte", "rune", "error", "any", "uint", "uint64"}
+
+# An instance of a publisher wrapper: the map key it was built for (``None``
+# when it was not built in a keyed loop) and the topics it publishes to.
+_Inst = tuple[str | None, tuple[GoTopic, ...]]
 
 
 def _publish_args(t: str, open_paren: int) -> list[str]:
     return split_top(t[open_paren + 1 : match_close(t, open_paren)])
 
 
-def _pubsub(files: dict[str, _GoFile], texts: dict[str, str], idx: _Index, res: GoCloudResult) -> None:
-    wrappers: dict[str, tuple[str, int]] = {}  # wrapper type -> (constructor name, topic param index)
-    wrapper_fns: set[str] = set()
-    for rel, gf in files.items():
-        if not PS_IMPORT.search(texts[rel]):
-            continue
-        for fn in gf.fns:
-            body = gf.body(fn)
-            # direct: client.Publisher(T).Publish(ctx, msg)
-            for mm in _DIRECT.finditer(body):
-                topics = idx.topics(gf, mm.group(2), body)
-                if topics is None:
-                    continue  # a constructor parameter: a wrapper, below
-                args = _publish_args(body, mm.end() - 1)
-                fields = _fields_of_data(gf, idx, args[1], body) if len(args) > 1 else []
-                line = fn.start + body.count("\n", 0, mm.start())
-                res.publishes.append(GoPublish(fn.qual, rel, line, topics, fields))
-            # through a variable: p := client.Publisher(T) … p.Publish(ctx, msg)
-            for mm in _PUB_VAR.finditer(body):
-                var, expr = mm.group(1), mm.group(3)
-                topics = idx.topics(gf, expr, body)
-                for pm in re.finditer(rf"(?<![\w.]){re.escape(var)}\s*\.\s*Publish\s*\(", body):
-                    if topics is None:
-                        continue
-                    args = _publish_args(body, pm.end() - 1)
-                    fields = _fields_of_data(gf, idx, args[1], body) if len(args) > 1 else []
-                    line = fn.start + body.count("\n", 0, pm.start())
-                    res.publishes.append(GoPublish(fn.qual, rel, line, topics, fields))
-            # a constructor: client.Publisher(<param>) / for _, id := range <param> { client.Publisher(id) }
-            header = body.split("{", 1)[0]
-            pm2 = re.search(rf"\bfunc\s+({_IDENT})\s*\((.*?)\)\s*\(?\s*\*?({_IDENT})", header, re.S)
-            if not pm2:
-                continue
-            params = [re.match(rf"\s*({_IDENT})", p).group(1) for p in split_top(pm2.group(2)) if re.match(rf"\s*{_IDENT}", p)]
-            for mm in re.finditer(r"\.\s*(?:Publisher|Topic)\s*\(\s*(" + _IDENT + r")\s*\)", body):
-                arg = mm.group(1)
-                src = arg
-                rm = re.search(rf"for\s+(?:{_IDENT}\s*,\s*)?{re.escape(arg)}\s*:=\s*range\s+({_IDENT})", body)
-                if rm:
-                    src = rm.group(1)
-                if src in params:
-                    wrappers[pm2.group(3)] = (pm2.group(1), params.index(src))
-                    wrapper_fns.add(fn.qual)
-    if not wrappers:
-        return
-    # the wrapper's topics: the constructor's argument where it is built
-    topics_of: dict[str, list[GoTopic]] = {}
-    for wtype, (ctor, index) in wrappers.items():
-        found: list[GoTopic] = []
-        for gf in files.values():
-            for mm in re.finditer(rf"(?<![\w]){re.escape(ctor)}\s*\(", gf.text):
-                before = gf.text[max(0, mm.start() - 6) : mm.start()]
-                if re.search(r"func\s*$", before):
-                    continue
-                args = _publish_args(gf.text, mm.end() - 1)
-                if index >= len(args):
-                    continue
-                fn = gf.fn_at(gf.line(mm.start()))
-                got = idx.topics(gf, args[index], gf.body(fn) if fn else "")
-                if got:
-                    found += got
-        uniq: dict[tuple[str | None, str | None], GoTopic] = {}
-        for tp in found:
-            uniq[(tp.name, tp.env)] = tp
-        if uniq:
-            topics_of[wtype] = list(uniq.values())
-    all_topics: dict[tuple[str | None, str | None], GoTopic] = {}
-    for tps in topics_of.values():
-        for tp in tps:
-            all_topics[(tp.name, tp.env)] = tp
-    if not all_topics:
-        return
-    via = sorted(topics_of)[0] if len(topics_of) == 1 else None
-    # callers: x.Publish(ctx, data, …) that is not the gcloud Publisher itself
+def _norm_type(t: str) -> str:
+    t = re.sub(r"\s+", "", t.strip()).lstrip("*")
+    if t.startswith(("[]", "map[")) or t.startswith("..."):
+        return t.replace("context.", "")
+    return t.split(".")[-1]
+
+
+def _params(text: str) -> list[tuple[str, str]]:
+    """(name, type) of a Go parameter list; grouped names share the type."""
+    parts = [p.strip() for p in split_top(text) if p.strip()]
+    out: list[tuple[str, str]] = []
+    pending: list[str] = []
+    for part in parts:
+        m = re.match(rf"^({_IDENT})\s+(.+)$", part, re.S)
+        if m:
+            for n in pending:
+                out.append((n, m.group(2)))
+            pending = []
+            out.append((m.group(1), m.group(2)))
+        elif re.fullmatch(_IDENT, part):
+            pending.append(part)
+        else:
+            out.append(("_", part))  # an unnamed parameter: its type
+    for n in pending:
+        out.append(("_", n))  # unnamed parameters: types only
+    return out
+
+
+@dataclass
+class _FnInfo:
+    fn: _Fn
+    gf: _GoFile
+    body: str
+    name: str
+    pkg: str  # package directory's last segment
+    recv: str | None  # receiver variable
+    recv_type: str | None
+    params: list[tuple[str, str]]
+
+
+def _fn_infos(files: dict[str, _GoFile]) -> list[_FnInfo]:
+    out: list[_FnInfo] = []
     for gf in files.values():
-        rel = gf.rel
+        pkg = gf.rel.rsplit("/", 1)[0].rsplit("/", 1)[-1] if "/" in gf.rel else ""
         for fn in gf.fns:
-            if fn.qual in wrapper_fns or any(fn.qual.endswith(f"{w}.Publish") for w in wrappers):
-                continue
             body = gf.body(fn)
-            for mm in re.finditer(rf"(?<![\w])({_IDENT}(?:\.{_IDENT})*)\s*\.\s*Publish\s*\(", body):
-                recv = mm.group(1)
-                if recv.split(".")[-1] in ("Publisher", "Topic"):
+            hm = _HEADER.search(body)
+            if not hm:
+                continue
+            open_p = hm.end() - 1
+            close = match_close(body, open_p)
+            out.append(_FnInfo(fn, gf, body, hm.group(3), pkg, hm.group(1), hm.group(2), _params(body[open_p + 1 : close])))
+    return out
+
+
+class _Flow:
+    """Which wrapper instance each variable, struct field and parameter holds.
+
+    A constructor call (``NewPublisher(ctx, p, []string{cfg.OrderTopic})``) is
+    an instance; it flows through assignments, ``m[k] = p``, struct literals
+    (``&Announcer{pub: pub}``), ``s.pub = pub`` and call arguments into the
+    callee's parameter. A ``x.Publish(…)`` call publishes to the instances
+    ``x`` holds."""
+
+    def __init__(self, idx: _Index, fns: list[_FnInfo], ctors: dict[str, int], files: dict[str, _GoFile]):
+        self.idx = idx
+        self.fns = fns
+        self.ctors = ctors  # constructor name -> topic parameter index
+        self.files = files
+        self.vals: dict[tuple, frozenset[_Inst]] = {}
+        self.by_name: dict[str, list[_FnInfo]] = {}
+        for f in fns:
+            self.by_name.setdefault(f.name, []).append(f)
+        self.struct_fields: dict[str, list[str]] = {}  # struct -> field names in order
+        self.field_types: dict[tuple[str, str], str] = {}
+        for gf in files.values():
+            for mm in _STRUCT.finditer(gf.text):
+                close = match_close(gf.text, mm.end() - 1)
+                names: list[str] = []
+                for line in re.split(r"[\n;]", gf.text[mm.end() : close]):
+                    fm = re.match(rf"\s*({_IDENT}(?:\s*,\s*{_IDENT})*)\s+([^\x00\n]+?)\s*(?:\x00\d+\x00)?\s*$", line)
+                    if not fm:
+                        em = re.match(rf"\s*\*?(?:{_IDENT}\.)?({_IDENT})\s*$", line)
+                        if em:
+                            names.append(em.group(1))  # embedded
+                            self.field_types[(mm.group(1), em.group(1))] = em.group(1)
+                        continue
+                    for n in re.split(r"\s*,\s*", fm.group(1)):
+                        names.append(n)
+                        self.field_types[(mm.group(1), n)] = _norm_type(fm.group(2))
+                self.struct_fields[mm.group(1)] = names
+
+    # -- values
+    def _get(self, key: tuple) -> frozenset[_Inst]:
+        return self.vals.get(key, frozenset())
+
+    def _put(self, key: tuple, insts: frozenset[_Inst]) -> bool:
+        if not insts:
+            return False
+        old = self.vals.get(key, frozenset())
+        new = old | insts
+        if new != old:
+            self.vals[key] = new
+            return True
+        return False
+
+    def _local_key(self, f: _FnInfo, name: str) -> tuple | None:
+        for k, (pn, _) in enumerate(f.params):
+            if pn == name:
+                return ("param", f.fn.qual, k)
+        return ("var", f.fn.qual, name)
+
+    def _built(self, f: _FnInfo, ctor: str, args: list[str]) -> frozenset[_Inst]:
+        index = self.ctors[ctor]
+        if index >= len(args):
+            return frozenset()
+        arg = args[index].strip()
+        lm = re.match(r"^\[\]string\s*\{(.*)\}$", arg, re.S)
+        elems = split_top(lm.group(1)) if lm else [arg]
+        fixed: list[GoTopic] = []
+        keyed: list[tuple[str, list[GoTopic]]] | None = None
+        for el in elems:
+            el = el.strip()
+            km = re.fullmatch(rf"({_IDENT})\s*\[\s*([^\]]+?)\s*\]", el)
+            if km:
+                entries = self._map_literal(f, km.group(1))
+                if entries is not None:
+                    key = km.group(2).split(".")[-1]
+                    if key in dict(entries):
+                        fixed += dict(entries)[key]
+                    else:
+                        keyed = entries  # `topics[k]` in a loop: one instance per key
                     continue
-                args = _publish_args(body, mm.end() - 1)
-                if len(args) < 2 or re.match(r"^&?(?:\w+\.)?Message\s*\{", args[1].strip()):
+            got = self.idx.topics(f.gf, el, f.body)
+            if got is None:
+                return frozenset()
+            fixed += got
+        if keyed is not None:
+            return frozenset((k, tuple(_uniq(fixed + v))) for k, v in keyed)
+        return frozenset({(None, tuple(_uniq(fixed)))}) if fixed else frozenset()
+
+    def _map_literal(self, f: _FnInfo, name: str) -> list[tuple[str, list[GoTopic]]] | None:
+        mm = re.search(rf"\b{re.escape(name)}\s*:?=\s*map\[[^\]]*\]\s*\w*\s*\{{", f.body)
+        if not mm:
+            return None
+        close = match_close(f.body, mm.end() - 1)
+        out: list[tuple[str, list[GoTopic]]] = []
+        for part in split_top(f.body[mm.end() : close]):
+            kv = re.match(r"^\s*([^:]+?)\s*:\s*(.+?)\s*$", part, re.S)
+            if not kv:
+                continue
+            got = self.idx.topics(f.gf, kv.group(2), f.body)
+            if got:
+                key = kv.group(1).strip()
+                lit = _lit(f.gf.m, key)
+                out.append((lit if lit is not None else key.split(".")[-1], got))
+        return out or None
+
+    def value(self, f: _FnInfo, expr: str, depth: int = 0) -> frozenset[_Inst]:
+        e = expr.strip().lstrip("&").strip()
+        if depth > 4 or not e:
+            return frozenset()
+        cm = re.match(rf"^(?:{_IDENT}\.)?({_IDENT})\s*\(", e)
+        if cm and cm.group(1) in self.ctors and match_close(e, cm.end() - 1) == len(e) - 1:
+            return self._built(f, cm.group(1), _publish_args(e, cm.end() - 1))
+        im = re.fullmatch(r"(.+?)\s*\[\s*([^\[\]]+?)\s*\]", e)
+        if im:
+            base = self.value(f, im.group(1), depth + 1)
+            key = _lit(f.gf.m, im.group(2)) or im.group(2).split(".")[-1]
+            hit = frozenset(i for i in base if i[0] == key)
+            return hit or base
+        if re.fullmatch(_IDENT, e):
+            key = self._local_key(f, e)
+            return self._get(key) if key else frozenset()
+        fm = re.fullmatch(rf"({_IDENT})\.({_IDENT})", e)
+        if fm:
+            owner = self._type_of(f, fm.group(1))
+            if owner:
+                return self._get(("field", owner, fm.group(2)))
+        return frozenset()
+
+    def _type_of(self, f: _FnInfo, var: str) -> str | None:
+        if var == f.recv:
+            return f.recv_type
+        for pn, pt in f.params:
+            if pn == var:
+                return _norm_type(pt)
+        vm = re.search(rf"\b(?:var\s+{re.escape(var)}\s+\*?(?:{_IDENT}\.)?({_IDENT})|{re.escape(var)}\s*:?=\s*&?(?:{_IDENT}\.)?({_IDENT})\s*\{{)", f.body)
+        if vm:
+            return vm.group(1) or vm.group(2)
+        return None
+
+    def static_type(self, f: _FnInfo, expr: str) -> str | None:
+        e = expr.strip()
+        if re.fullmatch(_IDENT, e):
+            return self._type_of(f, e)
+        fm = re.fullmatch(rf"({_IDENT})\.({_IDENT})", e)
+        if fm:
+            owner = self._type_of(f, fm.group(1))
+            if owner:
+                return self.field_types.get((owner, fm.group(2)))
+        return None
+
+    def _callees(self, f: _FnInfo, callee: str) -> list[_FnInfo]:
+        parts = callee.split(".")
+        name = parts[-1]
+        cands = self.by_name.get(name, [])
+        if len(parts) == 1:
+            return [c for c in cands if c.pkg == f.pkg and c.recv_type is None]
+        head = ".".join(parts[:-1])
+        if len(parts) == 2 and self._type_of(f, parts[0]) is None and self._local_key(f, parts[0])[0] != "param":
+            if not re.search(rf"\b{re.escape(parts[0])}\s*:?=", f.body):
+                return [c for c in cands if c.pkg == parts[0] and c.recv_type is None]  # pkg.Func
+        owner = self.static_type(f, head)
+        if owner:
+            typed = [c for c in cands if c.recv_type == owner]
+            if typed:
+                return typed
+        methods = [c for c in cands if c.recv_type is not None]
+        return methods if len(methods) == 1 else []
+
+    def propagate(self) -> None:
+        for _ in range(6):
+            changed = False
+            for f in self.fns:
+                changed |= self._step(f)
+            if not changed:
+                return
+
+    def _step(self, f: _FnInfo) -> bool:
+        body = f.body
+        changed = False
+        # x := <expr> / x, err := <expr> / x = <expr> / m[k] = <expr> / s.f = <expr>
+        for mm in re.finditer(rf"(?:^|[\n;{{]|\bfor\s)\s*((?:{_IDENT}(?:\.{_IDENT})?(?:\[[^\]\n]*\])?)(?:\s*,\s*{_IDENT})*)\s*:?=(?!=)\s*", body):
+            lhs = mm.group(1).split(",")[0].strip()
+            rhs = _expr_at(body, mm.end())
+            insts = self.value(f, rhs)
+            if not insts:
+                continue
+            km = re.fullmatch(rf"({_IDENT})\s*\[\s*([^\]]+?)\s*\]", lhs)
+            if km:
+                key = _lit(f.gf.m, km.group(2)) or km.group(2).split(".")[-1]
+                if all(i[0] is None for i in insts):
+                    insts = frozenset((key, i[1]) for i in insts)
+                target = self._local_key(f, km.group(1))
+            elif "." in lhs:
+                v, fld = lhs.split(".", 1)
+                owner = self._type_of(f, v)
+                target = ("field", owner, fld) if owner else None
+            else:
+                target = self._local_key(f, lhs)
+            if target:
+                changed |= self._put(target, insts)
+        # struct literals: &T{pub: x} / T{a, b, x}
+        for mm in re.finditer(rf"(?<![\w.])(?:{_IDENT}\.)?({_IDENT})\s*\{{", body):
+            stype = mm.group(1)
+            if stype not in self.struct_fields:
+                continue
+            if body[: mm.start()].rstrip().rstrip("*").rstrip().endswith(")"):
+                continue  # `func New(…) *Service {`: a result type, not a literal
+            close = match_close(body, mm.end() - 1)
+            parts = split_top(body[mm.end() : close])
+            for k, part in enumerate(parts):
+                kv = re.match(rf"^\s*({_IDENT})\s*:\s*(.+?)\s*$", part, re.S)
+                fname, expr = (kv.group(1), kv.group(2)) if kv else (
+                    (self.struct_fields[stype][k], part) if k < len(self.struct_fields[stype]) else (None, None))
+                if fname is None or expr is None:
                     continue
-                line = fn.start + body.count("\n", 0, mm.start())
-                fields = _fields_of_data(gf, idx, args[1], body)
-                res.publishes.append(GoPublish(fn.qual, rel, line, list(all_topics.values()), fields, via))
+                changed |= self._put(("field", stype, fname), self.value(f, expr))
+        # call arguments flow into the callee's parameters
+        for mm in re.finditer(rf"(?<![\w.])({_IDENT}(?:\.{_IDENT})*)\s*\(", body):
+            callee = mm.group(1)
+            if callee in ("func", "if", "for", "switch", "return") or mm.start() == 0:
+                continue
+            args = _publish_args(body, mm.end() - 1)
+            vals = [self.value(f, a) for a in args]
+            if not any(vals):
+                continue
+            for c in self._callees(f, callee):
+                for k, v in enumerate(vals):
+                    if v and k < len(c.params):
+                        changed |= self._put(("param", c.fn.qual, k), v)
+        return changed
+
+
+def _uniq(topics: list[GoTopic]) -> list[GoTopic]:
+    seen: dict[tuple[str | None, str | None], GoTopic] = {}
+    for t in topics:
+        seen.setdefault((t.name, t.env), t)
+    return list(seen.values())
+
+
+def _publish_sig(f: _FnInfo) -> tuple[str, ...]:
+    return tuple(_norm_type(t) for _, t in f.params)
+
+
+def _iface_sigs(files: dict[str, _GoFile]) -> dict[str, tuple[str, ...]]:
+    """Interfaces declaring ``Publish(…)``: name -> parameter types."""
+    out: dict[str, tuple[str, ...]] = {}
+    for gf in files.values():
+        for mm in _IFACE.finditer(gf.text):
+            close = match_close(gf.text, mm.end() - 1)
+            body = gf.text[mm.end() : close]
+            pm = re.search(r"\bPublish\s*\(", body)
+            if pm:
+                pclose = match_close(body, pm.end() - 1)
+                out[mm.group(1)] = tuple(_norm_type(t) for _, t in _params(body[pm.end() : pclose]))
+    return out
+
+
+def _pubsub(files: dict[str, _GoFile], texts: dict[str, str], idx: _Index, res: GoCloudResult) -> None:
+    infos = _fn_infos(files)
+    ctors: dict[str, int] = {}  # wrapper constructor -> topic parameter index
+    wrappers: dict[str, str] = {}  # wrapper type -> constructor
+    wrapper_fns: set[str] = set()
+    for f in infos:
+        gf, fn, body = f.gf, f.fn, f.body
+        if not PS_IMPORT.search(texts[gf.rel]):
+            continue
+        # direct: client.Publisher(T).Publish(ctx, msg)
+        for mm in _DIRECT.finditer(body):
+            topics = idx.topics(gf, mm.group(2), body)
+            if topics is None:
+                continue  # a constructor parameter: a wrapper, below
+            args = _publish_args(body, mm.end() - 1)
+            fields = _fields_of_data(gf, idx, args[1], body) if len(args) > 1 else []
+            line = fn.start + body.count("\n", 0, mm.start())
+            res.publishes.append(GoPublish(fn.qual, gf.rel, line, topics, fields))
+        # through a variable: p := client.Publisher(T) … p.Publish(ctx, msg)
+        for mm in _PUB_VAR.finditer(body):
+            var, expr = mm.group(1), mm.group(3)
+            topics = idx.topics(gf, expr, body)
+            if topics is None:
+                continue
+            for pm in re.finditer(rf"(?<![\w.]){re.escape(var)}\s*\.\s*Publish\s*\(", body):
+                args = _publish_args(body, pm.end() - 1)
+                fields = _fields_of_data(gf, idx, args[1], body) if len(args) > 1 else []
+                line = fn.start + body.count("\n", 0, pm.start())
+                res.publishes.append(GoPublish(fn.qual, gf.rel, line, topics, fields))
+        # a constructor: client.Publisher(<param>) / for _, id := range <param> { client.Publisher(id) }
+        if f.recv_type is not None:
+            continue
+        ret = re.match(r"\s*\(?\s*\*?(?:\w+\.)?(\w+)", body[match_close(body, _HEADER.search(body).end() - 1) + 1 :])
+        if not ret:
+            continue
+        params = [n for n, _ in f.params]
+        for mm in re.finditer(r"\.\s*(?:Publisher|Topic)\s*\(\s*(" + _IDENT + r")\s*\)", body):
+            arg = mm.group(1)
+            rm = re.search(rf"for\s+(?:{_IDENT}\s*,\s*)?{re.escape(arg)}\s*:=\s*range\s+({_IDENT})", body)
+            src = rm.group(1) if rm else arg
+            if src in params:
+                ctors[f.name] = params.index(src)
+                wrappers[ret.group(1)] = f.name
+                wrapper_fns.add(fn.qual)
+    if not ctors:
+        return
+    # the wrapper's own Publish method: the signature a caller must match
+    sigs = {f.recv_type: _publish_sig(f) for f in infos if f.name == "Publish" and f.recv_type in wrappers}
+    wrapper_sigs = set(sigs.values())
+    ifaces = {name for name, sig in _iface_sigs(files).items() if sig in wrapper_sigs}
+    flow = _Flow(idx, infos, ctors, files)
+    flow.propagate()
+    all_insts: set[_Inst] = set()
+    for v in flow.vals.values():
+        all_insts |= v
+    for f in infos:
+        if f.fn.qual in wrapper_fns or f.recv_type in wrappers:
+            continue
+        body = f.body
+        for mm in re.finditer(rf"(?<![\w])({_IDENT}(?:\.{_IDENT})*(?:\[[^\]\n]*\])?)\s*\.\s*Publish\s*\(", body):
+            recv = mm.group(1)
+            if recv.split(".")[-1] in ("Publisher", "Topic"):
+                continue
+            args = _publish_args(body, mm.end() - 1)
+            if len(args) < 2 or re.match(r"^&?(?:\w+\.)?Message\s*\{", args[1].strip()):
+                continue
+            if not any(len(args) == len(sig) for sig in wrapper_sigs):
+                continue  # `store.Publish(ctx, id)`: another Publish
+            insts = flow.value(f, recv)
+            stype = flow.static_type(f, re.sub(r"\[[^\]]*\]$", "", recv))
+            if stype is not None and stype not in ifaces and stype not in wrappers:
+                continue  # a receiver of another type
+            confidence = "exact"
+            if not insts:
+                if stype is None or not all_insts:
+                    continue  # nothing says it is a publisher
+                insts = frozenset(all_insts)  # a publisher interface, instance unknown
+                confidence = "inferred"
+            line = f.fn.start + body.count("\n", 0, mm.start())
+            fields = _fields_of_data(f.gf, idx, args[1], body)
+            groups = {i[1] for i in insts}
+            topics = _uniq([t for g in sorted(groups, key=lambda g: [x.name or "" for x in g]) for t in g])
+            res.publishes.append(
+                GoPublish(f.fn.qual, f.gf.rel, line, topics, fields, wrappers and _via(insts, wrappers),
+                          candidates=len(groups) > 1, confidence=confidence)
+            )
+
+
+def _via(insts: frozenset[_Inst], wrappers: dict[str, str]) -> str | None:
+    return sorted(wrappers)[0] if len(wrappers) == 1 else None
 
 
 def valid_topic(name: str | None) -> bool:
