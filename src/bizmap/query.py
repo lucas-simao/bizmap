@@ -21,7 +21,12 @@ JSON output (``--format json``) is a stable contract, ``"schema":
 
 from __future__ import annotations
 
+import contextlib
 import json
+import marshal
+import os
+import re
+import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +44,20 @@ MAX_VISIT = 2_000  # nodes one walk may visit (a guard for huge, dense graphs: t
 MAX_ROOTS = 25  # entrypoints listed per function
 MAX_WRITER_HOPS = 50  # "written by" lines per table in a trace (who-writes lists them all)
 _ENGINE = {"postgres": "Postgres", "mysql": "MySQL", "sqlite": "SQLite", "sqlserver": "SQL Server"}
+
+
+try:  # optional, faster JSON parser
+    import orjson as _orjson  # type: ignore[import-not-found]
+
+    def _loads(raw: bytes) -> Any:
+        try:
+            return _orjson.loads(raw)
+        except _orjson.JSONDecodeError as exc:
+            raise ValueError(str(exc)) from exc
+except ImportError:  # pragma: no cover - depends on the environment
+
+    def _loads(raw: bytes) -> Any:
+        return json.loads(raw)
 
 
 class QueryError(Exception):
@@ -62,11 +81,44 @@ def _split(node_id: str) -> tuple[str | None, str]:
     return None, node_id
 
 
+class _Adj:
+    """Edges around a node, kept as indexes into one edge list (cheap to cache)."""
+
+    __slots__ = ("edges", "idx")
+
+    def __init__(self, edges: list[dict[str, Any]], idx: dict[str, list[int]]) -> None:
+        self.edges = edges
+        self.idx = idx
+
+    def get(self, nid: str, default: Any = None) -> list[dict[str, Any]]:
+        ids = self.idx.get(nid)
+        if not ids:
+            return [] if default is None else default
+        edges = self.edges
+        return [edges[i] for i in ids]
+
+
+CACHE_VERSION = 1
+
+
+def cache_path(graph: Path) -> Path:
+    """``bizmap.graph.json`` → ``bizmap.graph.idx`` (next to it)."""
+    graph = Path(graph)
+    name = graph.name[: -len(".json")] if graph.name.endswith(".json") else graph.name
+    return graph.with_name(name + ".idx")
+
+
+def _cache_key(graph: Path) -> tuple[Any, ...]:
+    st = Path(graph).stat()
+    # marshal's format follows the Python version: a cache from another one is rebuilt
+    return (CACHE_VERSION, sys.version_info[0], sys.version_info[1], st.st_size, st.st_mtime_ns)
+
+
 @dataclass
 class Index:
     nodes: dict[str, dict[str, Any]]
-    out: dict[str, list[dict[str, Any]]]
-    inc: dict[str, list[dict[str, Any]]]
+    out: _Adj
+    inc: _Adj
     by_name: dict[str, list[str]]  # lower name -> data node ids (tables, views, collections)
     columns: dict[tuple[str | None, str], list[str]]  # (repo, lower table) -> column ids
     col_by_name: dict[str, list[str]]  # "table.column" lower -> column ids
@@ -87,26 +139,84 @@ class Index:
             ]
         return got
 
+    loaded_from_cache: bool = False
+
     @classmethod
-    def load(cls, path: Path) -> Index:
+    def load(cls, path: Path, use_cache: bool = True) -> Index:
+        """Read the graph JSON, or its index cache (``bizmap.graph.idx``) when
+        that was built from the same file (same size and mtime) by the same
+        Python. A fresh index is written next to the graph when possible."""
+        path = Path(path)
+        key = _cache_key(path)
+        cpath = cache_path(path)
+        if use_cache and cpath.is_file():
+            try:
+                blob = marshal.loads(cpath.read_bytes())
+                if isinstance(blob, dict) and tuple(blob.get("key") or ()) == key:
+                    return cls._from_cache(blob)
+            except (EOFError, ValueError, TypeError, KeyError, OSError):
+                pass  # unreadable / old: rebuilt below
+        raw = path.read_bytes()
         try:
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
+            data = _loads(raw)
+        except ValueError as exc:
             raise ValueError(f"{path}: invalid graph JSON ({exc})") from exc
         if not isinstance(data, dict) or not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
             raise ValueError(f"{path} is not a BizMap graph (expected an object with `nodes` and `edges` lists)")
-        return cls.from_dict(data)
+        ix = cls.from_dict(data)
+        if use_cache:
+            ix._write_cache(cpath, key)
+        return ix
+
+    def _write_cache(self, cpath: Path, key: tuple[Any, ...]) -> None:
+        blob = {
+            "key": key,
+            "nodes": self.nodes,
+            "edges": self.out.edges,
+            "out": self.out.idx,
+            "inc": self.inc.idx,
+            "by_name": self.by_name,
+            "columns": [[r, t, ids] for (r, t), ids in self.columns.items()],
+            "col_by_name": self.col_by_name,
+            "unresolved_http": self.unresolved_http,
+            "repo": self.repo,
+        }
+        tmp = cpath.with_name(cpath.name + f".{os.getpid()}.tmp")
+        try:
+            tmp.write_bytes(marshal.dumps(blob))
+            os.replace(tmp, cpath)
+        except (OSError, ValueError):  # a read-only folder, an odd value: answer without a cache
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+
+    @classmethod
+    def _from_cache(cls, blob: dict[str, Any]) -> Index:
+        edges = blob["edges"]
+        return cls(
+            nodes=blob["nodes"],
+            out=_Adj(edges, blob["out"]),
+            inc=_Adj(edges, blob["inc"]),
+            by_name=blob["by_name"],
+            columns={(r, t): ids for r, t, ids in blob["columns"]},
+            col_by_name=blob["col_by_name"],
+            unresolved_http=blob["unresolved_http"],
+            repo=blob["repo"],
+            loaded_from_cache=True,
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Index:
         nodes = {n["id"]: n for n in data.get("nodes") or [] if isinstance(n, dict) and "id" in n}
-        out: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        inc: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        edges: list[dict[str, Any]] = []
+        out: dict[str, list[int]] = defaultdict(list)
+        inc: dict[str, list[int]] = defaultdict(list)
         for e in data.get("edges") or []:
             if not isinstance(e, dict) or "from" not in e or "to" not in e:
                 continue
-            out[e["from"]].append(e)
-            inc[e["to"]].append(e)
+            k = len(edges)
+            edges.append(e)
+            out[e["from"]].append(k)
+            inc[e["to"]].append(k)
         by_name: dict[str, list[str]] = defaultdict(list)
         columns: dict[tuple[str | None, str], list[str]] = defaultdict(list)
         col_by_name: dict[str, list[str]] = defaultdict(list)
@@ -125,11 +235,11 @@ class Index:
             lst.sort()
         return cls(
             nodes=nodes,
-            out=out,
-            inc=inc,
-            by_name=by_name,
-            columns=columns,
-            col_by_name=col_by_name,
+            out=_Adj(edges, dict(out)),
+            inc=_Adj(edges, dict(inc)),
+            by_name=dict(by_name),
+            columns=dict(columns),
+            col_by_name=dict(col_by_name),
             unresolved_http=[u for u in data.get("unresolved_http") or [] if isinstance(u, dict)],
             repo=data.get("repo"),
         )
@@ -143,7 +253,25 @@ class Index:
         return _split(nid)[0] or n.get("repo") or self.repo
 
     def store(self, nid: str) -> str:
-        """Firestore / Postgres / MySQL / SQLite / SQL — for data nodes."""
+        """Firestore / Postgres / MySQL / SQLite / SQL — for data nodes. ``SQL``
+        (engine unknown) borrows the engine of the same table in another repo
+        (same name, same or unknown database) when exactly one is known, so one
+        entity carries one label everywhere."""
+        own = self._own_store(nid)
+        n = self.nodes.get(nid) or {}
+        if own != "SQL" or n.get("type") not in ("table", "view"):
+            return own
+        db = str(n.get("db") or "").lower()
+        name = str(n.get("name") or "").lower()
+        peers = {
+            self._own_store(p)
+            for p in self.by_name.get(name, [])
+            if p != nid and self.kind(p) == n.get("type")
+            and (not db or not str(self.nodes[p].get("db") or "") or str(self.nodes[p].get("db")).lower() == db)
+        } - {"SQL"}
+        return next(iter(peers)) if len(peers) == 1 else own
+
+    def _own_store(self, nid: str) -> str:
         n = self.nodes.get(nid) or {}
         if n.get("type") == "column":
             t = self.table_of_column(nid)
@@ -244,14 +372,24 @@ class Entity:
     nodes: list[str]  # node ids, one per repo
 
     def to_dict(self, ix: Index) -> dict[str, Any]:
-        stores = sorted({ix.store(n) for n in self.nodes})
         return {
             "kind": self.kind,
             "name": self.name,
-            "store": stores[0] if len(stores) == 1 else stores,
+            "store": group_store(ix, self.nodes),
             "repos": sorted({r for r in (ix.repo_of(n) for n in self.nodes) if r}),
             "nodes": [ix.brief(n) for n in self.nodes],
         }
+
+
+def group_store(ix: Index, ids: list[str]) -> str | list[str]:
+    """One label for nodes grouped as the same entity: ``SQL`` only says the
+    engine is unknown, so a known engine of another node wins (one repo saw
+    the driver, the other did not). A list only when known engines differ."""
+    stores = {ix.store(n) for n in ids}
+    known = sorted(stores - {"SQL"})
+    if not known:
+        return "SQL"
+    return known[0] if len(known) == 1 else known
 
 
 def _db_key(ix: Index, nid: str) -> str:
@@ -323,7 +461,7 @@ def resolve(ix: Index, ref: str) -> Entity:
             candidates.append({
                 "kind": str(first.get("type")),
                 "name": ix.label(g[0]),
-                "store": ix.store(g[0]),
+                "store": group_store(ix, g),
                 "repos": sorted({r for r in (ix.repo_of(n) for n in g) if r}),
                 "ids": g,
                 "qualify": _qualified(ix, g),
@@ -432,6 +570,41 @@ def _roots(ix: Index, fn: str) -> tuple[list[dict[str, Any]], bool]:
     return result
 
 
+# start-up / wiring code between a `main` and the real handler: `buildRouter`,
+# `RegisterEvent`, `NewServer`, `setupRoutes`, `run`… (only skipped after a
+# root that is itself a function, never after an HTTP route or a consumer)
+_WIRING = re.compile(
+    r"^(?:main|init|run|start|serve|execute|routes?|router|"
+    r"(?:setup|bootstrap|configure|initiali[sz]e|wire|mount|register)\w*|"
+    r"(?:build|new|make|create|add|init)(?:routes?|router|server|app|handlers?|api|http|mux|engine|deps|dependencies|container|services?)|"
+    r"\w*(?:router|routes|mux)|"
+    r"func\d+|\$?\d+|<?lambda>?|anonymous|<anonymous>)$",  # a closure inside the wiring
+    re.IGNORECASE,
+)
+_ROOT_KINDS_WITH_WIRING = ("main", "cli", "job", "cron", "command")
+
+
+def _short(ix: Index, nid: str) -> str:
+    return ix.label(nid).rsplit(".", 1)[-1]
+
+
+def _wiring_prefix(ix: Index, root: str, mid: list[str]) -> int:
+    """How many functions right after ``root`` are start-up wiring, so the
+    short path shows the first real handler (``main → … → Handle → …``)."""
+    node = ix.nodes.get(root) or {}
+    if node.get("type") == "entrypoint" and str(node.get("kind") or "") not in _ROOT_KINDS_WITH_WIRING:
+        return 0
+    if node.get("type") == "function" and not _WIRING.match(_short(ix, root)):
+        return 0
+    k = 0
+    # keep at least one function before the writer
+    while k < len(mid) - 1 and _WIRING.match(_short(ix, mid[k])):
+        k += 1
+    if k == len(mid) - 1 and _WIRING.match(_short(ix, mid[k])):
+        k += 1
+    return k
+
+
 def _access_rows(ix: Index, entity: Entity, etype: str) -> list[dict[str, Any]]:
     targets = _data_targets(ix, entity)
     per_fn: dict[str, dict[str, Any]] = {}
@@ -458,10 +631,14 @@ def _access_rows(ix: Index, entity: Entity, etype: str) -> list[dict[str, Any]]:
         entries = []
         for r in roots:
             path = r["path"]
+            mid = path[1:-1]  # between the entrypoint and the writer
+            skip = _wiring_prefix(ix, r["root"], mid)
+            handler = mid[skip] if skip < len(mid) else None
             entries.append({
                 "entrypoint": ix.brief(r["root"]),
-                "handler": ix.brief(path[1]) if len(path) > 2 else None,
-                "via": max(0, len(path) - 3),
+                "handler": ix.brief(handler) if handler else None,
+                "wiring": skip,
+                "via": max(0, len(mid) - skip - 1),
                 "path": [ix.brief(p) for p in path],
                 "confidence": _BY_RANK[min(_rank(r["confidence"]), _rank(access))],
             })
@@ -776,8 +953,8 @@ TXT = {
         "writes": "writes", "reads": "reads", "via": "via {n} function", "via_n": "via {n} functions",
         "no_entry": "no entrypoint reaches it", "none_w": "No function writes it in this graph.",
         "none_r": "No function reads it in this graph.", "same_in": "Same {kind} in {n} repos: {repos}. To pick one, qualify it ({example}).",
-        "unresolved": "Could change this answer", "dyn_writes": "{n} write(s) with a {family} name built at runtime in {repo} could not be resolved",
-        "dyn_reads": "{n} read(s) with a {family} name built at runtime in {repo} could not be resolved",
+        "unresolved": "Could change this answer", "dyn_writes": "{n} write(s) with a {family} name built at runtime ({repos}) could not be resolved",
+        "dyn_reads": "{n} read(s) with a {family} name built at runtime ({repos}) could not be resolved",
         "nothing_unres": "Nothing unresolved in these repos could change this answer.",
         "ambiguous": "{ref!r} names {n} different things. Qualify it:", "not_found": "No table, collection or column matches {ref!r}.",
         "similar": "Similar names: {names}", "downstream": "Downstream (where the data goes)", "upstream": "Upstream (where it comes from)",
@@ -796,8 +973,8 @@ TXT = {
         "writes": "escreve", "reads": "lê", "via": "via {n} função", "via_n": "via {n} funções",
         "no_entry": "nenhum ponto de entrada chega nela", "none_w": "Nenhuma função escreve nela neste grafo.",
         "none_r": "Nenhuma função lê dela neste grafo.", "same_in": "Mesma {kind} em {n} repos: {repos}. Para escolher um, qualifique ({example}).",
-        "unresolved": "Pode mudar esta resposta", "dyn_writes": "{n} escrita(s) com nome de {family} montado em tempo de execução em {repo} não puderam ser resolvidas",
-        "dyn_reads": "{n} leitura(s) com nome de {family} montado em tempo de execução em {repo} não puderam ser resolvidas",
+        "unresolved": "Pode mudar esta resposta", "dyn_writes": "{n} escrita(s) com nome de {family} montado em tempo de execução ({repos}) não puderam ser resolvidas",
+        "dyn_reads": "{n} leitura(s) com nome de {family} montado em tempo de execução ({repos}) não puderam ser resolvidas",
         "nothing_unres": "Nada não resolvido nestes repos pode mudar esta resposta.",
         "ambiguous": "{ref!r} nomeia {n} coisas diferentes. Qualifique:", "not_found": "Nenhuma tabela, coleção ou coluna corresponde a {ref!r}.",
         "similar": "Nomes parecidos: {names}", "downstream": "Para onde vai", "upstream": "De onde vem",
@@ -844,7 +1021,8 @@ def render_error(err: QueryError, fmt: str, lang: str) -> str:
             kind = T["kinds"].get(c["kind"], c["kind"])
             repos = ", ".join(c["repos"])
             ref = f"`{c['qualify']}`" if md else c["qualify"]
-            lines.append(f"{'- ' if md else '  '}{kind} · {c['store']} · {repos or '-'}   →  {ref}")
+            store = c["store"] if isinstance(c["store"], str) else "/".join(c["store"])
+            lines.append(f"{'- ' if md else '  '}{kind} · {store} · {repos or '-'}   →  {ref}")
     else:
         lines.append(T["not_found"].format(ref=p["query"]))
         if p.get("similar"):
@@ -864,6 +1042,8 @@ def _chain(entry: dict[str, Any], fn: dict[str, Any], T: dict[str, Any], show_pa
     if show_path:
         return " → ".join(p["label"] for p in entry["path"])
     parts = [entry["entrypoint"]["label"]]
+    if entry.get("wiring"):
+        parts.append("…")
     if entry.get("handler") and entry["handler"]["id"] != fn["id"]:
         parts.append(entry["handler"]["label"])
     if entry["via"]:
@@ -919,16 +1099,31 @@ def _md(s: str) -> str:
     return s.replace("|", "\\|")
 
 
+def _dynamic_lines(items: list[dict[str, Any]], T: dict[str, Any], with_functions: bool = True) -> list[str]:
+    """One line per (access, kind): the total, per repo, and the functions —
+    "2 write(s) with a collection name built at runtime (orders-api: 1, shop-web: 1) …: A, B"."""
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for u in items:
+        groups[(u.get("access") or "writes", u["kind"])].append(u)
+    out = []
+    for (access, kind), us in sorted(groups.items()):
+        family = T["kinds"].get(kind.removeprefix("dynamic_"), kind)
+        key = "dyn_writes" if access == "writes" else "dyn_reads"
+        repos = ", ".join(f"{u['repo'] or '-'}: {u['count']}" for u in us)
+        line = T[key].format(n=sum(u["count"] for u in us), family=family, repos=repos)
+        if with_functions:
+            fns = [f"{f['label']}" + (f" [{u['repo']}]" if len(us) > 1 and u.get("repo") else "") for u in us for f in u["functions"]]
+            line += ": " + ", ".join(fns)
+        out.append(line)
+    return out
+
+
 def _render_unresolved_who(r: dict[str, Any], T: dict[str, Any], md: bool) -> list[str]:
     out = [f"**{T['unresolved']}**" if md else f"{T['unresolved']}:"]
     if not r["unresolved"]:
         out.append(("- " if md else "  ") + T["nothing_unres"])
         return out
-    for u in r["unresolved"]:
-        family = T["kinds"].get(u["kind"].removeprefix("dynamic_"), u["kind"])
-        key = "dyn_writes" if u["access"] == "writes" else "dyn_reads"
-        out.append(("- " if md else "  ") + T[key].format(n=u["count"], family=family, repo=u["repo"] or "-")
-                   + ": " + ", ".join(f["label"] for f in u["functions"]))
+    out += [("- " if md else "  ") + line for line in _dynamic_lines(r["unresolved"], T)]
     return out
 
 
@@ -983,9 +1178,7 @@ def _render_trace(r: dict[str, Any], fmt: str, lang: str) -> str:
     out.append(f"**{T['unresolved']}**" if md else T["unresolved"] + ":")
     u = r["unresolved"]
     lines = []
-    for d in u["dynamic_writes"]:
-        family = T["kinds"].get(d["kind"].removeprefix("dynamic_"), d["kind"])
-        lines.append(T["dyn_writes"].format(n=d["count"], family=family, repo=d["repo"] or "-"))
+    lines += _dynamic_lines(u["dynamic_writes"], T)
     if u["queues"]:
         lines.append(T["unres_q"].format(n=len(u["queues"])))
     if u["http"]:

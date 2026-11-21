@@ -28,6 +28,7 @@ import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from bizmap.graph import Graph
@@ -341,6 +342,39 @@ _ENGINE_RES = [
 ]
 
 
+# dependency manifests: the driver is often only there (SQLAlchemy `text()`
+# code never imports psycopg). One package per line / key, so plain names match.
+_MANIFEST_ENGINE_RES = [
+    ("postgres", re.compile(r"(?im)(?:^\s*|[\"'])(?:psycopg(?:2)?(?:-binary|-pool)?|psycopg\[[^\]]*\]|asyncpg|pg8000|aiopg)\b"
+                            r"|\"(?:pg|postgres|pg-promise|@neondatabase/serverless)\"\s*:|jackc/pgx|lib/pq|postgresql\+")),
+    ("mysql", re.compile(r"(?im)(?:^\s*|[\"'])(?:pymysql|mysqlclient|aiomysql|mysql-connector-python)\b|\"mysql2?\"\s*:|go-sql-driver/mysql|mysql\+")),
+    ("sqlite", re.compile(r"(?im)\"(?:better-sqlite3|sqlite3)\"\s*:|mattn/go-sqlite3|modernc\.org/sqlite|aiosqlite")),
+    ("sqlserver", re.compile(r"(?im)(?:^\s*|[\"'])(?:pyodbc|pymssql)\b|\"(?:mssql|tedious)\"\s*:|go-mssqldb")),
+]
+_MANIFESTS = ("requirements*.txt", "requirements/*.txt", "pyproject.toml", "Pipfile", "setup.cfg", "setup.py",
+              "package.json", "go.mod")
+
+
+def manifest_engines(root: Path) -> set[str]:
+    """SQL engines named in the repo's dependency manifests (top level and one
+    folder down: ``requirements.txt``, ``pyproject.toml``, ``package.json``, ``go.mod``…)."""
+    found: set[str] = set()
+    root = Path(root)
+    paths: list[Path] = []
+    for pattern in _MANIFESTS:
+        paths += root.glob(pattern)
+        paths += [p for p in root.glob(f"*/{pattern}") if p.parts[-2] not in ("node_modules", ".venv", "venv", "vendor")]
+    for path in sorted(set(paths)):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")[:200_000]
+        except OSError:
+            continue
+        for engine, rx in _MANIFEST_ENGINE_RES:
+            if rx.search(text):
+                found.add(engine)
+    return found
+
+
 _AUX_DIR_RE = re.compile(
     r"(^|/)(scripts?|tools?|hack|examples?|testdata|tests?|__tests__|e2e|fixtures|seed(s|ers?)?|migrations?)/"
 )
@@ -490,6 +524,8 @@ def link_same_tables(graph: Graph) -> None:
         if not db:
             continue
         name = str(node.attrs.get("name") or node.id.split(":", 1)[-1]).lower()
+        if name == "unknown":  # a name built at runtime: never "the same" as another
+            continue
         groups[(node.type, str(db), name)].append(node.id)
     for ids in groups.values():
         if len(ids) < 2:
