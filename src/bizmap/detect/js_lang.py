@@ -1049,6 +1049,8 @@ class JsAnalyzer:
         # `X.m(...)` on an object (or factory instance) declared here or imported:
         # (caller, module the name lives in, name, member, file, line)
         pending_member_calls: list[tuple[str, str, str, str, str, int]] = []
+        # imported functions passed by reference (`queryFn: listWidgets`): inferred
+        pending_ref_imports: list[tuple[str, tuple[str, str], str, int]] = []
         instances_by_mod: dict[str, dict[str, str]] = {}
 
         for _path, rel_file, module, tree, _src in parsed:
@@ -1147,55 +1149,41 @@ class JsAnalyzer:
                 for q in file_quals
                 if q.startswith(module + ".") and analysis.functions.get(q, ("",))[0] == rel_file
             }
-            for node in typed_walk(tree, frozenset({"call_expression"}), JS_TYPES):
+            linker = _CallLinker(
+                module, rel_file, specs, fn_nodes, fn_by_span, analysis.calls,
+                pending_import_calls, pending_ref_imports, pending_member_calls,
+            )
+            for node in typed_walk(tree, frozenset({"call_expression", "jsx_attribute"}), JS_TYPES):
+                if node.type == "jsx_attribute":
+                    # `onClick={rename}` / `onSubmit={form.save}`
+                    attr = node.named_children[0] if node.named_children else None
+                    value = node.named_children[-1] if len(node.named_children) > 1 else None
+                    if attr is not None and text(attr).startswith("on") and value is not None:
+                        if value.type == "jsx_expression" and value.named_children:
+                            linker.ref(value.named_children[0], node)
+                    continue
+                args = node.child_by_field_name("arguments")
+                for arg in args.named_children if args is not None else ():
+                    if arg.type in {"identifier", "member_expression"}:
+                        linker.ref(arg, node)
+                    elif arg.type == "object":
+                        for pair in arg.named_children:
+                            if pair.type == "pair":
+                                linker.ref(pair.child_by_field_name("value"), node)
                 fn_n = node.child_by_field_name("function")
                 if fn_n is not None and fn_n.type == "member_expression":
-                    # `import * as lib from './lib'; lib.top()`
                     obj, prop = fn_n.child_by_field_name("object"), fn_n.child_by_field_name("property")
                     if obj is not None and prop is not None and obj.type == "identifier":
-                        spec = specs.get(text(obj))
                         caller = _enclosing_symbol(node, module)
-                        if caller.endswith(".module") or _locally_shadowed(node, text(obj)):
-                            continue
-                        if spec and spec[1] in {"*", "require"}:
-                            pending_import_calls.append((caller, (spec[0], text(prop)), rel_file, line_of(node)))
-                        elif spec:
-                            # `import { widgetsHttpClient as client } ...; client.list()`
-                            pending_member_calls.append(
-                                (caller, spec[0], spec[1], text(prop), rel_file, line_of(node))
-                            )
-                        else:
-                            # `const X = { m: .. }` / `const X = createY(..)` in this file
-                            pending_member_calls.append(
-                                (caller, module, text(obj), text(prop), rel_file, line_of(node))
-                            )
+                        if not caller.endswith(".module"):
+                            linker.member(node, obj, prop, caller)
                     continue
                 if fn_n is None or fn_n.type != "identifier":
                     continue
                 caller = _enclosing_symbol(node, module)
                 if caller.endswith(".module"):
                     continue
-                name = text(fn_n)
-                callee = _scoped_callee(caller, name, module, fn_nodes)
-                if callee is None:
-                    scope = _binding_scope(node, name)
-                    if scope is not None:
-                        # `const report = (m) => ...` in an anonymous callback or
-                        # an object-literal method: that local function is the
-                        # callee; a parameter / plain variable is not a function
-                        bound = _bound_function(scope, name)
-                        callee = fn_by_span.get((bound.start_byte, bound.end_byte)) if bound is not None else None
-                        if callee is None or callee == caller:
-                            continue
-                if callee is None and f"{module}.{name}" in fn_nodes and f"{module}.{name}" != caller:
-                    callee = f"{module}.{name}"  # module-level function
-                if callee:
-                    analysis.calls.append(
-                        JsCall(caller=caller, callee=callee, file=rel_file, line=line_of(node), exact=True)
-                    )
-                elif name in specs:
-                    # resolved once every file is indexed (target may come later)
-                    pending_import_calls.append((caller, specs[name], rel_file, line_of(node)))
+                linker.name(node, text(fn_n), caller, exact=True)
             wrappers_by_mod[module] = _collect_wrappers(tree, consts, clients)
 
         # imported functions: keep calls whose target is a scanned function
@@ -1208,13 +1196,17 @@ class JsAnalyzer:
                     JsCall(caller=caller, callee=target, file=call_file, line=call_line, exact=True)
                 )
 
+        for caller, (src_mod, orig), call_file, call_line in pending_ref_imports:
+            target = _imported_function(src_mod, orig, exports_by_mod, known_mods, fn_nodes)
+            if target and target != caller:
+                analysis.calls.append(JsCall(caller=caller, callee=target, file=call_file, line=call_line))
         for caller, src_mod, name, member, call_file, call_line in pending_member_calls:
             target = _member_function(
                 src_mod, name, member, exports_by_mod, known_mods, fn_nodes, instances_by_mod, import_specs_by_mod
             )
             if target and target != caller:
                 analysis.calls.append(
-                    JsCall(caller=caller, callee=target, file=call_file, line=call_line, exact=True)
+                    JsCall(caller=caller, callee=target, file=call_file, line=call_line, exact=False)
                 )
 
         _import_path_helpers(consts_by_mod, import_specs_by_mod)
@@ -2942,6 +2934,87 @@ def _imported_function(
             if f"{mod}.{orig}" in fn_nodes:
                 return f"{mod}.{orig}"
     return None
+
+
+class _CallLinker:
+    """Calls one file makes: by name (`listMembers(id)`), on an object or
+    factory instance (`client.list(p)`), and functions passed by reference
+    (`queryFn: listWidgets`, `mutationFn: client.create`, `onClick={X.m}`),
+    which count as calls by whoever passes them. Imported targets are queued
+    and resolved once every file is indexed."""
+
+    def __init__(
+        self,
+        module: str,
+        rel_file: str,
+        specs: dict[str, tuple[str, str]],
+        fn_nodes: dict[str, Node],
+        fn_by_span: dict[tuple[int, int], str],
+        calls: list[JsCall],
+        pending_import_calls: list[tuple[str, tuple[str, str], str, int]],
+        pending_ref_imports: list[tuple[str, tuple[str, str], str, int]],
+        pending_member_calls: list[tuple[str, str, str, str, str, int]],
+    ) -> None:
+        self.module, self.rel_file, self.specs = module, rel_file, specs
+        self.fn_nodes, self.fn_by_span, self.calls = fn_nodes, fn_by_span, calls
+        self.pending_import_calls = pending_import_calls
+        self.pending_ref_imports = pending_ref_imports
+        self.pending_member_calls = pending_member_calls
+
+    def member(self, at: Node, obj: Node, prop: Node, caller: str) -> None:
+        """`X.m` called or passed at ``at``."""
+        if _locally_shadowed(at, text(obj)):
+            return
+        spec = self.specs.get(text(obj))
+        line = line_of(at)
+        if spec and spec[1] in {"*", "require"}:
+            self.pending_import_calls.append((caller, (spec[0], text(prop)), self.rel_file, line))
+        elif spec:
+            # `import { widgetsHttpClient as client } ...; client.list()`
+            self.pending_member_calls.append((caller, spec[0], spec[1], text(prop), self.rel_file, line))
+        else:
+            # `const X = { m: .. }` / `const X = createY(..)` in this file
+            self.pending_member_calls.append((caller, self.module, text(obj), text(prop), self.rel_file, line))
+
+    def name(self, at: Node, name: str, caller: str, exact: bool) -> None:
+        """A function named ``name`` called (``exact``) or passed at ``at``."""
+        module, fn_nodes = self.module, self.fn_nodes
+        callee = _scoped_callee(caller, name, module, fn_nodes)
+        if callee is None:
+            scope = _binding_scope(at, name)
+            if scope is not None:
+                # `const report = (m) => ...` in an anonymous callback or
+                # an object-literal method: that local function is the
+                # callee; a parameter / plain variable is not a function
+                bound = _bound_function(scope, name)
+                callee = self.fn_by_span.get((bound.start_byte, bound.end_byte)) if bound is not None else None
+                if callee is None or callee == caller:
+                    return
+        if callee is None and f"{module}.{name}" in fn_nodes and f"{module}.{name}" != caller:
+            callee = f"{module}.{name}"  # module-level function
+        if callee:
+            self.calls.append(JsCall(caller=caller, callee=callee, file=self.rel_file, line=line_of(at), exact=exact))
+        elif name in self.specs:
+            entry = (caller, self.specs[name], self.rel_file, line_of(at))
+            if exact:
+                self.pending_import_calls.append(entry)
+            elif self.specs[name][1] not in {"*", "require"}:
+                self.pending_ref_imports.append(entry)
+
+    def ref(self, ref: Node | None, at: Node) -> None:
+        """A function passed by reference at ``at`` (an argument, a value in
+        an object argument, a JSX `on...` attribute)."""
+        if ref is None or ref.type not in {"identifier", "member_expression"}:
+            return
+        caller = _enclosing_symbol(at, self.module)
+        if caller.endswith(".module"):
+            return
+        if ref.type == "identifier":
+            self.name(at, text(ref), caller, exact=False)
+            return
+        obj, prop = ref.child_by_field_name("object"), ref.child_by_field_name("property")
+        if obj is not None and prop is not None and obj.type == "identifier":
+            self.member(at, obj, prop, caller)
 
 
 def _collect_instances(tree: Node) -> dict[str, str]:
