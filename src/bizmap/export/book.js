@@ -880,7 +880,7 @@
       });
       h += "</div>";
     });
-    if (ch.clients.some(function (c) { return c.u; })) h += '<p class="muted" style="margin-top:16px"><a href="#/u/' + s + '">' + esc(plural("unmatchedMore", sv.unmatched)) + "</a></p>";
+    if (sv.unmatched) h += '<p class="muted" style="margin-top:16px"><a href="#/u/' + s + '">' + esc(plural("unmatchedMore", sv.unmatched)) + "</a></p>";
     read(h); detail('<p class="muted">' + esc(L.guessHint) + "</p>");
   }
   function pageUnmatched(s) {

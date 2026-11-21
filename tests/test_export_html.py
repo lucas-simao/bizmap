@@ -928,3 +928,26 @@ def test_every_counted_string_has_a_singular_in_both_languages() -> None:
     assert {"screensN", "linkedN", "usesLead", "hiddenCalls"} <= keys
     for k in sorted(keys):
         assert len(re.findall(rf"\b{k}1:", js)) == 2, k  # en and pt-BR
+
+
+def test_pages_read_only_keys_their_chunk_has() -> None:
+    """Each page that loads a service chunk (`ch = chunk(sv.<field>)`) reads
+    only keys that chunk carries: a key moved to another chunk breaks the page."""
+    import re
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parents[1] / "src/bizmap/export/book.js").read_text()
+    index, chunks = _book(react_graph())
+    web = next(s for s in index["services"] if s["name"] == "web")
+    bodies = re.split(r"\n  function ", js)
+    checked = 0
+    for body in bodies:
+        m = re.search(r"ch = chunk\((?:sv|SV\[s\])\.(\w+)\)", body)
+        if not m or not web.get(m.group(1)):
+            continue
+        name = body.split("(", 1)[0]
+        have = set(chunks[web[m.group(1)]])
+        read = set(re.findall(r"\bch\.(\w+)", body))
+        assert read <= have, (name, m.group(1), sorted(read - have))
+        checked += 1
+    assert checked >= 3  # screens, unmatched, uses
