@@ -1,10 +1,12 @@
 # TEMP debug, removed before review
+import sys
 from pathlib import Path
 
 import bizmap.detect.js_lang as jl
 from bizmap.scan import scan_path
-import sys; sys.path.insert(0, str(Path(__file__).parent))
-from test_web_api_links_r45 import DELIVERY, _workspace
+
+sys.path.insert(0, str(Path(__file__).parent))
+from test_web_api_links_r45 import DELIVERY, _workspace  # noqa: E402
 
 
 def test_debug(tmp_path: Path, monkeypatch) -> None:
