@@ -4,6 +4,15 @@
 
 ### Added
 
+- **gin routes** (`rules/gin.yaml`): `GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS`,
+  `Handle(method, path, h)` and `Any` (method `ANY`); `Group` chains, groups
+  with middleware (`r.Group("/admin", auth())`), chained
+  `admin.Group("/reports").GET(...)` and groups passed to a function in
+  another package (`routes.Register(v1)` with `rg *gin.RouterGroup`). The
+  handler is the last argument (middleware may come before it); methods and
+  closures work as with echo.
+- The scan summary groups helper calls with a dynamic path:
+  `N call(s) via forecast.Client.get with a dynamic path`.
 - **Data flow between databases.** A new `feeds` edge says a function copies
   values from one table into another, often in another database
   (`pedidos -> resumo_pedido`), with a `column_map`
@@ -31,6 +40,30 @@
   column (JSON `downstream`, a Markdown section).
 - HTML export: a table's page has a **Data flow** section — diagram,
   column correspondence both ways, and the diagram as Mermaid text.
+
+### Changed
+
+- **HTTP labels are clean in every language**: the query string / fragment is
+  dropped before matching (`{FORECAST_API_URL}/daily`, not `…/daily?lat=…`),
+  and any placeholder that is not a plain name (`{a.b}`) becomes `{dynamic}` —
+  no label holds `(`, `)`, `=>`, `...` or spaces. A method that is not a
+  literal (`http.NewRequest(method, …)`) is `{dynamic}`.
+- **One method per call site**: a path literal with no method hint links only
+  to `GET` (or `ANY`) routes, never to every method of the path. A route
+  parameter only matches a literal segment that looks like an id (has a digit,
+  no hyphen) and only with at least two equal literal segments
+  (`/time-clocks/history` no longer matches `/projects/:projectId/history`).
+- A factory's internal helper (`read(url) => api.get(url)`) is followed with
+  every base the factory was instantiated with, like a direct member call.
+- A per-request `baseURL` set in a helper (`http.request({ baseURL: V2, url })`)
+  is the call's base: `{VITE_API_URL}/api/v2/reports/flow`, never the v1 route
+  with the same tail.
+- Navigation is not a request: `redirectUri`/`callbackUrl`/`returnTo`-style
+  variables (assigned or returned) and JS/TS test files and mocks
+  (`__tests__/`, `__mocks__/`, `mocks/`, `*.test.*`, `*.spec.*`, e2e) produce
+  no `calls_http`.
+- Note: Go `net/http` `HandleFunc` is not detected as a route, so there is
+  no duplicate route to merge there.
 
 ## 0.8.0 — 2026-11-21
 
