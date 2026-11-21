@@ -465,11 +465,13 @@ class Rows:
 @dataclass
 class Row:
     sel: ResolvedSelect
+    alias: dict[str, str] | None = None  # Go struct field -> document field (`firestore:"…"` tags)
 
 
 @dataclass
 class Obj:
     fields: dict[str, Any]
+    type_name: str | None = None  # Go struct literal type (its `json:"…"` tags name the fields)
 
 
 @dataclass
@@ -568,7 +570,7 @@ def _hop_value(value: Any, hop: str) -> Any:
     if isinstance(value, Scalar):
         return Scalar(_with(value.srcs, hop=hop))
     if isinstance(value, Obj):
-        return Obj({k: _hop_value(v, hop) for k, v in value.fields.items()})
+        return Obj({k: _hop_value(v, hop) for k, v in value.fields.items()}, value.type_name)
     if isinstance(value, ListOf):
         return ListOf(_hop_value(value.elem, hop))
     if isinstance(value, Arr):
@@ -579,7 +581,7 @@ def _hop_value(value: Any, hop: str) -> Any:
             star_tables=value.sel.star_tables,
             tables=value.sel.tables,
         )
-        return Row(sel) if isinstance(value, Row) else Rows(sel, value.kind)
+        return Row(sel, value.alias) if isinstance(value, Row) else Rows(sel, value.kind)
     if isinstance(value, Msg):
         return Msg(value.topic, (hop, *value.hops), value.local)
     if isinstance(value, Fs):
@@ -611,6 +613,7 @@ class WriteEvent:
     file: str
     line: int
     spec_transform: bool = False
+    table_level: bool = False  # SQL built at run time: which columns is unknown
 
 
 @dataclass
@@ -659,10 +662,15 @@ class RepoContext:
         self.triggers: dict[str, dict[str, Any]] = {}  # fid -> firestore_trigger (TS handlers)
         self.push_topics: dict[str, str] = {}  # fid -> Pub/Sub topic delivered to it (push / subscription)
         self.aliases: dict[str, str] = {}  # Pydantic `Field(alias=…)`: alias -> attribute
+        self.json_tags: dict[str, dict[str, str]] = {}  # Go struct -> field -> json name
+        self.fs_tags: dict[str, dict[str, str]] = {}  # Go struct -> field -> firestore name
+        self.go_topics: dict[str, str] = {}  # Go fid -> the one Pub/Sub topic it publishes to
         self.calls: dict[str, set[str]] = defaultdict(set)
         self.write_lines: dict[tuple[str, str], set[int]] = defaultdict(set)  # (file, table) -> lines
         self.queue_targets: dict[str, list[tuple[str, str]]] = defaultdict(list)  # fid -> [(queue, fn)]
         self.summaries: dict[str, Any] = {}
+        self.doc_id_params: dict[str, dict[int, str]] = {}
+        self.sql_builders: dict[str, str] = {}  # Go: function returning write SQL -> table  # fid -> {param position: collection}
         self._index()
 
     def _index(self) -> None:
@@ -768,6 +776,10 @@ class RepoContext:
         return None
 
     def columns(self, tid: str) -> list[str] | None:
+        """Columns of a ``table:`` / ``view:`` node from the schema. A collection
+        never takes the columns of a SQL table that happens to share its name."""
+        if not _bare(tid).startswith(("table:", "view:")):
+            return None
         name = tid.split(":", 1)[-1]
         spec = self.schema_lower.get(name)
         if not spec:
@@ -1058,7 +1070,7 @@ _QUERY_METHODS = {
 }
 _ROW_METHODS = {"fetchone", "fetchrow", "first", "one", "one_or_none", "scalar", "fetchfirst", "next"}
 _SET_METHODS = {"fetchall", "fetchmany", "all", "mappings", "dicts", "fetch", "tolist", "to_list"}
-_PASS_METHODS = {"parse", "loads", "dict", "stringify", "dumps", "tojson", "toobject", "assign", "structuredclone",
+_PASS_METHODS = {"parse", "loads", "dict", "stringify", "dumps", "marshal", "marshalindent", "tojson", "toobject", "assign", "structuredclone",
                  "copy", "deepcopy", "freeze", "data", "json", "todict", "model_dump", "_asdict", "as_dict"}
 _PUBLISH = {"publish", "publishjson", "send", "sendmessage", "emit", "enqueue", "add", "produce", "push_task"}
 _CONSUME = {"subscribe", "on", "consume", "process", "handle", "listen", "addlistener", "once", "handler"}
@@ -1112,6 +1124,8 @@ class Analyzer:
         self.line = fn.start
         self.strings = ctx.file_strings.get(fn.file) or {}
         self._chain_topic: str | None = None
+        self.var_types: dict[str, str] = {}  # Go: variable -> struct type
+        self.param_names: list[str] = []
         self.callees = self._callee_index()
 
     # --- env
@@ -1259,13 +1273,16 @@ class Analyzer:
         decl = _ASSIGN_KW.match(t)
         body = t[decl.end() :] if decl else t
         if lang == "go":
-            gm = re.match(r"^var\s+(.+)$", body)
+            gm = re.match(r"^var\s+(.+)$", t)
             if gm:
                 body = gm.group(1)
                 if _find_assign(body) is None:
                     names = split_top(body.split(" ")[0])
+                    tm = re.match(r"^[\w, ]+?\s+\*?(?:\w+\.)?(\w+)\s*$", body.strip())
                     for name in names:
                         self.assign(name, None)
+                        if tm:
+                            self.var_types[name.strip()] = tm.group(1)
                     return
         pos = _find_assign(body)
         if pos is None:
@@ -1324,7 +1341,8 @@ class Analyzer:
         if isinstance(value, Row) and any(_bare(t).startswith("collection:") for t in value.sel.star_tables):
             # a Firestore document's fields keep their case and need no schema
             t = next(t for t in value.sel.star_tables if _bare(t).startswith("collection:"))
-            return Scalar(frozenset({Src(table=t, col=name, hops=_hops_of_sel(value.sel))}))
+            col = (value.alias or {}).get(name, name)
+            return Scalar(frozenset({Src(table=t, col=col, hops=_hops_of_sel(value.sel))}))
         if isinstance(value, Row):
             for item_name, srcs in value.sel.items:
                 if item_name == key:
@@ -1432,8 +1450,15 @@ class Analyzer:
         if ml == "get" and args and v.kind == "doc":
             lit = self.m.lit(args[0])
             return Scalar(frozenset({Src(table=v.coll, col=lit.value, hops=v.hops)})) if lit is not None else None
-        if ml in ("get", "stream", "list", "getall") and not args:
+        if ml in ("get", "stream", "list", "getall", "documents") and (not args or v.kind in ("docref", "ref")):
+            # Go passes ctx: `ref.Doc(id).Get(ctx)`, `q.Documents(ctx)`
             return Fs(v.coll, "doc" if v.kind == "docref" else "query", v.id_param, v.hops)
+        if ml == "datato" and args and v.kind == "doc":
+            target = args[0].strip().lstrip("&").strip()
+            alias = self.ctx.fs_tags.get(self.var_types.get(target, "")) or None
+            row = _doc_data(v.coll, v.hops)
+            self.assign(target, Row(row.sel, alias))
+            return None
         if ml in ("doc", "document"):
             if args and v.kind == "ref":
                 mark_id(args[0], v.coll)
@@ -1471,6 +1496,11 @@ class Analyzer:
             e = e[1:].strip()
         if e.startswith("...") :
             e = e[3:]
+        if self.fn.lang == "go" and e.endswith(")"):
+            # a type assertion `x.(map[string]any)`: the value itself
+            ta = re.search(r"\.\(\s*(?!type\b)[\w.*\[\]{} ]+\)$", e)
+            if ta and match_close(e, ta.start() + 1) == len(e) - 1:
+                return self.eval(e[: ta.start()], depth + 1)
         lit = self.m.lit(e)
         if lit is not None:
             return Str(lit.value, lit.dynamic)
@@ -1513,7 +1543,11 @@ class Analyzer:
             if gm and e.endswith("}"):
                 ob = gm.end() - 1
                 if match_close(e, ob) == len(e) - 1:
-                    return self._object(e[ob + 1 : -1], depth, go=True)
+                    obj = self._object(e[ob + 1 : -1], depth, go=True)
+                    tname = re.match(r"^(?:\w+\.)?(\w+)\s*\{", e)
+                    if isinstance(obj, Obj) and tname and not e.startswith(("map[", "[]")):
+                        obj.type_name = tname.group(1)
+                    return obj
             am = re.match(r"^append\(", e)
             if am:
                 args = split_top(e[am.end() : match_close(e, am.end() - 1)])
@@ -1638,7 +1672,7 @@ class Analyzer:
                 method = chain_text.split(".")[-1]
                 recv_text = chain_text.rsplit(".", 1)[0] if "." in chain_text else ""
                 recv_val = self.lookup(recv_text) if recv_text and pure else None
-                if method == "collection" and args:
+                if method.lower() == "collection" and args:
                     lit = self.m.lit(args[0])
                     if lit is not None and not lit.dynamic:
                         fs_collection = lit.value
@@ -1675,6 +1709,10 @@ class Analyzer:
         depth: int,
     ) -> Any:
         ml = method.lower()
+        if self.fn.lang == "go" and self.ctx.sql_builders and method in _GO_SQL_METHODS:
+            got = self._built_sql_write(args, depth)
+            if got is not _NO_CALL:
+                return got
         # SQL text in an argument
         sql_idx, sql = self._sql_arg(args)
         if sql is not None and (ml in _QUERY_METHODS or ml.startswith(("query", "exec", "select", "get", "fetch"))):
@@ -1686,6 +1724,18 @@ class Analyzer:
             if isinstance(payload, Obj) and sources(payload):
                 self.publishes.append(
                     PublishEvent(fn=self.fn.fid, topic=self._chain_topic, payload=payload, file=self.fn.file, line=self.line)
+                )
+            return None
+        if self.fn.lang == "go" and ml == "publish" and len(args) >= 2 and self.fn.fid in self.ctx.go_topics:
+            payload = self.eval(args[1], depth + 1)
+            if isinstance(payload, Obj) and isinstance(payload.fields.get("Data"), Obj):
+                payload = payload.fields["Data"]  # &pubsub.Message{Data: body}
+            if isinstance(payload, Obj) and sources(payload):
+                tags = self.ctx.json_tags.get(payload.type_name or "") or {}
+                named = Obj({tags.get(k, k): v for k, v in payload.fields.items()})
+                self.publishes.append(
+                    PublishEvent(fn=self.fn.fid, topic=self.ctx.go_topics[self.fn.fid], payload=named,
+                                 file=self.fn.file, line=self.line)
                 )
             return None
         if isinstance(cur_val, Msg) and ml not in _PUBLISH:
@@ -1802,6 +1852,25 @@ class Analyzer:
         if isinstance(cur_val, Scalar):
             acc |= cur_val.srcs
         return Scalar(_with(frozenset(acc), transform=True)) if acc else None
+
+    def _built_sql_write(self, args: list[str], depth: int) -> Any:
+        """`b.Queue(upsertSQL(m.Columns), columnArgs(m.Columns)...)`: the SQL text comes from a
+        function returning `"INSERT INTO t (" + …`; the columns are built at run time, so the
+        write is table-level, fed by whatever the arguments carry."""
+        for a in args[:2]:
+            bm = re.match(r"^\s*(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\s*\(", a)
+            if not bm or bm.group(1) not in self.ctx.sql_builders:
+                continue
+            table = self.ctx.sql_builders[bm.group(1)]
+            tid = self.ctx.table_node(table, write=True) or f"table:{table}"
+            acc: set[Src] = set()
+            for x in args:
+                acc |= sources(self.eval(x.strip().removesuffix("...").strip(), depth + 1))
+            if acc:
+                self.writes.append(WriteEvent(fn=self.fn.fid, target=tid, col=None, srcs=frozenset(acc),
+                                              file=self.fn.file, line=self.line, table_level=True))
+            return None
+        return _NO_CALL
 
     def _receiver_rows(self, chain: str) -> Any:
         base = chain.rsplit(".", 1)[0] if "." in chain else ""
@@ -1998,11 +2067,24 @@ class Analyzer:
         arg_vals = [self.eval(a, depth + 1) for a in args]
         tainted = any(sources(v) or isinstance(v, (Msg, Fs)) for v in arg_vals)
         result: Any = None
-        if tainted and cid in self.ctx.writes_any and self.ctx.spend():
+        if tainted and (cid in self.ctx.writes_any or cid in self.ctx.go_topics) and self.ctx.spend():
+            # a writer, or a Go function that publishes what it is given (`Send(ctx, pub, payload)`)
             sub = _analyze(self.ctx, info, depth=self.depth + 1, hop=(*self.hop, *hop_ids), args=arg_vals, method_call=True)
             if sub is not None:
                 self.writes.extend(sub.writes)
                 self.publishes.extend(sub.publishes)
+        if tainted and cid not in self.ctx.reads_any and cid not in self.ctx.writes_any and self.ctx.spend():
+            # a pure helper (`build(id, d)`): what it returns from the values passed in
+            sub = _analyze(self.ctx, info, depth=self.depth + 1, hop=(*self.hop, *hop_ids), args=arg_vals, method_call=True)
+            ret = _best_return(sub.returns if sub else [])
+            if ret is not None and (sources(ret) or self.fn.lang != "go"):
+                return ret
+            if self.fn.lang == "go":
+                # a Go mapper (`Map(id, data, now)`) whose result this pass cannot rebuild:
+                # still derived from what went in
+                acc = frozenset().union(*(sources(v) for v in arg_vals))
+                if acc:
+                    return Scalar(_with(acc, transform=True))
         if cid in self.ctx.reads_any:
             summary = self.ctx.summaries.get(cid, _NO_CALL)
             if summary is _NO_CALL and not self.ctx.spend():
@@ -2010,14 +2092,44 @@ class Analyzer:
             if summary is _NO_CALL:
                 self.ctx.summaries[cid] = None  # recursion guard
                 sub = _analyze(self.ctx, info, depth=self.depth + 1, hop=(), args=None)
-                summary = next((r for r in (sub.returns if sub else []) if r is not None), None)
+                summary = _best_return(sub.returns if sub else [])
                 self.ctx.summaries[cid] = summary
+                if sub is not None:
+                    self.ctx.doc_id_params[cid] = sub.doc_id_params()
             if summary is not None:
                 result = _hop_value(summary, cid)
+            # `GetOrder(ctx, id)` reads `orders/{id}`: the caller's `id` is the document id
+            for k, coll in (self.ctx.doc_id_params.get(cid) or {}).items():
+                if k < len(args):
+                    a = args[k].strip()
+                    if re.fullmatch(r"[A-Za-z_$][\w$]*", a) and not sources(self.lookup(a)):
+                        self.assign(a, Scalar(frozenset({Src(table=coll, col=DOC_ID, hops=(cid,))})))
         return result
+
+    def doc_id_params(self) -> dict[int, str]:
+        """Parameters (by position) this function used as a Firestore document id."""
+        out: dict[int, str] = {}
+        for k, p in enumerate(self.param_names):
+            v = self.env.get(p)
+            if isinstance(v, Scalar) and len(v.srcs) == 1:
+                src = next(iter(v.srcs))
+                if src.col == DOC_ID and src.table:
+                    out[k] = src.table
+        return out
 
 
 _NO_CALL = object()
+_GO_SQL_METHODS = {"Queue", "Exec", "ExecContext", "Query", "QueryContext", "QueryRow", "QueryRowContext"}
+
+
+def _best_return(returns: list[Any]) -> Any:
+    """What a function returns: a value carrying sources first (`return OrderDoc{}, err`
+    on the error path is not what callers use)."""
+    vals = [r for r in returns if r is not None]
+    for r in vals:
+        if sources(r) or isinstance(r, (Msg, Fs)):
+            return r
+    return vals[0] if vals else None
 
 
 def _hops_of_sel(sel: ResolvedSelect) -> tuple[str, ...]:
@@ -2203,6 +2315,8 @@ def _analyze(
                 header = stmts[0].text
                 stmts = stmts[1:]
     an = Analyzer(ctx, info, m, depth=depth, hop=hop)
+    if header:
+        an.param_names = _header_params(header, info)
     if args is not None and header:
         params = _header_params(header, info)
         if info.lang == "python" and method_call and params and params[0] in ("self", "cls"):
@@ -2344,7 +2458,7 @@ def _build_feeds(ctx: RepoContext, writes: list[WriteEvent], skip_queue: bool = 
         for s in w.srcs:
             if s.table is None or s.table == w.target or _bare(s.table) == "table:unknown":
                 continue
-            if s.col is None and s.transform:
+            if s.col is None and s.transform and not w.table_level:
                 continue  # a whole row through some function: no value seen
             src_cols = ctx.columns(s.table)
             if s.col is not None and src_cols is not None and s.col not in src_cols:
@@ -2360,7 +2474,7 @@ def _build_feeds(ctx: RepoContext, writes: list[WriteEvent], skip_queue: bool = 
             key = (s.table, w.target)
             bucket = pairs.setdefault(key, {"paths": {}, "entries": []})
             ev = _evidence_dict(w.file, w.line, w.fn)
-            pconf = "exact" if direct else "heuristic"
+            pconf = "exact" if direct and not w.table_level else "heuristic"
             old = bucket["paths"].get(tuple(path))
             if old is None or _conf_rank(pconf) > _conf_rank(old[0]):
                 bucket["paths"][tuple(path)] = (pconf, ev)
@@ -2641,15 +2755,29 @@ def _candidates(ctx: RepoContext, firestore: bool) -> list[FnInfo]:
                 or (reads and (_in_span(h.produce, info) or _in_span(h.fs, info)))
                 or _in_span(h.consume, info)
                 or fid in ctx.push_topics
+                or (reads and fid in ctx.go_topics)
+                or (reads and bool(ctx.calls.get(fid, set()) & set(ctx.go_topics)))
             )
         if ok:
             out.append(info)
     return out
 
 
-def apply(graph: Graph, root: Path, texts: dict[str, str] | None = None, *, firestore: bool = False) -> None:
+def apply(
+    graph: Graph, root: Path, texts: dict[str, str] | None = None, *, firestore: bool = False, go_meta: Any = None
+) -> None:
     """Add ``feeds`` edges (with ``column_map``) to a freshly scanned graph."""
     ctx = RepoContext(graph, root, texts, firestore=firestore)
+    if go_meta is not None:
+        ctx.json_tags = dict(getattr(go_meta, "json_tags", {}) or {})
+        ctx.fs_tags = dict(getattr(go_meta, "fs_tags", {}) or {})
+        ctx.sql_builders = dict(getattr(go_meta, "sql_builders", {}) or {})
+    for e in graph.edges.values():
+        if e.type == "enqueues" and not e.attrs.get("candidates") and _bare(e.to_id).startswith("queue:pubsub:"):
+            node = graph.nodes.get(e.from_id)
+            q = graph.nodes.get(e.to_id)
+            if node is not None and node.attrs.get("language") == "go" and q is not None and q.attrs.get("name"):
+                ctx.go_topics.setdefault(e.from_id, str(q.attrs["name"]))
     for rel, text in (texts or {}).items():
         if rel.endswith(".py") and "alias" in text:
             for m in _PYDANTIC_ALIAS.finditer(text):

@@ -2,6 +2,73 @@
 
 ## Unreleased
 
+### Added
+
+- **Firestore in Go**: `Collection("x").Doc(id).Get / Set / Update / Delete /
+  Create`, `Documents(ctx).GetAll()`, `Where(…)`, `tx.Get/Set(ref)` as
+  `reads` / `writes collection:x`; `DataTo(&d)` maps the struct's
+  `firestore:"…"` tags, so `feeds collection:orders -> table:orders_mirror`
+  lists `customerId → customer_id`, `__id__ → id`.
+- **Pub/Sub publish in Go**: direct (`client.Topic(t)` / v2
+  `client.Publisher(t)`) and through a wrapper constructor
+  (`NewPublisher(ctx, project, []string{cfg.OrderTopic})`) used via an
+  injected interface. Each constructor call is an instance followed through
+  assignments, struct fields, map keys (`pubs[k] = p` from a topic map) and
+  call arguments, so every caller publishes only to its instance's topics;
+  only calls with the wrapper's `Publish` signature count (a domain
+  `store.Publish(ctx, id)` adds nothing), and an unknown instance gives
+  `unresolved_queues` with `candidates` instead of edges. Topic from a
+  literal, a package constant or a config field (`getEnv("X","def")`,
+  `os.Getenv` — with the default the same variable has in the config
+  package —, `env:"X"` tags), with `env` on the queue node and the message
+  `fields` from the `json:"…"` tags. The dataflow follows the message to a
+  push route in another repo (`feeds collection:orders ->
+  table:order_summary`, or `orders_mirror -> order_summary` when Go re-reads
+  its table, also through `Build(row)` / `Send(ctx, pub, payload)` in other
+  packages).
+- Go: publishers built in `if p, err := NewPublisher(…); … else { x = p }` (also
+  into a topic map) keep their topics; `candidates` only list topics of the
+  constructors that build the receiver's type.
+- Go wrapper instances through setters with tuple assignment, fields of fields,
+  maps copied into a field, aliased imports and a package `var Topics =
+  []string{…}`; a receiver no instance reaches gets `unresolved_queues`
+  `reason: instance_unknown` instead of other instances' topics.
+- Data flow: a collection no longer takes the columns of a SQL table with the
+  same name (the Firestore → Postgres mirror `collection:orders ->
+  table:orders` was dropped), and a Go type assertion keeps its value.
+- Go SQL: a function returning `"INSERT INTO t (" + …` passed to
+  `pgx.Batch.Queue` / `Exec` is `writes table:t` (table level), a literal write
+  in `batch.Queue(…)` too, and a call on a closure parameter typed with an
+  interface gets `calls` to its one implementation. A Firestore → Postgres
+  mirror of that shape gives a table-level `feeds`.
+- Go Firestore: files of a package that imports Firestore elsewhere, references
+  passed to local helpers (read or write by what the helper does), and
+  `refs = append(refs, …)`.
+- Go Firestore: references built in a loop (`refs[i] = …Doc(id)` then
+  `GetAll(ctx, refs)` / `batch.Update(refs[i], …)`) and a collection held in
+  a struct field set in its constructor. A document read by one repository
+  and written to SQL by another gives `feeds` through the calls.
+- `env:` in `bizmap.yaml` gives values to env vars that name a queue or topic;
+  without one the function lists the publish in `unresolved_queues`.
+
+### Changed
+
+- `queue:pubsub:<topic>` ids are never repo-qualified, so a producer and a
+  push subscription in different repos meet on one node.
+- Python queues: `publish` / `publish_message` count only on a
+  `PublisherClient()` receiver and `enqueue` only on a `Queue(…)` (the edge
+  gets `task`). The topic is resolved inside `topic_path(project, t)`, from
+  parameter defaults and `os.environ.get("X", "d")`.
+
+### Fixed
+
+- No queue node named after an expression (`queue:pubsub:{live[:10]}`) or
+  without a name (`queue:pubsub:queue`), and nothing for `.enqueue` /
+  `.publish` on parameters, repositories or plain methods. Python topic
+  lookups stay in the function (or class / module) they belong to.
+- Joint scans no longer fail with "dictionary changed size during iteration"
+  when the queue relink adds a node.
+
 ## 0.10.0 — 2026-11-21
 
 ### Added

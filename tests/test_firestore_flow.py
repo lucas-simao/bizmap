@@ -457,7 +457,7 @@ def test_pubsub_push_between_repos(tmp_path: Path) -> None:
     edge = merged.edges["feeds:functions/collection:orders->warehouse/table:order_summary"]
     assert edge.attrs["via"][0]["path"] == [
         "functions/function:src.index.announceOrder",
-        "functions/queue:pubsub:order-announce",
+        "queue:pubsub:order-announce",  # one node for the topic in every repo
         "warehouse/function:warehouse.app.announce_order",
         "warehouse/function:warehouse.store.upsert_order",
     ]

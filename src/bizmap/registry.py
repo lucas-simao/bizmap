@@ -28,14 +28,21 @@ def database_of(graph: Graph) -> str | None:
 def _qualify_id(node_id: str, repo: str, shared: bool) -> str:
     if node_id.startswith(f"{repo}/"):
         return node_id
-    if shared and node_id.startswith(SHARED_PREFIXES):
+    if shared and node_id.startswith((*SHARED_PREFIXES, "queue:pubsub:")):
         return node_id
     if node_id.startswith("table:unknown"):
         return f"{repo}/{node_id}" if not shared else node_id
     return f"{repo}/{node_id}"
 
 
+# a Pub/Sub topic is the same everywhere in a project: producer and push
+# subscription in two repos meet on one node
+GLOBAL_PREFIXES = ("queue:pubsub:",)
+
+
 def _is_shared_node(node_id: str, share_data: bool) -> bool:
+    if node_id.startswith(GLOBAL_PREFIXES):
+        return True
     if not share_data:
         return False
     return node_id.startswith(SHARED_PREFIXES)

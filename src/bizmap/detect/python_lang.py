@@ -1081,6 +1081,7 @@ class PyQueueEvent:
     http_url: str | None = None
     http_method: str | None = None
     target_symbol: str | None = None
+    env: str | None = None  # the topic / queue comes from this env var
 
 
 @dataclass
@@ -1100,6 +1101,7 @@ class PyUnresolvedCall:
 @dataclass
 class PyAnalysis:
     functions: dict[str, PyFunction] = field(default_factory=dict)
+    env_values: dict[str, str] = field(default_factory=dict)  # bizmap.yaml `env:` (set by the scan)
     routes: list[PyRoute] = field(default_factory=list)
     sql_sites: list[PySqlSite] = field(default_factory=list)
     calls: list[tuple[str, str, Evidence, Confidence]] = field(default_factory=list)
@@ -2524,29 +2526,43 @@ class PythonAnalyzer:
             )
             return
         if method == "enqueue":
-            target = text(pos[0]) if pos else "task"
+            # only an rq `Queue(...)` enqueues: `q = Queue("emails"); q.enqueue("jobs.send_email")`
+            qname = _rq_queue_name(node, fn.node)
+            if qname is None:
+                return
+            target = ""
+            if pos:
+                target = unquote(text(pos[0])) if pos[0].type == "string" else text(pos[0])
             analysis.queue_events.append(
                 PyQueueEvent(
                     function=fn,
                     queue_kind="rq",
-                    name=target,
+                    name=qname,
                     role="produce",
                     evidence=evidence,
-                    target_symbol=target,
+                    target_symbol=target or None,
                 )
             )
             return
         if method in {"publish", "publish_message"}:
-            topic = ""
-            if pos:
-                topic = resolve(pos[0]).path_text.split("/")[-1]
+            # only a Pub/Sub `PublisherClient` publishes; the topic must resolve to a name
+            # (or an env var); an expression never becomes a queue
+            func = node.child_by_field_name("function")
+            recv = func.child_by_field_name("object") if func is not None and func.type == "attribute" else None
+            if recv is None or not _is_publisher_client(recv, fn.node, node):
+                return
             kw = call_kwargs(node)
-            if "topic" in kw:
-                topic = resolve(kw["topic"]).path_text.split("/")[-1]
-            if topic:
+            arg = kw.get("topic") or (pos[0] if pos else None)
+            got = _pubsub_topic(arg, fn.node, node, resolve) if arg is not None else None
+            if got is None:
+                return
+            name, env = got
+            if name and not valid_queue_name(name):
+                return
+            if name or env:
                 analysis.queue_events.append(
                     PyQueueEvent(
-                        function=fn, queue_kind="pubsub", name=topic, role="produce", evidence=evidence
+                        function=fn, queue_kind="pubsub", name=name or "", role="produce", evidence=evidence, env=env
                     )
                 )
             return
@@ -2890,6 +2906,187 @@ def _alias_bindings(scopes: list[Node], base: dict[str, str], models: dict, self
             if table and not col:
                 extra.setdefault(lname, table)
     return extra
+
+
+_QUEUE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~%+:-]{0,254}$")
+
+
+def valid_queue_name(name: str) -> bool:
+    """A topic / queue name, never an expression (`{live[:10]}`, `x or y`, a dict…)."""
+    return bool(_QUEUE_NAME.match(name))
+
+
+def _scopes(fn_node: Node) -> list[Node]:
+    """The function, then the functions / class / module around it."""
+    out = [fn_node]
+    cur = parent_of(fn_node)
+    while cur is not None:
+        if cur.type in ("function_definition", "class_definition", "module"):
+            out.append(cur)
+        cur = parent_of(cur)
+    return out
+
+
+def _owner(n: Node, kinds: tuple[str, ...] = ("function_definition",)) -> Node | None:
+    cur = parent_of(n)
+    while cur is not None and cur.type not in kinds:
+        cur = parent_of(cur)
+    return cur
+
+
+def _same(a: Node | None, b: Node | None) -> bool:
+    return a is not None and b is not None and (a.start_byte, a.end_byte, a.type) == (b.start_byte, b.end_byte, b.type)
+
+
+def _origin(expr: Node, fn_node: Node, before: Node) -> Node | None:
+    """Value last assigned to ``expr`` (a name or ``self.x``): in the function
+    it is used in, above its use, else in the functions around it, the class
+    (``self.x`` set in any of its methods) or the module. Assignments inside
+    other functions never count: a local of one function is not another's."""
+    owner = _owner(expr)
+    if owner is not None and not _same(owner, fn_node):
+        fn_node, before = owner, expr  # an expression of another method (`__init__`)
+    name = text(expr)
+    is_self = name.startswith(("self.", "cls."))
+    scopes = _scopes(fn_node)
+    for k, scope in enumerate(scopes):
+        best: tuple[int, Node] | None = None
+        for n in walk(scope):
+            if n.type != "assignment":
+                continue
+            left = n.child_by_field_name("left")
+            right = n.child_by_field_name("right")
+            if left is None or right is None or text(left) != name:
+                continue
+            if k == 0 and n.start_byte >= before.start_byte:
+                continue
+            home = _owner(n, ("function_definition", "class_definition", "module"))
+            if not _same(home, scope):
+                # `self.x = …` in a method of this class
+                if not (is_self and scope.type == "class_definition" and home is not None
+                        and home.type == "function_definition" and _same(_owner(home, ("class_definition",)), scope)):
+                    continue
+            if best is None or n.start_byte > best[0]:
+                best = (n.start_byte, right)
+        if best is not None:
+            return best[1]
+    return None
+
+
+def _is_publisher_client(recv: Node, fn_node: Node, before: Node, depth: int = 0) -> bool:
+    if recv.type == "call":
+        return call_callee_name(recv) in ("PublisherClient", "PublisherAsyncClient")
+    if recv.type in ("identifier", "attribute") and depth < 3:
+        origin = _origin(recv, fn_node, before)
+        if origin is not None:
+            return _is_publisher_client(origin, fn_node, before, depth + 1)
+    return False
+
+
+def _rq_queue_name(node: Node, fn_node: Node, depth: int = 0) -> str | None:
+    func = node.child_by_field_name("function")
+    recv = func.child_by_field_name("object") if func is not None and func.type == "attribute" else None
+    while recv is not None and recv.type in ("identifier", "attribute") and depth < 3:
+        recv = _origin(recv, fn_node, node)
+        depth += 1
+    if recv is None or recv.type != "call" or call_callee_name(recv) != "Queue":
+        return None
+    kw = call_kwargs(recv)
+    pos = call_posargs(recv)
+    arg = kw.get("name") or (pos[0] if pos and pos[0].type == "string" else None)
+    if arg is None:
+        return "default"  # rq's default queue
+    if arg.type != "string":
+        return None
+    name = unquote(text(arg))
+    return name if valid_queue_name(name) else None
+
+
+def _param_default(name: str, at: Node) -> Node | None:
+    """Default of parameter ``name`` of the function around ``at``."""
+    cur = parent_of(at)
+    while cur is not None and cur.type != "function_definition":
+        cur = parent_of(cur)
+    if cur is None:
+        return None
+    params = cur.child_by_field_name("parameters")
+    for p in params.named_children if params is not None else []:
+        if p.type in ("default_parameter", "typed_default_parameter"):
+            pname = p.child_by_field_name("name")
+            if pname is not None and text(pname) == name:
+                return p.child_by_field_name("value")
+    return None
+
+
+_ENV_FUNCS = {"getenv", "get"}
+
+
+def _topic_value(n: Node | None, fn_node: Node, before: Node, resolve, depth: int = 0) -> tuple[str | None, str | None] | None:
+    """(name, env) of a topic id expression, or None."""
+    if n is None or depth > 4:
+        return None
+    if n.type == "string":
+        v = unquote(text(n))
+        if "{" in v or not v:
+            return None
+        return v.rsplit("/", 1)[-1], None
+    if n.type == "call":
+        callee = call_callee_name(n)
+        qual = call_qualname(n)
+        pos = call_posargs(n)
+        if callee in _ENV_FUNCS and ("environ" in qual or "getenv" in qual) and pos and pos[0].type == "string":
+            env = unquote(text(pos[0]))
+            default = None
+            if len(pos) > 1 and pos[1].type == "string":
+                default = unquote(text(pos[1])) or None
+            return default, env
+        return None
+    if n.type == "subscript":
+        obj = n.child_by_field_name("value")
+        sub = n.child_by_field_name("subscript")
+        if obj is not None and text(obj).endswith("environ") and sub is not None and sub.type == "string":
+            return None, unquote(text(sub))
+        return None
+    if n.type in ("identifier", "attribute"):
+        res = resolve(n)
+        if getattr(res, "fully_static", False) and getattr(res, "text", ""):
+            v = str(res.text)
+            return (v.rsplit("/", 1)[-1], None) if "{" not in v else None
+        origin = _origin(n, fn_node, before)
+        if origin is not None and origin is not n:
+            got = _topic_value(origin, fn_node, before, resolve, depth + 1)
+            if got is not None:
+                return got
+        if n.type == "identifier":
+            default = _param_default(text(n), n)
+            if default is not None:
+                return _topic_value(default, fn_node, before, resolve, depth + 1)
+    return None
+
+
+def _pubsub_topic(arg: Node, fn_node: Node, before: Node, resolve, depth: int = 0) -> tuple[str | None, str | None] | None:
+    """The topic of ``client.publish(arg, …)``: a path / id literal,
+    ``client.topic_path(project, topic)``, or a name / ``self.x`` holding one."""
+    if depth > 4:
+        return None
+    if arg.type == "call" and call_callee_name(arg) == "topic_path":
+        kw = call_kwargs(arg)
+        pos = call_posargs(arg)
+        t = kw.get("topic") or (pos[1] if len(pos) > 1 else None)
+        return _topic_value(t, fn_node, before, resolve) if t is not None else None
+    if arg.type == "conditional_expression" and len(arg.named_children) >= 3:
+        for branch in (arg.named_children[2], arg.named_children[0]):
+            got = _pubsub_topic(branch, fn_node, before, resolve, depth + 1)
+            if got is not None:
+                return got
+        return None
+    if arg.type in ("identifier", "attribute"):
+        origin = _origin(arg, fn_node, before)
+        if origin is not None:
+            got = _pubsub_topic(origin, fn_node, before, resolve, depth + 1)
+            if got is not None:
+                return got
+    return _topic_value(arg, fn_node, before, resolve)
 
 
 def _builder_root(
