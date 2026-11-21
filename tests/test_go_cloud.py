@@ -160,16 +160,19 @@ def _go_functions(files: dict[str, str]) -> list[tuple[str, str, int, int]]:
 
 
 def _go_graph(root: Path, files: dict[str, str], *, repo: str | None = None,
-              edges: tuple[tuple[str, str, str, str, str], ...] = ()) -> tuple[Graph, object]:
+              edges: tuple[tuple[str, str, str, str, str], ...] = (),
+              schema: dict[str, list[str]] | None = None) -> tuple[Graph, object]:
     """Graph as the Go detector emits it (functions, calls, SQL edges), then the passes."""
     _write_all(root, files)
     g = Graph()
     g.repo = repo
     g.attrs["repo"] = repo
-    g.schema = {"tables": {"orders_mirror": {"columns": {c: {"type": "text"} for c in MIRROR}}}}
-    g.add_node("table:orders_mirror", "table", name="orders_mirror")
-    for c in MIRROR:
-        g.add_node(f"column:orders_mirror.{c}", "column", table="orders_mirror", name=c)
+    schema = schema or {"orders_mirror": MIRROR}
+    g.schema = {"tables": {t: {"columns": {c: {"type": "text"} for c in cols}} for t, cols in schema.items()}}
+    for t, cols in schema.items():
+        g.add_node(f"table:{t}", "table", name=t)
+        for c in cols:
+            g.add_node(f"column:{t}.{c}", "column", table=t, name=c)
     for qual, rel, start, end in _go_functions(files):
         g.add_node(f"function:{qual}", "function", name=qual, language="go",
                    evidence={"file": rel, "line": start, "symbol": qual}, end_line=end)
@@ -445,7 +448,155 @@ func (s *Sink) Publish(ctx context.Context, data []byte) error {
                         "pub, _ := pubsub.NewPublisher(ctx, cfg.ProjectID, []string{cfg.OrderTopic})\n\t_ = pub")
     g, _ = _go_graph(tmp_path / "cand", {**FANOUT, "cmd/api/main.go": main, "internal/audit/audit.go": other}, edges=A_EDGES)
     node = g.nodes[f"function:{ORD}Announcer.Announce"]
-    assert [q["candidates"] for q in node.attrs["unresolved_queues"]] == [["invoice-ready", "order-announce"]]
+    # no instance reaches it: a publish of unknown topic, never the topics of other instances
+    assert [(q.get("reason"), q.get("candidates")) for q in node.attrs["unresolved_queues"]] == [("instance_unknown", None)]
+    assert ("Announce", "queue:pubsub:invoice-ready") not in _enqueues(g)
+
+
+REPORTS = """package reports
+
+import (
+\t"context"
+\t"encoding/json"
+)
+
+var Topics = []string{"report-a", "report-b", "report-c"}
+
+type Publisher interface { Publish(ctx context.Context, data []byte, attrs map[string]string) error }
+type Requests struct{ pub Publisher }
+
+func New(pub Publisher) *Requests { return &Requests{pub: pub} }
+
+func (r *Requests) Request(ctx context.Context, id string) error {
+\tbody, _ := json.Marshal(map[string]string{"reportId": id})
+\treturn r.pub.Publish(ctx, body, nil)
+}
+"""
+REFUNDS = """package orders
+
+import (
+\t"context"
+\t"encoding/json"
+)
+
+type RefundReader interface { Pending(ctx context.Context) ([]string, error) }
+
+type RefundAnnouncer struct{ refunds RefundReader; refundPub Publisher }
+
+func (a *RefundAnnouncer) WithRefunds(r RefundReader, pub Publisher) *RefundAnnouncer {
+\ta.refunds, a.refundPub = r, pub
+\treturn a
+}
+
+func (a *RefundAnnouncer) Refund(ctx context.Context, id string) error {
+\tbody, _ := json.Marshal(map[string]string{"orderId": id})
+\treturn a.refundPub.Publish(ctx, body, nil)
+}
+"""
+FEEDS = """package feeds
+
+import (
+\t"context"
+\t"encoding/json"
+)
+
+type Kind string
+type Publisher interface { Publish(ctx context.Context, data []byte, attrs map[string]string) error }
+type Feed struct{ pubs map[Kind]Publisher }
+type Run struct{ f *Feed }
+
+func NewFeed(src any, kinds []Kind, pubs map[Kind]Publisher) *Feed {
+\tf := &Feed{pubs: map[Kind]Publisher{}}
+\tfor _, k := range kinds {
+\t\tif p := pubs[k]; p != nil {
+\t\t\tf.pubs[k] = p
+\t\t}
+\t}
+\treturn f
+}
+
+func (r *Run) publish(ctx context.Context, k Kind, v any) error {
+\tpub := r.f.pubs[k]
+\tbody, _ := json.Marshal(v)
+\treturn pub.Publish(ctx, body, nil)
+}
+"""
+CONFIG_ALL = CONFIG_FANOUT.replace(
+    "InvoiceTopic string }", "InvoiceTopic string; RefundTopic string; VisitTopic string }"
+).replace(
+    'InvoiceTopic: getEnv("INVOICE_TOPIC", "invoice-ready")}',
+    'InvoiceTopic: getEnv("INVOICE_TOPIC", "invoice-ready"), RefundTopic: getEnv("REFUND_TOPIC", "refund-requested"), '
+    'VisitTopic: getEnv("VISIT_TOPIC", "visit-announce")}',
+)
+MAIN_ALL = """package main
+
+import (
+\t"context"
+
+\tinvoicesint "example.com/gopublisher/internal/invoices"
+)
+
+func main() {
+\tctx := context.Background()
+\tcfg := config.Load()
+\tif pub, err := pubsub.NewPublisher(ctx, cfg.ProjectID, reports.Topics); err != nil {
+\t\tlog.Printf("reports: %v", err)
+\t} else {
+\t\treqs := reports.New(pub)
+\t\t_ = reqs
+\t}
+\tvar invPub interface {
+\t\tPublish(ctx context.Context, data []byte, attrs map[string]string) error
+\t}
+\tif p, err := pubsub.NewPublisher(ctx, cfg.ProjectID, []string{cfg.InvoiceTopic}); err != nil {
+\t\tlog.Printf("invoices: %v", err)
+\t} else {
+\t\tinvPub = p
+\t}
+\tinv := invoicesint.New(invPub)
+\tvar refundPub orders.Publisher
+\tif p, err := pubsub.NewPublisher(ctx, cfg.ProjectID, []string{cfg.RefundTopic}); err != nil {
+\t\tlog.Printf("refunds: %v", err)
+\t} else {
+\t\trefundPub = p
+\t}
+\tann := &orders.RefundAnnouncer{}
+\tann.WithRefunds(store, refundPub)
+\ttopics := map[feeds.Kind]string{"order": cfg.OrderTopic, "visit": cfg.VisitTopic}
+\tkinds := []feeds.Kind{"order", "visit"}
+\tpubs := map[feeds.Kind]feeds.Publisher{}
+\tfor _, k := range kinds {
+\t\tif p, err := pubsub.NewPublisher(ctx, cfg.ProjectID, []string{topics[k]}); err != nil {
+\t\t\tlog.Printf("feed %s: %v", k, err)
+\t\t} else {
+\t\t\tpubs[k] = p
+\t\t}
+\t}
+\tfeed := feeds.NewFeed(src, kinds, pubs)
+\t_, _ = inv, feed
+}
+"""
+
+
+def test_wrapper_formats_of_the_real_api(tmp_path: Path) -> None:
+    files = {**FANOUT, "internal/config/config.go": CONFIG_ALL, "internal/reports/reports.go": REPORTS,
+             "internal/orders/refunds.go": REFUNDS, "internal/feeds/feeds.go": FEEDS, "cmd/api/main.go": MAIN_ALL}
+    g, _ = _go_graph(tmp_path / "real", files, edges=A_EDGES)
+    enq = _enqueues(g)
+    # a) a package var with the topics: the wrapper publishes to all of them
+    assert {t for f, t in enq if f == "Request"} == {"queue:pubsub:report-a", "queue:pubsub:report-b", "queue:pubsub:report-c"}
+    # b) a package imported under an alias
+    assert {t for f, t in enq if f == "Ready"} == {"queue:pubsub:invoice-ready"}
+    # c) a setter with a tuple assignment
+    assert {t for f, t in enq if f == "Refund"} == {"queue:pubsub:refund-requested"}
+    # d) a map of publishers copied into a field and read by an unknown key: candidates, the map's topics
+    run = g.nodes["function:internal/feeds.Run.publish"]
+    assert not {t for f, t in enq if f == "publish"}
+    assert [q.get("candidates") for q in run.attrs["unresolved_queues"]] == [["order-announce", "visit-announce"]]
+    # nothing else is a candidate anywhere
+    for node in g.nodes.values():
+        for q in node.attrs.get("unresolved_queues") or []:
+            assert set(q.get("candidates") or []) <= {"order-announce", "visit-announce", "invoice-ready"}
 
 
 def test_env_without_default_takes_the_config_default(tmp_path: Path) -> None:
@@ -855,6 +1006,37 @@ def test_mirror_with_built_sql_and_interface_call_in_closure(tmp_path: Path) -> 
     feed = g.edges["feeds:collection:orders->table:orders_mirror"]
     assert feed.confidence.value == "heuristic"
     assert not feed.attrs.get("column_map")  # table level: the columns are built at run time
+
+
+def test_mirror_into_a_table_named_like_the_collection(tmp_path: Path) -> None:
+    pg = PGSTORE.replace('"INSERT INTO orders_mirror ("', '"INSERT INTO orders ("')
+    fs = FSREAD.replace(
+        "\treturn snap.Data(), true, nil\n}",
+        "\tdata, _ := normalize(snap.Data()).(map[string]any)\n\treturn data, true, nil\n}\n\n"
+        "func normalize(v any) any {\n\tswitch t := v.(type) {\n\tcase map[string]any:\n\t\tout := map[string]any{}\n"
+        "\t\tfor k, x := range t {\n\t\t\tout[k] = normalize(x)\n\t\t}\n\t\treturn out\n\t}\n\treturn v\n}",
+    )
+    assert "normalize(snap.Data())" in fs and "INSERT INTO orders (" in pg
+    files = {"internal/models/models.go": MODELS, "internal/pgstore/store.go": pg,
+             "internal/fsread/reader.go": fs, "internal/mirror/service.go": MIRRORSVC}
+    edges = (
+        ("calls", "internal/mirror.Service.Sync", "internal/fsread.Reader.MirrorDocument", "internal/mirror/service.go", "MirrorDocument"),
+        ("calls", "internal/mirror.Service.Sync", "internal/mirror.Map", "internal/mirror/service.go", "Map(id"),
+        ("calls", "internal/mirror.Service.Sync", "internal/pgstore.Store.WithOrderLock", "internal/mirror/service.go", "WithOrderLock"),
+        ("calls", "internal/fsread.Reader.MirrorDocument", "internal/fsread.normalize", "internal/fsread/reader.go", "normalize(snap"),
+    )
+    g, _ = _go_graph(tmp_path / "same", files, edges=edges, schema={
+        "orders": ["id", "customer_id", "total"], "order_items": ["order_id", "sku"]})
+    assert "writes:function:internal/pgstore.mirrorTx.WriteOrder->table:orders" in g.edges
+    feed = g.edges["feeds:collection:orders->table:orders"]
+    assert feed.confidence.value == "heuristic"
+    # the document itself (not only its id) reaches the write: without the id the feed stays
+    svc = MIRRORSVC.replace("Map(id, data, now)", "Map(\"\", data, now)").replace(
+        "tx.WriteOrder(ctx, id, mapped, now)", "tx.WriteOrder(ctx, \"\", mapped, now)")
+    assert svc != MIRRORSVC
+    g2, _ = _go_graph(tmp_path / "same2", {**files, "internal/mirror/service.go": svc}, edges=edges, schema={
+        "orders": ["id", "customer_id", "total"], "order_items": ["order_id", "sku"]})
+    assert "feeds:collection:orders->table:orders" in g2.edges
 
 
 FS_SPLIT = {
