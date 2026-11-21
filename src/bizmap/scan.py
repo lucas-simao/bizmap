@@ -933,8 +933,20 @@ def _apply_queues(graph: Graph, analysis: PyAnalysis, entrypoints_by_handler: di
         for eid in entrypoints_by_handler.get(ev.function.qualname, []):
             graph.add_edge("triggers", qid, eid, confidence=Confidence.INFERRED, evidence=ev.evidence)
     env_values = getattr(analysis, "env_values", None) or {}  # bizmap.yaml `env:`
+    # a publish inside a closure is seen by the closure and by the function around
+    # it: it belongs to the innermost one
+    innermost: dict[tuple[str, int, str, str], str] = {}
+    for ev in analysis.queue_events:
+        if ev.role == "produce":
+            key = (ev.evidence.file, ev.evidence.line, ev.queue_kind, ev.name or ev.env or "")
+            cur = innermost.get(key)
+            if cur is None or len(ev.function.qualname) > len(cur):
+                innermost[key] = ev.function.qualname
     for ev in analysis.queue_events:
         if ev.role != "produce":
+            continue
+        key = (ev.evidence.file, ev.evidence.line, ev.queue_kind, ev.name or ev.env or "")
+        if innermost.get(key) != ev.function.qualname:
             continue
         name = ev.name or (env_values.get(ev.env) if ev.env else "") or ""
         if not name:
@@ -943,7 +955,9 @@ def _apply_queues(graph: Graph, analysis: PyAnalysis, entrypoints_by_handler: di
             if node is not None and ev.env:
                 bucket = list(node.attrs.get("unresolved_queues") or [])
                 item = {"kind": ev.queue_kind, "env": ev.env, "evidence": ev.evidence.to_dict()}
-                if item not in bucket:
+                same = [q for q in bucket if q.get("env") == ev.env and (q.get("evidence") or {}).get("line") == ev.evidence.line
+                        and (q.get("evidence") or {}).get("file") == ev.evidence.file]
+                if not same:
                     bucket.append(item)
                 node.attrs["unresolved_queues"] = bucket
             continue
