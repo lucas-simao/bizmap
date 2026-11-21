@@ -22,6 +22,7 @@ JSON output (``--format json``) is a stable contract, ``"schema":
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import marshal
 import os
@@ -98,20 +99,86 @@ class _Adj:
         return [edges[i] for i in ids]
 
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
+CACHE_KEEP = 16  # index files kept in the cache folder (the oldest go first)
+_TRUE = {"1", "true", "yes", "on"}
 
 
-def cache_path(graph: Path) -> Path:
-    """``bizmap.graph.json`` → ``bizmap.graph.idx`` (next to it)."""
+def cache_disabled() -> bool:
+    """``BIZMAP_NO_CACHE=1`` turns the index cache off."""
+    return os.environ.get("BIZMAP_NO_CACHE", "").strip().lower() in _TRUE
+
+
+def cache_dir(override: Path | str | None = None) -> Path:
+    """Where index caches live — never inside the scanned repo by default:
+    ``--cache-dir`` / ``BIZMAP_CACHE_DIR``, else the user's cache folder
+    (``$XDG_CACHE_HOME`` or ``~/.cache`` on Linux, ``~/Library/Caches`` on
+    macOS, ``%LOCALAPPDATA%`` on Windows) + ``bizmap/index``."""
+    if override:
+        return Path(override).expanduser()
+    env = os.environ.get("BIZMAP_CACHE_DIR", "").strip()
+    if env:
+        return Path(env).expanduser()
+    home = Path.home()
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+    elif sys.platform == "darwin":
+        base = home / "Library" / "Caches"
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME") or home / ".cache")
+    return base / "bizmap" / "index"
+
+
+def cache_path(graph: Path, directory: Path | str | None = None) -> Path:
+    """The cache file of one graph: named by its absolute path (two repos never
+    share one), in :func:`cache_dir`."""
+    graph = Path(graph)
+    try:
+        full = str(graph.resolve())
+    except OSError:
+        full = str(graph.absolute())
+    digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:20]
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", graph.parent.resolve().name or "graph")[:40]
+    return cache_dir(directory) / f"{stem}-{digest}.idx"
+
+
+def legacy_cache_path(graph: Path) -> Path:
+    """Where bizmap 0.13.1 put the cache: ``bizmap.graph.idx`` next to the graph."""
     graph = Path(graph)
     name = graph.name[: -len(".json")] if graph.name.endswith(".json") else graph.name
     return graph.with_name(name + ".idx")
 
 
+def _fingerprint(graph: Path, size: int) -> str:
+    """A cheap content hash (first and last MiB + size): a graph replaced
+    with the same size and mtime is still noticed."""
+    h = hashlib.blake2b(digest_size=16)
+    with Path(graph).open("rb") as fh:
+        h.update(fh.read(1 << 20))
+        if size > 2 << 20:
+            fh.seek(-(1 << 20), os.SEEK_END)
+        h.update(fh.read(1 << 20))
+    h.update(str(size).encode())
+    return h.hexdigest()
+
+
 def _cache_key(graph: Path) -> tuple[Any, ...]:
-    st = Path(graph).stat()
+    graph = Path(graph)
+    st = graph.stat()
     # marshal's format follows the Python version: a cache from another one is rebuilt
-    return (CACHE_VERSION, sys.version_info[0], sys.version_info[1], st.st_size, st.st_mtime_ns)
+    return (CACHE_VERSION, sys.version_info[0], sys.version_info[1], str(graph.resolve()), st.st_size,
+            st.st_mtime_ns, _fingerprint(graph, st.st_size))
+
+
+def _prune(directory: Path, keep: int = CACHE_KEEP) -> None:
+    try:
+        files = sorted((p for p in directory.glob("*.idx") if re.search(r"-[0-9a-f]{20}\.idx$", p.name)),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    for old in files[keep:]:
+        with contextlib.suppress(OSError):
+            old.unlink()
 
 
 @dataclass
@@ -142,13 +209,15 @@ class Index:
     loaded_from_cache: bool = False
 
     @classmethod
-    def load(cls, path: Path, use_cache: bool = True) -> Index:
-        """Read the graph JSON, or its index cache (``bizmap.graph.idx``) when
-        that was built from the same file (same size and mtime) by the same
-        Python. A fresh index is written next to the graph when possible."""
+    def load(cls, path: Path, use_cache: bool = True, cache_directory: Path | str | None = None) -> Index:
+        """Read the graph JSON, or its index cache when that was built from the
+        same file (path, size, mtime, content fingerprint) by the same Python.
+        The cache lives in :func:`cache_dir` (outside the repo); ``use_cache=False``
+        or ``BIZMAP_NO_CACHE=1`` neither reads nor writes it."""
         path = Path(path)
-        key = _cache_key(path)
-        cpath = cache_path(path)
+        use_cache = use_cache and not cache_disabled()
+        key = _cache_key(path) if use_cache else ()
+        cpath = cache_path(path, cache_directory)
         if use_cache and cpath.is_file():
             try:
                 blob = marshal.loads(cpath.read_bytes())
@@ -183,11 +252,14 @@ class Index:
         }
         tmp = cpath.with_name(cpath.name + f".{os.getpid()}.tmp")
         try:
+            cpath.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_bytes(marshal.dumps(blob))
             os.replace(tmp, cpath)
         except (OSError, ValueError):  # a read-only folder, an odd value: answer without a cache
             with contextlib.suppress(OSError):
                 tmp.unlink()
+            return
+        _prune(cpath.parent)
 
     @classmethod
     def _from_cache(cls, blob: dict[str, Any]) -> Index:

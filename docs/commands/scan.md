@@ -75,3 +75,33 @@ paths) — see [`scan:` in the configuration](../configuration.md#exclude-and-sc
 
 The output is deterministic: the same input gives byte-identical JSON (except
 `generated_at`), so the graph can be committed and diffed.
+
+### Generated files and what to ignore
+
+| File | Written by | Where | Commit it? |
+| --- | --- | --- | --- |
+| `bizmap.graph.json` | `bizmap scan` (`--out` to change) | the folder you scan from | Only on purpose — it can reach tens of MB on a big repo (GitHub refuses files over 100 MB). |
+| `bizmap.graph.mmd` | `bizmap scan --mermaid` | next to the graph | Usually not. |
+| `bizmap.html` | `bizmap export` (`--out`) | the current folder | Usually not; share the file instead. |
+| index cache (`*.idx`) | `who-writes` / `who-reads` / `trace` | your user cache folder, **never the repo** | — |
+
+When the scan writes a file inside a git repo that git does not ignore, it says
+so once per file and prints the line to add:
+
+```text
+note: git does not ignore bizmap.graph.json (generated, can be large). Add to /work/orders-api/.gitignore:
+  /bizmap.graph.json
+```
+
+A typical `.gitignore`:
+
+```gitignore
+/bizmap.graph.json
+/bizmap.graph.mmd
+/bizmap.html
+# written by bizmap 0.13.1 next to the graph (no longer used): delete it
+/bizmap.graph.idx
+```
+
+`BIZMAP_NO_GITIGNORE_HINT=1` silences the note (e.g. when you do commit the
+graph).
