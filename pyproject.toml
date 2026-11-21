@@ -1,6 +1,6 @@
 [project]
 name = "bizmap"
-version = "0.5.0"
+version = "0.8.0"
 description = "Deterministic business-rule and data-lineage mapper for codebases. No AI, no tokens, no accounts."
 readme = "README.md"
 license = "MIT"
@@ -62,8 +62,7 @@ exclude = ["docs/assets", "docs/img"]
 "src/bizmap/rules/sqlalchemy.yaml" = "bizmap/rules/sqlalchemy.yaml"
 "src/bizmap/rules/supabase.yaml" = "bizmap/rules/supabase.yaml"
 "src/bizmap/export/template.html" = "bizmap/export/template.html"
-"src/bizmap/export/app.js" = "bizmap/export/app.js"
-"src/bizmap/export/reach.js" = "bizmap/export/reach.js"
+"src/bizmap/export/book.js" = "bizmap/export/book.js"
 "src/bizmap/export/vendor/cytoscape.min.js" = "bizmap/export/vendor/cytoscape.min.js"
 "src/bizmap/export/vendor/cytoscape.LICENSE" = "bizmap/export/vendor/cytoscape.LICENSE"
 

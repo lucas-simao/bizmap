@@ -1,239 +1,118 @@
 # BizMap
 
+[![PyPI](https://img.shields.io/pypi/v/bizmap)](https://pypi.org/project/bizmap/)
+[![Python](https://img.shields.io/pypi/pyversions/bizmap)](https://pypi.org/project/bizmap/)
+[![CI](https://github.com/lucas-simao/bizmap/actions/workflows/ci.yml/badge.svg)](https://github.com/lucas-simao/bizmap/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-lucas--simao.github.io%2Fbizmap-e8590c)](https://lucas-simao.github.io/bizmap/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+📖 **Documentation: [lucas-simao.github.io/bizmap](https://lucas-simao.github.io/bizmap/)**
+
 **Who reads and writes this column — across all your services — and what triggers it?**
 
-BizMap is a static, deterministic data-lineage map for application code. Point it
-at one or more repos and it answers, for every table and column:
+BizMap reads your code and maps every entrypoint (HTTP route, job, queue
+consumer, database trigger) through the functions it calls to the tables and
+columns they read and write, across repositories and languages. It is static
+and deterministic: no LLM, no tokens, no account, no server.
 
-- **who writes it** and **who reads it** (function, file, line)
-- **what triggers that code**: HTTP route, scheduled job, queue consumer, DB trigger, Firestore event
-- **which other service calls in**: front-end → API → internal service, matched across repos
-- **why**, in the words already sitting in the code (the comment or docstring above the function)
+![bizmap scan and bizmap why on the demo repository](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/assets/demo/hero.gif)
 
-No LLM, no tokens, no account, no server. It runs locally, and the same input always produces the same graph.
+<sub>Recorded on [bizmap-demo](https://github.com/lucas-simao/bizmap-demo): a TypeScript shop and a Python payments service sharing one Postgres database.</sub>
+
+**[Documentation](https://lucas-simao.github.io/bizmap/)** ·
+**[Demo repository](https://github.com/lucas-simao/bizmap-demo)** ·
+[Changelog](CHANGELOG.md) · [PyPI](https://pypi.org/project/bizmap/)
+
+## Install
 
 ```bash
 pipx install bizmap        # or: pip install bizmap   (Python 3.11+)
-bizmap --version
 ```
 
-Typical questions it answers:
+## Quickstart
+
+```bash
+bizmap scan . --mermaid    # writes bizmap.graph.json (+ bizmap.graph.mmd)
+bizmap why orders.status   # writers, readers, what triggers them, who calls in
+bizmap report              # how much of the code BizMap understood
+bizmap export --format html --out bizmap.html   # one offline page to browse the graph
+```
+
+Several services at once — one graph, HTTP calls between them matched:
+
+```bash
+bizmap scan --discover .                    # every git repo under the current folder
+bizmap report --cross-service               # which routes reach which services over HTTP
+bizmap scan ./web ./api ./billing           # or list them (or a bizmap.yaml with `repos:`)
+```
+
+Try it on the demo in one minute:
+
+```bash
+git clone https://github.com/lucas-simao/bizmap-demo && cd bizmap-demo
+bizmap scan . && bizmap why orders.status
+```
+
+## What it answers
 
 - *Can I drop or rename `orders.status`?* — every reader and writer, in every repo.
 - *Which endpoints touch `users.email`?* — useful for LGPD/GDPR data mapping.
 - *What happens to the database when the front-end calls `placeOrder()`?*
+- *What does this pull request touch?* — as a comment, on every push.
 
-## A 30-second demo
+Every answer points at `file:line` and carries a confidence (`exact`,
+`inferred`, `unknown`). What BizMap cannot see — dynamic SQL, a URL built at
+runtime, a service that was not scanned — is reported as such, not guessed.
 
-[`examples/checkout`](https://github.com/lucas-simao/bizmap/tree/main/examples/checkout) is three services sharing one Postgres:
-**web** (TypeScript + axios) → **api** (Go + Echo + pgx) → **billing** (Python + FastAPI),
-and billing calls the api back when a payment is confirmed.
+## What it finds
 
-```bash
-git clone https://github.com/lucas-simao/bizmap && cd bizmap
-bizmap scan examples/checkout --mermaid
-bizmap why orders.status
-```
+| | Routes / triggers | Data access | Outbound HTTP |
+| --- | --- | --- | --- |
+| **Go** | Echo (groups, const paths, wrappers), ticker/cron jobs | pgx, `database/sql`, sqlx | `net/http` (env/const/`Sprintf` URLs) |
+| **Python** | FastAPI, Flask (routers, blueprints, factories), Celery, RQ, Cloud Tasks, Pub/Sub, Firebase Functions, `while True` workers | SQLAlchemy Core/ORM, raw SQL, SQL dicts/constants, Firestore, Supabase | httpx, requests, aiohttp |
+| **JS / TS** | Express, Fastify, Hono (chains, mounts), Supabase Edge Functions | `pg`/`postgres`, Supabase | fetch, axios, ky, ofetch, got (instances, factories, `tsconfig` paths) |
+| **SQL** | `CREATE TRIGGER` | schema replayed from `schema.sql` / migrations / Alembic, views, RLS policies | — |
 
-The diagram that `--mermaid` writes (entrypoint → table rollup plus cross-service
-calls; `reads` edges omitted here for readability):
+| Database | |
+| --- | --- |
+| **PostgreSQL** | schema, migrations, views, triggers and the tables their functions write, RLS policies |
+| **Supabase** | Postgres + `from()` / `rpc()` + Edge Functions |
+| **Firestore** | collections, document refs, transactions and batches, Firebase triggers |
 
-```mermaid
-flowchart LR
-  subgraph web
-    placeOrder["placeOrder()"]
-    pollOrder["pollOrder()"]
-  end
-  subgraph api
-    POST_orders["POST /api/orders"]
-    GET_order["GET /api/orders/:id"]
-    POST_paid["POST /api/orders/:id/paid"]
-    job_expire["job ExpireJob.Run"]
-    CreateInvoice["Billing.CreateInvoice"]
-    orders[("orders")]
-  end
-  subgraph billing
-    POST_invoices["POST /invoices"]
-    POST_webhook["POST /webhooks/payment"]
-    invoices[("invoices")]
-  end
-  placeOrder -->|calls_http| POST_orders
-  pollOrder -->|calls_http| GET_order
-  CreateInvoice -->|calls_http| POST_invoices
-  POST_webhook -->|calls_http| POST_paid
-  POST_orders -->|writes| orders
-  POST_paid -->|writes| orders
-  job_expire -->|writes| orders
-  POST_invoices -->|writes| invoices
-  POST_webhook -->|writes| invoices
-```
+Details per detector: [Languages and detectors](https://lucas-simao.github.io/bizmap/languages/).
 
-And `bizmap why orders.status` (trimmed):
+## Pull request comment
 
-```
-column: orders.status (TEXT)
-
-writers:
-  [exact] api/main.Repo.ExpirePending  (repo.go:54) — ExpirePending releases orders that were never paid.
-      triggered by api/scheduled job main.ExpireJob.Run — Run expires unpaid orders every minute so abandoned carts free their slot.
-  [exact] api/main.Repo.InsertOrder  (repo.go:35) — InsertOrder stores a new pending order.
-      triggered by api/HTTP POST /api/orders — CreateOrder records a checkout as pending and asks billing for an invoice.
-      invoked via HTTP from web/src.checkout.placeOrder
-  [exact] api/main.Repo.MarkPaid  (repo.go:48) — MarkPaid settles an order after billing confirms payment.
-      triggered by api/HTTP POST /api/orders/:id/paid — MarkPaid is called by billing once the payment provider confirms the charge.
-      invoked via HTTP from billing/app.payment_webhook
-
-readers:
-  [exact] api/main.Repo.GetOrder  (repo.go:42) — GetOrder loads one order by id.
-      triggered by api/HTTP GET /api/orders/:id — GetOrder returns the order status for the confirmation page.
-      invoked via HTTP from web/src.checkout.pollOrder
-```
-
-Three languages, four cross-service hops, every line backed by `file:line`.
-
-## Quickstart
-
-Python 3.11+:
-
-```bash
-pipx install bizmap                  # or: pip install bizmap
-bizmap scan path/to/repo --mermaid   # writes bizmap.graph.json (+ .mmd)
-bizmap why orders.status             # writers, readers, triggers, callers
-bizmap report path/to/repo           # how much of the code BizMap understood
-```
-
-Several services at once (one joint graph, cross-repo HTTP links matched):
-
-```bash
-bizmap scan ./web ./api ./billing --out merged.json
-bizmap registry merge web.json api.json billing.json --out merged.json   # same result
-```
-
-A whole work folder full of clones and worktrees: `--discover` finds the git
-repos, keeps one copy of each (main checkout, default branch, latest commit) and
-scans them together. `--list` shows the choice and why
-([docs/discover.md](https://github.com/lucas-simao/bizmap/blob/main/docs/discover.md)):
-
-```bash
-bizmap scan --discover ~/work --list
-bizmap scan --discover ~/work --out work.json
-```
-
-A `bizmap.yaml` per repo (or one at the parent) is optional and only fills gaps:
+The GitHub Action posts one comment per PR (updated on each push) with the
+routes, functions, tables and columns the change reaches — across services —
+and flags migrations that drop or rename columns still in use.
 
 ```yaml
-name: api
-database: checkout            # repos with the same database share table ids
-services:                     # which env var / host points at which service
-  billing: { url: http://billing.internal, env: BILLING_URL }
-  api: { env: VITE_API_URL, prefix: /api/v1 }   # the env value already ends in /api/v1
-  backend: { env: BACKEND_URL, repo: core-api }  # key ≠ repo name: point at the repo
-exclude: [cmd/seed, demo/]
-scan:                         # what is left out by default, and how to bring it back
-  include: ["*_test.go", .yarn]   # skip_generated: false brings everything back
-overrides:                    # anything static analysis cannot see
-  columns:
-    orders.status:
-      why: "Lifecycle: pending → paid | expired"
-```
-
-A `services:` key (or its `repo:`) is the name of a scanned repo — with
-`--discover`, the name `--list` shows. The short form `billing: http://billing.internal`
-is a URL alone; `url`/`base`/`host`, `env` (one or a list), `hostname`, `repo` and
-`prefix` are the long form's keys. It works in each repo's bizmap.yaml and in the
-one at the workspace or `--discover` root. When every call that already matched
-through an env key goes to one repo, the key's other calls are linked to that repo
-too (`via: env_inferred`); `bizmap scan` prints the rest as a ready-to-paste
-`services:` hint.
-
-Dependency and build folders (`node_modules`, `vendor`, `dist`, `build`, `.venv`)
-are never scanned unless listed in `scan: include`. Left out by default
-(`skip_generated: true`, `gitignore: true`): build caches (`.next`, `.yarn`,
-`.turbo`…, and `out/` / `coverage/` next to a project manifest), minified or
-bundled JS, `.gitignore`d paths, and in Go `*_test.go`, `testdata/`, `mocks/`, `*.pb.go`, `*_mock.go` and files
-headed `// Code generated … DO NOT EDIT.` — except generated data-access code
-(sqlc, or anything that runs `.Exec(` / `.Query…(`), which is always scanned.
-`bizmap scan` names what it skipped; `scan: include:` brings paths back,
-`skip_generated: false` and `gitignore: false` turn the defaults off.
-
-## Coverage report
-
-`bizmap report` tells you how much of a codebase BizMap understood: entrypoints that
-reach a table, HTTP links matched vs. unresolved (by reason, with a hint for each),
-how links were derived, and confidence.
-
-```
-entrypoints: 6  reaching a table/collection: 6 (100.0%)
-http links: 4  (cross-repo 4)
-unresolved http: 0
-edges by confidence: exact 31, inferred 23
-```
-
-`--redact` replaces every name, route, table, URL, env key, and file with a salted
-hash, so a report from a private codebase can be shared without sharing code:
-
-```bash
-bizmap report ./svc-a ./svc-b --redact --salt-file ~/.bizmap-salt --json
-```
-
-Only counts, edge types, entrypoint kinds and reasons stay readable. Without a
-salt each run uses a random one (hashes differ between runs); `--salt-file`
-creates a private salt once and reuses it so runs can be compared.
-
-## PR impact comment
-
-`bizmap impact` maps a diff onto the graph: each changed function → the entrypoints
-that reach it (across services in a joint scan) and the tables/columns it, or
-anything it calls, reads or writes. It prints Markdown with a Mermaid diagram.
-
-```bash
-bizmap scan examples/checkout --out /tmp/g.json
-git diff --unified=0 origin/main... | bizmap impact --graph /tmp/g.json --prefix examples/checkout
-```
-
-As a GitHub Action (one comment per PR, updated on each push):
-
-```yaml
-on: pull_request            # not pull_request_target: never run PR code with a write token
+# .github/workflows/bizmap-impact.yml
+on: pull_request
 permissions:
   contents: read
   pull-requests: write
-concurrency:                # two quick pushes must not race to create two comments
-  group: bizmap-impact-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
 jobs:
   bizmap:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4   # the base commit is fetched if missing; fetch-depth: 0 also works
-      - uses: lucas-simao/bizmap@v0.5.0
+      - uses: lucas-simao/bizmap@v0.8.0
         with:
-          path: .            # or the workspace dir holding bizmap.yaml with `repos:`
+          path: .
 ```
 
-The comment lists at most `max-rows` functions (default 50, ranked by how many
-routes and tables they reach) and stays under GitHub's size limit; the workflow
-run summary has the full list. PRs from forks get a read-only token, so they
-only get the summary. If the scan fails, the comment says so and links the log.
-Only comments by `comment-author` (default `github-actions[bot]`) are updated;
-if the comments can't be listed, nothing is posted (no duplicates). The check is
-advisory: a BizMap failure is reported in the comment and as a warning, and
-fails the job only with `fail-on-error: "true"`. With `ref: <head sha>`
-checkouts the diff starts at the merge base, so base-branch drift is not
-reported.
+<img alt="BizMap impact comment on a pull request" src="https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/assets/demo/pr-comment-small.png" width="720">
 
-Lines outside any function (imports, migrations, docs) are listed as unmapped and
-don't produce impact.
+Live examples: [bizmap-demo pull requests](https://github.com/lucas-simao/bizmap-demo/pulls).
+Inputs, outputs and behaviour: [GitHub Action](https://lucas-simao.github.io/bizmap/github-action/).
 
-## MCP server (for coding agents)
+## Ask the graph from your coding agent (MCP)
 
-*Requires bizmap 0.4.0+.*
-
-`bizmap mcp` lets Claude Code, Cursor, Claude Desktop or any MCP client ask the
-graph *what writes `orders.status`?*, *which routes reach `markPaid`?* or *what does
-this diff touch?* instead of grepping. It is **read-only and offline** (reads the JSON
-from `bizmap scan`, reloads it when you rescan), deterministic, and needs no extra
-dependency.
+`bizmap mcp` serves the graph to Claude Code, Cursor, Claude Desktop or any MCP
+client — read-only and offline — so an agent can ask *what writes
+`orders.status`?* or *what does this diff touch?* instead of grepping.
 
 ```bash
 bizmap scan . --out bizmap.graph.json
@@ -246,77 +125,35 @@ Cursor (`.cursor/mcp.json`):
 { "mcpServers": { "bizmap": { "command": "bizmap", "args": ["mcp", "--graph", "${workspaceFolder}/bizmap.graph.json"] } } }
 ```
 
-Claude Desktop (`claude_desktop_config.json`, absolute paths):
-
-```json
-{ "mcpServers": { "bizmap": { "command": "/home/you/.local/bin/bizmap", "args": ["mcp", "--graph", "/home/you/code/shop/bizmap.graph.json"] } } }
-```
-
-| Tool | Answers |
-|---|---|
-| `search` | functions, routes, tables, columns by name / path / doc comment → ids |
-| `call_graph` | callers (and the routes/jobs that reach a function) and callees, across services |
-| `function_data` | tables/columns a function or route reads and writes (`transitive` through callees) |
-| `table_usage` | functions and routes that read/write a table or one column |
-| `impact` | a unified diff → changed functions, routes and data (same as `bizmap impact`) |
-| `why_column` | the `bizmap why` report for `table.column` |
-
-Every item carries `evidence` (`file:line`) and, when it comes from an edge, a
-`confidence`; lists are capped (`limit`, default 20) with totals. Setup per client,
-the full input/output contract and troubleshooting: [docs/mcp.md](https://github.com/lucas-simao/bizmap/blob/main/docs/mcp.md).
+Tools (`search`, `call_graph`, `function_data`, `table_usage`, `impact`,
+`why_column`) and other clients: [MCP server](https://lucas-simao.github.io/bizmap/mcp/).
 
 ## Interactive map (HTML)
-
-*Requires bizmap 0.5.0+.*
 
 ```bash
 bizmap export --graph bizmap.graph.json --format html --out bizmap.html   # --lang pt-BR
 ```
 
-One self-contained file, offline (no CDN, no server): open it with a double click or
-attach it to a ticket. It starts with the services and the HTTP links between them;
-click a service to expand its routes, functions and tables, search any route, function,
-table or column, and filter by a table to see every route and function that reads or
-writes it, across services. Services or tables used by 3+ services are flagged.
-Stays fast on ~55k-node graphs (subgraphs are built on demand).
+One self-contained, offline HTML file that reads the system like a book: services,
+then domains (routes grouped by path), then a route's call tree down to the tables and
+columns it reads and writes. Front-ends list their screens, the routes each one uses
+and the calls that matched no route. Search finds any route, function, table or column.
 
-![bizmap export --format html: services, expand, search, filter by table](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/img/export-html.gif)
+![bizmap export --format html: system, a domain, a route's call tree, screens](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/img/export-html.gif)
 
-Details: [docs/export.md](https://github.com/lucas-simao/bizmap/blob/main/docs/export.md).
+Details: [export](https://lucas-simao.github.io/bizmap/commands/export/).
 
-## What it understands
+## Documentation
 
-| | Routes / triggers | Data access | Outbound HTTP |
-| --- | --- | --- | --- |
-| **Go** | Echo (groups, const paths, wrappers), ticker/cron jobs | pgx, `database/sql`, sqlx | `net/http` (env/const/`Sprintf` URLs) |
-| **Python** | FastAPI, Flask (routers, blueprints, factories), Celery, RQ, Cloud Tasks, Pub/Sub, Firebase Functions, `while True` workers | SQLAlchemy Core/ORM, raw SQL, SQL dicts/constants, Firestore, Supabase | httpx, requests, aiohttp |
-| **JS / TS** | Express, Fastify, Hono (chains, mounts), Supabase Edge Functions | `pg`/`postgres`, Supabase | fetch, axios, ky, ofetch, got (instances, factories, `tsconfig` paths) |
-| **SQL** | `CREATE TRIGGER` | schema replayed from `schema.sql` / migrations / Alembic, views, RLS policies | — |
-
-When a client or executor cannot be traced through every layer, BizMap falls back to
-evidence it can still see — an API path literal in a front-end function
-(`via: route_literal`), or the SQL constant a handler names (`via: sql_reference`) —
-and marks those links `inferred`. Details: [docs/how-it-works.md](https://github.com/lucas-simao/bizmap/blob/main/docs/how-it-works.md).
-
-## How it decides
-
-- **Evidence over vibes.** Every edge stores `{file, line, symbol}`.
-- **Confidence on every edge.** `exact` (static SQL / resolved handler), `inferred`
-  (call-graph propagation, `SELECT *`, interface dispatch, fallbacks above), `unknown`
-  (dynamic SQL like `"UPDATE " + table`).
-- **Say when you do not know.** Dynamic SQL is `table:unknown`, ambiguous handlers list
-  `candidates`, unmatched HTTP calls are kept as `unresolved_http` with a `reason`
-  (`target_not_scanned`, `base_unknown`, `path_dynamic`, `client_unknown`).
-- **Deterministic.** Byte-identical output for identical input, checked in CI across
-  hash seeds; every bundled example has a golden snapshot.
-- **Static means static.** SQL rewritten at runtime (`sql.replace(...)`,
-  `.format()` with runtime values) is read as written in the source.
-- **JS/TS import resolution** follows relative paths, `index` barrels,
-  `export … from`, tsconfig `paths` and Vite `resolve.alias`; Webpack aliases are
-  not read. Same-named local helpers in two sibling anonymous callbacks share one
-  id (only one is kept).
-- **No AI in the core, ever.** Models are welcome as *clients* of the graph (MCP is on
-  the roadmap), not as its authors.
+| | |
+| --- | --- |
+| [Getting started](https://lucas-simao.github.io/bizmap/getting-started/) | Install and walk through the demo |
+| [Configuration](https://lucas-simao.github.io/bizmap/configuration/) | `bizmap.yaml`: `services:`, `database:`, `repos:`, excludes, overrides |
+| [Commands](https://lucas-simao.github.io/bizmap/commands/) | `scan`, `why`, `report`, `impact`, `registry`, `mcp`, `export` |
+| [MCP server](https://lucas-simao.github.io/bizmap/mcp/) | Let Claude Code, Cursor or any MCP client query the graph |
+| [GitHub Action](https://lucas-simao.github.io/bizmap/github-action/) | The PR comment |
+| [Graph format](https://lucas-simao.github.io/bizmap/graph-schema/) | `bizmap.graph.json`, node and edge types, confidence |
+| [FAQ and limitations](https://lucas-simao.github.io/bizmap/faq/) | What static analysis can and cannot see |
 
 ## How it compares
 
@@ -328,23 +165,10 @@ and marks those links `inferred`. Details: [docs/how-it-works.md](https://github
 - **Commercial code-level lineage** (Gable, Foundational) does this for data teams as a
   hosted platform. BizMap is the open-source, local, developer-first take on it.
 
-## Roadmap
-
-- **Shipped in v0.3.3** — `bizmap impact` + GitHub Action that comments on each PR
-  with the routes, functions, tables and columns it impacts (and a Mermaid diagram).
-- **Shipped in v0.4.0** — `bizmap mcp`, a read-only MCP server so coding agents can ask
-  `why orders.status` instead of grepping; `bizmap scan --discover` for work folders
-  full of clones and worktrees.
-- Static graph page (GitHub Pages).
-
-Full history: [CHANGELOG.md](https://github.com/lucas-simao/bizmap/blob/main/CHANGELOG.md). Graph format:
-[docs/graph-schema.md](https://github.com/lucas-simao/bizmap/blob/main/docs/graph-schema.md). Detector rules:
-[docs/detector-rules.md](https://github.com/lucas-simao/bizmap/blob/main/docs/detector-rules.md).
-
 ## Releasing
 
 Bump the version (`pyproject.toml`, `src/bizmap/__init__.py`, graph version,
-`docs/graph-schema.md`, README `@vX.Y.Z`), date the CHANGELOG section, merge, then
+`docs/graph-schema.md`, README and `docs/github-action.md` `@vX.Y.Z`), date the CHANGELOG section, merge, then
 push a tag on that commit:
 
 ```bash

@@ -57,6 +57,7 @@ from bizmap.spans import (
 from bizmap.sql_analyze import (
     SqlAccess,
     analyze_sql,
+    drain_sql_failures,
     ident_leaf,
     is_external_table,
     is_skipped_table_name,
@@ -156,6 +157,27 @@ def _add_schema_nodes(graph: Graph, schema: Schema) -> None:
                 )
 
 
+# id(schema) → (schema, (tables, views) sizes, live tables, live tables + views).
+# Built once per schema instead of on every access target (called for every
+# ancestor × access during propagation).
+_SCHEMA_NAMES: dict[int, tuple[Schema, tuple[int, int], frozenset[str], frozenset[str]]] = {}
+
+
+def _schema_names(schema: Schema) -> tuple[frozenset[str], frozenset[str]]:
+    # the schema is complete (replayed) before any access is linked; the sizes
+    # guard against a schema object that was extended afterwards
+    sig = (len(schema.tables), len(schema.views))
+    cached = _SCHEMA_NAMES.get(id(schema))
+    if cached is None or cached[0] is not schema or cached[1] != sig:
+        live = frozenset(t.lower() for t, tbl in schema.tables.items() if not tbl.dropped)
+        known = live | frozenset(t.lower() for t in schema.views)
+        if len(_SCHEMA_NAMES) > 16:
+            _SCHEMA_NAMES.clear()
+        cached = (schema, sig, live, known)
+        _SCHEMA_NAMES[id(schema)] = cached
+    return cached[2], cached[3]
+
+
 def _ensure_access_target(graph: Graph, schema: Schema, access: SqlAccess) -> str | None:
     """Create the node an SQL access should point at.
 
@@ -191,8 +213,7 @@ def _ensure_access_target(graph: Graph, schema: Schema, access: SqlAccess) -> st
                 graph.add_node(cid, "column", table=tname, name=access.column.lower())
             return cid
         return vid
-    live_tables = {t.lower() for t, tbl in schema.tables.items() if not tbl.dropped}
-    ddl_known = live_tables | {t.lower() for t in schema.views}
+    live_tables, ddl_known = _schema_names(schema)
     table_obj = schema.tables.get(tname) or schema.tables.get(ident_leaf(tname))
     dropped = bool(table_obj and table_obj.dropped)
     known = (tname in live_tables) or tname in schema.views
@@ -344,8 +365,12 @@ def _propagate(
     entrypoints_by_handler: dict[str, list[str]],
     schema: Schema,
     job_functions: set[str],
+    callers_cache: dict[str, set[str]] | None = None,
 ) -> None:
     """Copy origin accesses up the call graph as **table-level** inferred edges.
+
+    ``callers_cache`` memoizes the callers of each origin across calls with the
+    same (unchanged) ``reverse_calls``.
 
     Dynamic-table / ``table:unknown`` accesses stay on the origin function
     only — they must not flood every caller and HTTP route.
@@ -373,7 +398,20 @@ def _propagate(
         )
         table_accesses.append((_kind_edge(access.kind), rolled))
 
-    ancestors = _callers_of(origin_fn, reverse_calls)
+    if callers_cache is None:
+        ancestors = _callers_of(origin_fn, reverse_calls)
+    else:
+        ancestors = callers_cache.get(origin_fn)
+        if ancestors is None:
+            ancestors = callers_cache[origin_fn] = _callers_of(origin_fn, reverse_calls)
+    # each access's target is created on first use (as before), then reused
+    targets: dict[int, str | None] = {}
+
+    def target_of(i: int, access: SqlAccess) -> str | None:
+        if i not in targets:
+            targets[i] = _ensure_access_target(graph, schema, access)
+        return targets[i]
+
     for anc in ancestors:
         if _is_func_main(anc) and anc not in job_functions:
             continue
@@ -381,20 +419,20 @@ def _propagate(
         if fid not in graph.nodes:
             continue
         ev = evidence_by_fn.get(anc) or evidence_by_fn.get(origin_fn)
-        for kind, access in table_accesses:
-            target = _ensure_access_target(graph, schema, access)
+        for i, (kind, access) in enumerate(table_accesses):
+            target = target_of(i, access)
             if not target:
                 continue
             graph.add_edge(kind, fid, target, confidence=Confidence.INFERRED, evidence=ev, derived="call")
         for ep in entrypoints_by_handler.get(anc, []):
-            for kind, access in table_accesses:
-                target = _ensure_access_target(graph, schema, access)
+            for i, (kind, access) in enumerate(table_accesses):
+                target = target_of(i, access)
                 if not target:
                     continue
                 graph.add_edge(kind, ep, target, confidence=Confidence.INFERRED, evidence=ev, derived="call")
     for ep in entrypoints_by_handler.get(origin_fn, []):
-        for kind, access in table_accesses:
-            target = _ensure_access_target(graph, schema, access)
+        for i, (kind, access) in enumerate(table_accesses):
+            target = target_of(i, access)
             if not target:
                 continue
             graph.add_edge(
@@ -545,6 +583,7 @@ def _apply_go(
     sql_s = time.perf_counter() - t_sql
     t_prop = time.perf_counter()
     origin_unknown: dict[str, int] = defaultdict(int)
+    callers_cache: dict[str, set[str]] = {}
     for prop_n, (origin_fn, accesses, _ev) in enumerate(origin_accesses):
         progress.counter("graph: propagating Go data accesses", prop_n, len(origin_accesses))
         unknown_n = sum(
@@ -561,6 +600,7 @@ def _apply_go(
             entrypoints_by_handler,
             schema,
             job_functions,
+            callers_cache,
         )
     _copy_unresolved_to_entrypoints(graph, entrypoints_by_handler, reverse)
     _copy_dynamic_table_to_entrypoints(graph, origin_unknown, reverse, entrypoints_by_handler)
@@ -814,6 +854,7 @@ def _apply_python(
     sql_s = time.perf_counter() - t_sql
     t_prop = time.perf_counter()
     origin_unknown: dict[str, int] = defaultdict(int)
+    callers_cache: dict[str, set[str]] = {}
     for prop_n, (origin_fn, accesses) in enumerate(origin_accesses):
         progress.counter("graph: propagating Python data accesses", prop_n, len(origin_accesses))
         unknown_n = sum(
@@ -830,6 +871,7 @@ def _apply_python(
             entrypoints_by_handler,
             schema,
             job_functions,
+            callers_cache,
         )
     _propagate_collections(graph, analysis, reverse, entrypoints_by_handler)
     _apply_queues(graph, analysis, entrypoints_by_handler)
@@ -1425,6 +1467,14 @@ def _stash_http_call(
     node.attrs["http_calls"] = bucket
 
 
+_UI_SOURCE_EXTS = (".tsx", ".jsx", ".vue", ".svelte")
+
+
+def _is_ui_source(path: str | None) -> bool:
+    """A component file (`.tsx`, `.jsx`, `.vue`, `.svelte`)."""
+    return str(path or "").lower().endswith(_UI_SOURCE_EXTS)
+
+
 def _stash_route_literal(
     graph: Graph,
     fid: str,
@@ -1774,6 +1824,9 @@ def _apply_sql_functions(graph: Graph, schema: Schema) -> None:
                 evidence=fn.evidence,
             )
 
+
+# `bizmap scan --include-tests` sets this for the scan it runs
+INCLUDE_TESTS = [False]
 
 _TRIGGER_CHAIN_DEPTH = 4
 
@@ -2206,7 +2259,26 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
     unmatched: list[dict] = []
     other_repos = sorted({r for r in route_repos.values() if r})
     inferred_counts: dict[tuple[str, str], int] = defaultdict(int)
-    hint_votes: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    hint_votes: dict[str, dict[tuple[str, str], int]] = defaultdict(lambda: defaultdict(int))
+    prefixes_by_repo: dict[str, list[str]] = {}
+
+    def repo_prefixes(repo: str) -> list[str]:
+        """Leading one- and two-segment literal prefixes of a repo's routes
+        (`/api`, `/api/v1`), most common first."""
+        if repo not in prefixes_by_repo:
+            counts: dict[str, int] = defaultdict(int)
+            for eid, _m, rpath in routes:
+                if route_repos.get(eid) != repo:
+                    continue
+                parts = [x for x in rpath.split("/") if x]
+                for k in (1, 2):
+                    head = parts[:k]
+                    if len(head) == k and len(parts) > k and all(
+                        not x.startswith((":", "{", "<", "*")) for x in head
+                    ):
+                        counts["/" + "/".join(head)] += 1
+            prefixes_by_repo[repo] = [p for p, _n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))][:6]
+        return prefixes_by_repo[repo]
     hint_calls: dict[str, int] = defaultdict(int)
     for node, rows in results:
         caller_repo = str(node.attrs.get("repo") or graph.repo or "") or None
@@ -2237,7 +2309,13 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
                         continue
                     trial = {"__hint": {"env": key, "repo": repo}}
                     if match_http(method, url, routes, trial, caller_repo=caller_repo, route_repos=route_repos):
-                        hint_votes[key][repo] += 1
+                        hint_votes[key][(repo, "")] += 1
+                        continue
+                    for prefix in repo_prefixes(repo):
+                        trial = {"__hint": {"env": key, "repo": repo, "prefix": prefix}}
+                        if match_http(method, url, routes, trial, caller_repo=caller_repo, route_repos=route_repos):
+                            hint_votes[key][(repo, prefix)] += 1
+                            break
             note = {"url": url, "method": method, "keys": keys, "reason": reason}
             if service:
                 note["service"] = service
@@ -2257,15 +2335,24 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
         {"env": key, "repo": repo, "calls": n} for (key, repo), n in sorted(inferred_counts.items())
     ]
     hints = []
+    external = []
     for key, n in sorted(hint_calls.items()):
-        by_repo = hint_votes.get(key) or {}
-        repo = inferred.get(key)
-        if repo is None and by_repo:
-            ranked = sorted(by_repo.items(), key=lambda kv: (-kv[1], kv[0]))
-            repo = ranked[0][0] if len(ranked) == 1 or ranked[0][1] > ranked[1][1] else None
-        if repo:
-            hints.append({"env": key, "repo": repo, "calls": n, "matching": int(by_repo.get(repo, 0))})
+        votes_ = hint_votes.get(key) or {}
+        if not votes_:
+            # no scanned route matches any of its calls: an outside service
+            # (SUPABASE_URL, a SaaS API…), not a repo to map it to
+            external.append({"env": key, "calls": n})
+            continue
+        ranked = sorted(votes_.items(), key=lambda kv: (-kv[1], kv[0]))
+        if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+            continue  # ambiguous
+        (repo, prefix), matching = ranked[0]
+        hint = {"env": key, "repo": repo, "calls": n, "matching": matching}
+        if prefix:
+            hint["prefix"] = prefix
+        hints.append(hint)
     graph.attrs["service_hints"] = hints
+    graph.attrs["external_envs"] = external
 
 
 def _relink_queues_from_graph(graph: Graph, services: dict[str, str]) -> None:
@@ -2377,7 +2464,12 @@ def _scan_one(
     graph.version = GRAPH_VERSION
 
     t0 = time.perf_counter()
-    walk = WalkOptions(include=cfg.include, gitignore=cfg.gitignore, skip_generated=cfg.skip_generated)
+    walk = WalkOptions(
+        include=cfg.include,
+        gitignore=cfg.gitignore,
+        skip_generated=cfg.skip_generated,
+        include_tests=cfg.include_tests or INCLUDE_TESTS[0],
+    )
     sql_files = discover_sql_files(root, exclude=exclude_pats, options=walk)
     schema = replay_files(sql_files, root)
     go_files = iter_files(root, [".go"], exclude=exclude_pats, options=walk)
@@ -2463,6 +2555,23 @@ def _scan_one(
     t_prop = time.perf_counter()
     _apply_sql_functions(graph, schema)
     _apply_db_triggers(graph, schema)
+    sql_failures = drain_sql_failures()
+    if sql_failures:
+        existing = list(graph.attrs.get("warnings") or [])
+        first, error = sql_failures[0]
+        msg = (
+            f"SQL analysis failed for {len(sql_failures)} statement(s), skipped "
+            f"(first: {first!r}: {error})"
+        )
+        if msg not in existing:
+            existing.append(msg)
+        graph.attrs["warnings"] = existing
+    # TestClient / ASGITransport calls exercise the app in-process: they are
+    # tests, not calls between services (no calls_http, not unresolved)
+    in_process = [c for c in py_analysis.http_calls if getattr(c, "in_process", False)]
+    if in_process:
+        py_analysis.http_calls = [c for c in py_analysis.http_calls if not getattr(c, "in_process", False)]
+        graph.attrs["in_process_http"] = len(in_process)
     _link_http(graph, py_analysis, js_analysis, cfg.services, go=go_analysis)
     _link_queue_consumers(graph, py_analysis, cfg)
     # stash client calls on function nodes so merge can re-match cross-repo
@@ -2493,6 +2602,11 @@ def _scan_one(
         if hc.caller != hc.callee:
             callers_of[hc.callee].append(hc)
     for lit in js_analysis.route_literals:
+        if not lit.method and _is_ui_source(lit.file) and not getattr(lit, "helper", False):
+            # a path in a component with nothing saying it is a request (no
+            # client method, no fetch, no `url` + method) is navigation or a
+            # label: not a call to the API
+            continue
         base_item = {
             "path": lit.path,
             "method": lit.method,
@@ -2509,6 +2623,11 @@ def _scan_one(
             else None
         )
         sites = [hc for hc in all_sites or [] if getattr(hc, "direct", False)]
+        # a path helper used in a component without any request hint
+        # (`navigate(paths.widget(id))` through an unknown wrapper) is navigation
+        sites = [hc for hc in sites if (hc.method or lit.method) or not _is_ui_source(hc.file)]
+        if all_sites and not sites and any(getattr(hc, "direct", False) for hc in all_sites):
+            continue
         if all_sites and not sites:
             # Only used inside larger URLs (`${base(id)}/photos`): those
             # composed URLs are literals of their own; this fragment is not a

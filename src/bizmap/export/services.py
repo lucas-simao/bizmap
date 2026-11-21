@@ -63,9 +63,43 @@ def parse_service_split(raw: Any, source: str = "bizmap.yaml") -> list[tuple[str
     return rules
 
 
+EXPORT_KEYS = ("services", "domains", "domains_by", "openapi")
+
+
+def load_export_config(config: Path | None) -> dict[str, Any]:
+    """`export:` of bizmap.yaml -> {"services": split rules, "domains": rules, "domains_by": str}."""
+    from bizmap.export.domains import DomainConfigError, parse_domain_rules
+
+    out: dict[str, Any] = {"services": [], "domains": {}, "domains_by": "path", "openapi": {}}
+    export = _export_section(config)
+    if not export:
+        return out
+    out["services"] = parse_service_split(export.get("services"), str(config))
+    try:
+        out["domains"] = parse_domain_rules(export.get("domains"), str(config))
+    except DomainConfigError as exc:
+        raise ExportConfigError(str(exc)) from exc
+    by = export.get("domains_by", "path")
+    if by not in ("path", "folder"):
+        raise ExportConfigError(f"{config}: `export.domains_by` must be `path` or `folder`")
+    out["domains_by"] = by
+    spec = export.get("openapi") or {}
+    if isinstance(spec, str):
+        spec = {"": spec}
+    if not isinstance(spec, dict) or not all(isinstance(v, str) for v in spec.values()):
+        raise ExportConfigError(f"{config}: `export.openapi` must map a service to a spec file path")
+    out["openapi"] = {str(k): v for k, v in spec.items()}
+    return out
+
+
 def load_service_split(config: Path | None) -> list[tuple[str | None, str, str]]:
+    export = _export_section(config)
+    return parse_service_split(export.get("services"), str(config)) if export else []
+
+
+def _export_section(config: Path | None) -> dict[str, Any]:
     if config is None or not config.is_file():
-        return []
+        return {}
     import yaml  # bizmap dependency; imported lazily so the module stays light
 
     try:
@@ -73,16 +107,18 @@ def load_service_split(config: Path | None) -> list[tuple[str | None, str, str]]
     except yaml.YAMLError as exc:
         raise ExportConfigError(f"{config}: invalid YAML ({' '.join(str(exc).split())})") from exc
     if not isinstance(data, dict):
-        return []
+        return {}
     export = data.get("export")
     if export is None:
-        return []
+        return {}
     if not isinstance(export, dict):
-        raise ExportConfigError(f"{config}: `export:` must be a mapping (services)")
-    unknown = sorted(str(k) for k in export if k != "services")
+        raise ExportConfigError(f"{config}: `export:` must be a mapping ({', '.join(EXPORT_KEYS)})")
+    unknown = sorted(str(k) for k in export if k not in EXPORT_KEYS)
     if unknown:
-        raise ExportConfigError(f"{config}: unknown export key(s): {', '.join(unknown)} (known: services)")
-    return parse_service_split(export.get("services"), str(config))
+        raise ExportConfigError(
+            f"{config}: unknown export key(s): {', '.join(unknown)} (known: {', '.join(EXPORT_KEYS)})"
+        )
+    return export
 
 
 def _evidence_file(node: dict[str, Any]) -> str | None:

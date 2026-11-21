@@ -1,0 +1,424 @@
+{
+ "openapi": "3.0.3",
+ "info": {
+  "title": "Shop API",
+  "version": "1.0"
+ },
+ "servers": [
+  {
+   "url": "https://api.shop.example/api/v1"
+  }
+ ],
+ "paths": {
+  "/orders": {
+   "get": {
+    "summary": "List your orders",
+    "tags": [
+     "orders"
+    ],
+    "parameters": [
+     {
+      "name": "status",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "pending",
+        "paid",
+        "cancelled"
+       ]
+      },
+      "description": "Only orders in this status"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "array",
+         "items": {
+          "$ref": "#/components/schemas/Order"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "Place an order",
+    "description": "Creates the order, reserves stock and bills it.",
+    "tags": [
+     "orders"
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/CreateOrderRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "Created",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Order"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/orders/{id}": {
+   "get": {
+    "summary": "Get an order",
+    "tags": [
+     "orders"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Order"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/projects": {
+   "get": {
+    "summary": "List projects",
+    "tags": [
+     "projects"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "array",
+         "items": {
+          "$ref": "#/components/schemas/Project"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "Create a project",
+    "tags": [
+     "projects"
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "name"
+        ],
+        "properties": {
+         "name": {
+          "type": "string",
+          "example": "Kitchen remodel"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "Created",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Project"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/projects/{id}": {
+   "get": {
+    "summary": "Get a project with its tasks",
+    "tags": [
+     "projects"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Project ID"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Project"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/projects/{id}/archive": {
+   "post": {
+    "summary": "Archive a project",
+    "description": "Archives the project; its tasks stay readable.",
+    "tags": [
+     "projects"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Project ID"
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "reason": {
+          "type": "string",
+          "description": "Why it is archived"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Project"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "schemas": {
+   "Error": {
+    "type": "object",
+    "required": [
+     "message"
+    ],
+    "properties": {
+     "message": {
+      "type": "string"
+     }
+    }
+   },
+   "Money": {
+    "type": "object",
+    "properties": {
+     "amount_cents": {
+      "type": "integer"
+     },
+     "currency": {
+      "type": "string",
+      "example": "BRL"
+     }
+    }
+   },
+   "OrderItem": {
+    "type": "object",
+    "required": [
+     "sku",
+     "qty"
+    ],
+    "properties": {
+     "sku": {
+      "type": "string"
+     },
+     "qty": {
+      "type": "integer",
+      "description": "Units"
+     },
+     "price": {
+      "$ref": "#/components/schemas/Money"
+     }
+    }
+   },
+   "Order": {
+    "type": "object",
+    "required": [
+     "id",
+     "status"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "pending",
+       "paid",
+       "cancelled"
+      ]
+     },
+     "items": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/OrderItem"
+      }
+     },
+     "total": {
+      "$ref": "#/components/schemas/Money"
+     },
+     "created_at": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "CreateOrderRequest": {
+    "type": "object",
+    "required": [
+     "items"
+    ],
+    "properties": {
+     "items": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/OrderItem"
+      }
+     },
+     "coupon": {
+      "type": "string",
+      "description": "Optional coupon code"
+     }
+    }
+   },
+   "Task": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "title": {
+      "type": "string"
+     },
+     "done": {
+      "type": "boolean"
+     }
+    }
+   },
+   "Project": {
+    "type": "object",
+    "required": [
+     "id",
+     "name"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "archived_at": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "tasks": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/Task"
+      }
+     }
+    }
+   }
+  }
+ }
+}

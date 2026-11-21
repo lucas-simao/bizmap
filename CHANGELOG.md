@@ -1,5 +1,212 @@
 # Changelog
 
+## 0.8.0 — 2026-11-21
+
+### Added
+
+- Front-end pages list **the API routes they use** ("API routes web uses"),
+  by API and domain: method, path, summary, and the screens (or client files)
+  that call each one; likely links marked. The service page shows the count
+  per API. A route's screens are the ones that reach the function calling
+  that route, not every screen of its client file.
+- Screens page text has a singular ("1 screen calls the API…").
+- A comment that only restates the route ("List is GET /widgets.") is no
+  longer used as a summary.
+- **Front ends link to the API through their client modules.** The chain page
+  → hook → client method → route now reaches the graph for the shapes React /
+  Vite fronts use:
+  - methods of a module-level object (`export const widgetsHttpClient = {
+    list: (p) => api.get(...), async create() {} }`) are functions of their
+    own (`widgetsHttpClient.list`); their HTTP calls no longer sit on the
+    file's `.module` node;
+  - a member call on an imported object (`client.list(p)`, with
+    `import { widgetsHttpClient as client }`, through barrels) or on an
+    instance a factory made (`deliveryHttpClient.getSite(id)` →
+    `createDeliveryHttpClient.getSite`) links to the method;
+  - a function passed by reference (`queryFn: listWidgets`,
+    `mutationFn: client.create`, `useEffect(load)`, `onClick={X.m}`) counts
+    as a call by whoever passes it (`inferred`).
+- A client made by a factory keeps its argument's env:
+  `createClientApi(import.meta.env.X ?? '')`, a base built in a local and
+  passed as `axios.create({ baseURL })`, and an instance passed inline to
+  another factory. Those calls are no longer `base_unknown`. A factory made
+  twice with two clients (the app's and a portal's) calls through both bases;
+  consts follow `as string | undefined` and `?? ''` to the env.
+- Fictional repro `tests/test_web_api_links.py` (two Go/echo APIs and a
+  React/Vite front).
+
+### Fixed
+
+- Relative imports from a dotted file name (`widgets.queries.ts`,
+  `*.service.ts`) resolved from the wrong folder, so its imports linked to
+  nothing.
+- A path in a component (`.tsx`, `.jsx`, `.vue`, `.svelte`) with no request
+  hint (no client method, no `fetch`, no `url` + method) no longer becomes a
+  heuristic `calls_http`: it is navigation or a label.
+
+## 0.7.0 — 2026-11-20
+
+### Added
+
+- **`bizmap export --format html` reads like API docs.** A domain lists its
+  endpoints (method, path, summary); opening one shows the description,
+  parameters, the **JSON request body** and each **response with its JSON**
+  (nested objects open on click), the screens that use it by name, its data in
+  one sentence ("Writes orders. Reads products."), and **See in code** for the
+  call tree. Domains follow the API's tags.
+- Docs come from an **OpenAPI / Swagger file** (swag's `docs/swagger.json`,
+  FastAPI's `openapi.json`; Swagger 2.0 / OpenAPI 3, JSON or YAML), found next
+  to each repo or given with `--openapi [SERVICE=]FILE` / `export.openapi` in
+  `bizmap.yaml`; else from **swag comments** in the graph (`@Summary`, `@Tags`,
+  `@Param`, `@Success`, `@Failure`); else from the handler's comment.
+- Service pages are shorter: domains with endpoint counts and data; screens,
+  HTTP calls, tables and code fold under one "more" section.
+- Fictional example `examples/export/api/openapi.json`.
+- Request and response JSON shown like Swagger UI: an **Example** tab (a real,
+  colored JSON with sample values: enum's first value, `example`, dates,
+  numbers) and a **Fields** tab (field, type, required, description, nested
+  fields indented).
+- Specs found next to the code: also every spec in a repo's `openapi/`,
+  `docs/`, `api/`, `spec/`, `specs/` folder (one per area), in the folder the
+  graph's `repo_roots` names; a bad one found that way is skipped with a note,
+  and the export lists the specs it used. `--openapi` for a service the graph
+  does not have is an error.
+- A spec without `description` takes the handler's comment/docstring; query
+  parameters show their enum and default; routes without docs join the tag
+  named like a segment of their path after any prefix; the side panel no
+  longer repeats the raw swag comment.
+- Graph format version `0.7.0` (no field changed; it follows the release).
+  GitHub Action examples pin `@v0.7.0`.
+
+### Fixed
+
+- Front-end ↔ API noise: `mocks/` (MSW), `test-utils/`, `testing/`,
+  `stories/`, `cypress/`, `playwright/` folders and `*.cy.*` / `*.mock.*`
+  files are left out like tests; a service calling its own routes from code
+  none of its routes reaches (a generated SDK kept in the API repo) is too.
+- A screen that reaches a route only through a likely (heuristic) link is
+  marked likely in "Consumed by".
+- Service links (system page, side panel, map) leave out tests, mocks and
+  generated code, so every count matches; "1 screen" / "1 file"; a front-end
+  without UI files no longer reads "0 of 1 client files linked"; "Called by 1
+  function", "1 HTTP call … is not counted".
+
+### Changed
+
+- `bizmap export --format html`, front-end ↔ API links:
+  - **Screens are UI files** (pages, components) that reach an API call
+    through the call graph (page → hook → API client → route), not the client
+    files themselves; each lists the routes it uses and the client functions it
+    goes through. The client layer has its own section (**API client code**),
+    for every service, with the screens that use each file.
+  - **Tests, mocks, fixtures, `.d.ts` and generated code** are left out of
+    screens, client code, a route's consumers and the counts (the page says
+    how many calls it left out).
+  - A route's **consumers** list the screens first, then the calling functions.
+  - **Likely** links (heuristic `calls_http`, matched from a path literal by
+    its end) are dashed.
+  - **Calls with no route** for every service (APIs and workers too), with what
+    each reason means.
+  - Module-level code reads as `pkg.file (module)`.
+  - Table of contents grouped by kind (APIs, front-ends, workers, libraries),
+    each service once; the routes table no longer overflows (fixed columns,
+    long handler names cut with `…`).
+
+## 0.6.0 — 2026-11-20
+
+### Changed
+
+- **`bizmap export --format html` reads the system like a book.** Overview
+  first, detail on click, never the whole graph: system (one card per service:
+  API, front-end, worker, library) → service (**domains**: routes grouped by
+  the first useful path segment, large groups split into sections, small ones
+  in `other`) → domain (routes by path, handler, tables read/written, callers)
+  → route (**call tree**, opened node by node, with the tables and columns each
+  function reads or writes) → table (columns, who reads/writes it, routes that
+  reach it). Detail panel: `file:line`, `why`, path parameters (and `params` /
+  `returns` when the graph has them), calls, callers, data access, HTTP calls
+  and who consumes a route.
+- **Front-ends**: screens (files that call the API, grouped by folder) with the
+  routes each uses, and the **calls with no route** from `unresolved_http`, by
+  reason. Each API route lists the screens and services that call it.
+- `bizmap.yaml`: `export.domains` (`{service: {domain: [path prefixes |
+  "folder:…"]}}`) and `export.domains_by: path | folder`.
+- Faster on large graphs: one small index read at open, one JSON block per
+  domain / front-end / table batch / folder read on first use, no derived
+  edges shipped. Synthetic 107k nodes / 628k edges: 31 MB, ready in ~0.4 s,
+  every level under 100 ms in headless Chrome.
+- Every service has a page with something to read: besides domains and
+  screens, the tables it reads and writes itself (the count matches the list)
+  and its **code by folder** (functions, HTTP calls, tables), so libraries and
+  clients without routes are browsable. A JS/TS service that calls APIs and
+  has no routes is a front-end (a Vite app with only `.ts` files); screens
+  without a UI folder are grouped by their own folder (`src/api`).
+- Domains skip a first path segment shared by at least 70% of the routes.
+- The service graph stays under **Map**; the graph expand/filter view is gone
+  (a table's page lists who reads and writes it).
+- Fictional example: `examples/export/shop.graph.json`
+  (`scripts/export_demo_graph.py`).
+- `--format llm` now says it is not available yet (it did not ship in 0.5.1).
+- Graph format version `0.6.0` (no field changed; it follows the release).
+  GitHub Action examples pin `@v0.6.0`.
+
+## 0.5.2 — 2026-11-20
+
+### Fixed
+
+- **Python tests are skipped by default**, like Go's `*_test.go`: `tests/` and
+  `test/` directories, `test_*.py`, `*_test.py`, `conftest.py` (counted as
+  "Python test dirs/files" under `skipped:`). `--include-tests` or
+  `scan: include_tests: true` scans them (and Go tests) again.
+- **A test helper no longer changes production results**: an HTTP wrapper is
+  only used where the call can reach it (defined in the same module,
+  imported from its module, `self.x()` in its class, `mod.x()` through the
+  module; a private wrapper name such as `client._post` still matches a
+  method of that name). A `post(app, path, body)` helper in `tests/` used to
+  capture every `.post(...)` of the repo, `httpx.post` included, turning
+  `POST {HOOKS_URL}/hooks/orders/{order_id}` into `POST {base}/{path}`.
+  Wrappers whose first parameter is the app or client (`_post(client, id)`)
+  take the path from the next one, and a path passed by keyword is used.
+- **In-process test calls are not calls between services**: calls through
+  `TestClient(...)`, `httpx.AsyncClient(transport=ASGITransport(app=…))` /
+  `WSGITransport` / `Client(app=…)`, functions returning one, and parameters
+  receiving one, produce no `calls_http` and are not unresolved; the scan
+  prints `in-process test calls: N` (`in_process_http` in the graph).
+- **Clean URL labels**: a dynamic part of a Python URL keeps its name
+  (`{oid}`, `{settings.API_URL}`) and anything else becomes `{dynamic}` — no
+  more `{X.format(oid)}`, `{Report(\n rows=…}` or `{1 << 20}`.
+  `CONST.format(oid)` with a URL template is resolved
+  (`"/orders/{}/confirm"` → `/orders/{oid}/confirm`).
+- **Unresolved HTTP by origin**: the scan summary splits unresolved calls
+  into app / scripts / eval / tests.
+
+## 0.5.1 — 2026-11-20
+
+### Fixed
+
+- **Python phase is linear on large repos** (it was quadratic: a large
+  FastAPI monorepo ran for 20+ minutes). The HTTP and SQL-dict helper
+  collectors ran once per file over every function of the repo: they run once
+  per scan. Looking up a class's methods for each `obj.field()` call, the
+  candidates of each `from X import Y`, and the routers/blueprints an import
+  refers to no longer scan every function or module (name indexes and a
+  module-suffix index). During propagation the schema's table names are
+  computed once per schema, the callers of an origin function once per
+  origin, and each access's target once per access. Synthetic monorepo
+  (`scripts/bench_py.py`, 300 tables, 12 imports per module): 120 modules
+  40.1 s → 8.8 s on the same CI runner, 150 → 300 modules 2.06×; the graph is
+  byte-identical (checked against 0.5.0 at 30, 40 and 120 modules, and a
+  golden summary in the test suite).
+- **One bad SQL string no longer stops the scan**: a statement sqlglot
+  cannot take apart (e.g. `"UPDATE orders ..."` in a test, which crashed in
+  `_table_name`) yields no accesses; the scan summary reports how many were
+  skipped and the first one.
+- **`services:` hints**: only suggested when the env key's calls match routes
+  in that repo; with no match they are listed as `probably external` (e.g.
+  `SUPABASE_URL`). When the calls only match with a route prefix, the hint
+  includes it (`api: { env: VITE_API_URL, prefix: /api/v1 }`).
+- `pytest -m perf` has a Python scaling check (150 vs 300 modules).
+
 ## 0.5.0 — 2026-11-20
 
 ### Added
