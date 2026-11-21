@@ -204,7 +204,7 @@ to the write:
 
 | How | `confidence` |
 | --- | --- |
-| In one function: the rows of `SELECT id, valor FROM pedidos` (Go `rows.Scan(&a, &o.Total)`, `QueryRow(...).Scan`; JS/TS `const { rows } = await a.query(...)`, `for (const p of rows)`, `(await a.query(...)).rows[0]`; Python `cur.execute(...)` then `fetchone()` / `fetchall()` / `for row in cur`, `row["valor"]`, `row.valor`, `row[1]`) reach the arguments of an `INSERT` / `UPDATE` / upsert, a Firestore `set` / `update` / `add`, or an ORM write the detectors saw on that line (`upsert({ update: { total: p.valor } })`). Struct / object literals, assignments and lists (`append`, `push`) are followed. `INSERT … SELECT` and `UPDATE … FROM` map in one statement, also in a SQL function body (`CREATE FUNCTION`). | `exact` |
+| In one function: the rows of `SELECT id, valor FROM pedidos` (Go `rows.Scan(&a, &o.Total)`, `QueryRow(...).Scan`; JS/TS `const { rows } = await a.query(...)`, `for (const p of rows)`, `(await a.query(...)).rows[0]`; Python `cur.execute(...)` then `fetchone()` / `fetchall()` / `for row in cur`, `row["valor"]`, `row.valor`, `row[1]`) reach the arguments of an `INSERT` / `UPDATE` / upsert, a Firestore `set` / `update` / `add`, or an ORM write the detectors saw on that line (`upsert({ update: { total: p.valor } })`). Struct / object literals, assignments and lists (`append`, `push`) are followed. `INSERT … SELECT` and `UPDATE … FROM` map in one statement (unqualified columns with a single table in `FROM` belong to it), also in a SQL function body (`CREATE FUNCTION`), even when the detectors recorded only the write. | `exact` |
 | Through calls in the same service: a reader passes the value to a writer (`s.writeSummary(ctx, o)`), or a writer uses what a reader returns (`orders, _ := repo.ListPaid(ctx)`), up to 2 calls deep; Celery / RQ `task.delay(...)` to the task. | `heuristic` |
 | Through a queue: the producer publishes a message built from the source (`queue.publish('pedido-pago', { orderId: o.id })`), the consumer of the same topic (`subscribe` / `consume` / `process` / BullMQ `Worker`) writes the message's fields. Also across repos in a joint scan or `registry merge`. `emit` / `on` events only link inside one repo. | `heuristic` |
 
@@ -219,7 +219,10 @@ to the write:
   queue hop. `match: "name"` (heuristic) is used only when a row was copied
   whole and no column path was seen: columns with the same name on both
   sides (not `id` / `created_at` / `updated_at`).
-- Never invented: a column only in `WHERE` is not mapped; a function that
+- Never invented: a column that is not in the source (or destination)
+  table's schema is never mapped — a plpgsql parameter or `DECLARE`
+  variable in `INSERT … SELECT found, store, s.name FROM stores s` is not
+  `stores.found`; a column only in `WHERE` is not mapped; a function that
   reads A and writes B with no value in common (a permission check, a
   lookup) creates nothing; a copy into the same table, a flow made only of
   identifiers into identifier columns (`users.id -> orders.user_id`), or only
@@ -242,11 +245,16 @@ table is in the repo's database, as before):
   `new Pool({ connectionString: process.env.SUMMARY_DATABASE_URL })`,
   `create_engine(settings.ORDERS_DATABASE_URL)`, `psycopg2.connect(os.environ["X"])`
   — is named after the variable (`ORDERS_DATABASE_URL` → `orders_db`; a bare
-  `DATABASE_URL` names nothing), or by `databases:` in `bizmap.yaml`;
+  `DATABASE_URL` names nothing), or by `databases:` in `bizmap.yaml`. Only a
+  variable that looks like a DSN (`…_URL`, `…_URI`, `…_DSN`, `…_CONNECTION`)
+  names a database: `DB_SCHEMA`, `DB_HOST`, `DB_USER`, `DB_PASSWORD` do not.
+  `DB_NAME` (or `PGDATABASE`, `POSTGRES_DB`) given to the connector with a
+  literal default (`os.getenv("DB_NAME", "orders")`) uses that default;
 - each SQL edge's call (`src.QueryContext`, `b.query`, `cur.execute`, through
   `cursor()` / `BeginTx` / `connect()` / `with … as` aliases) picks the
   connection;
-- a repo with exactly one named connection puts all its tables on it;
+- a repo with exactly one named connection puts on it the tables its code
+  reads or writes (a table only in the schema gets no `db`);
 - a table reached through two connections gets `db_candidates` instead;
 - Firestore clients (`firestore.NewClient`, `getFirestore()`,
   `firestore.client()`) put collections on `firestore:<project>` (a literal

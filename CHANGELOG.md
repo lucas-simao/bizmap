@@ -14,12 +14,14 @@
   access, `INSERT … SELECT`, `UPDATE … FROM`, upserts, Firestore
   `set` / `update` / `add`, ORM writes), through calls in the same service,
   and through a queue (producer → topic → consumer, also across repos in a
-  joint scan or `registry merge`). Expressions in between give
+  joint scan or `registry merge`). Columns that are not in the table's
+  schema (plpgsql variables, parameters) are never mapped. Expressions in between give
   `transform: true`; a lookup or a permission check gives nothing; ids
   copied only into id / foreign-key columns are references, not `feeds`.
 - **`db` on tables**: the database the code reaches a table through, from
   the connection's DSN env var or config field (`ORDERS_DATABASE_URL` →
-  `orders_db`) or `databases:` in `bizmap.yaml`; Firestore collections get
+  `orders_db`; `DB_SCHEMA` / `DB_HOST` name nothing) or `databases:` in
+  `bizmap.yaml`, only on tables the code reads or writes; Firestore collections get
   `firestore:<project|default>`. Table ids do not change; in a merged graph
   the same table with the same `db` in two repos gets `same_as`.
 - `bizmap why` shows where a column **comes from** and **goes to** through

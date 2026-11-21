@@ -44,6 +44,7 @@ from bizmap.srctext import LIT_RE, Masked, language_of, mask, match_close, split
 
 MAX_VIA = 5
 MAX_DEPTH = 2
+MAX_SUBCALLS = 24  # callee analyses per function read
 MAX_BODY_CHARS = 400_000
 GENERIC_COLUMNS = {"id", "created_at", "updated_at", "deleted_at", "createdat", "updatedat"}
 
@@ -630,6 +631,8 @@ class RepoContext:
         self.direct_w: dict[str, set[str]] = defaultdict(set)
         self.direct_r: dict[str, set[str]] = defaultdict(set)
         self.reads_any: set[str] = set()
+        self.writes_any: set[str] = set()
+        self.budget = 0  # sub-analyses (calls followed) left for the current function
         self.calls: dict[str, set[str]] = defaultdict(set)
         self.write_lines: dict[tuple[str, str], set[int]] = defaultdict(set)  # (file, table) -> lines
         self.queue_targets: dict[str, list[tuple[str, str]]] = defaultdict(list)  # fid -> [(queue, fn)]
@@ -668,8 +671,7 @@ class RepoContext:
                 if t is None:
                     continue
                 self.touch[e.from_id].add(t)
-                if e.type == "reads":
-                    self.reads_any.add(e.from_id)
+                (self.reads_any if e.type == "reads" else self.writes_any).add(e.from_id)
                 if not e.attrs.get("derived") and not e.attrs.get("via"):
                     (self.direct_w if e.type == "writes" else self.direct_r)[e.from_id].add(t)
                     if e.type == "writes" and e.evidence is not None:
@@ -682,6 +684,13 @@ class RepoContext:
             if e.type == "enqueues":
                 for consumer in triggers.get(e.to_id, ()):
                     self.queue_targets[e.from_id].append((e.to_id, consumer))
+
+    def spend(self) -> bool:
+        """One more callee analysis for the function being read (bounded)."""
+        if self.budget <= 0:
+            return False
+        self.budget -= 1
+        return True
 
     def text(self, rel: str) -> str | None:
         if rel not in self.texts:
@@ -1795,13 +1804,15 @@ class Analyzer:
         arg_vals = [self.eval(a, depth + 1) for a in args]
         tainted = any(sources(v) for v in arg_vals)
         result: Any = None
-        if tainted and self.ctx.direct_w.get(cid) is not None or tainted and cid in self.ctx.calls:
+        if tainted and cid in self.ctx.writes_any and self.ctx.spend():
             sub = _analyze(self.ctx, info, depth=self.depth + 1, hop=(*self.hop, *hop_ids), args=arg_vals, method_call=True)
             if sub is not None:
                 self.writes.extend(sub.writes)
                 self.publishes.extend(sub.publishes)
-        if self.ctx.touch.get(cid):
+        if cid in self.ctx.reads_any:
             summary = self.ctx.summaries.get(cid, _NO_CALL)
+            if summary is _NO_CALL and not self.ctx.spend():
+                summary = None
             if summary is _NO_CALL:
                 self.ctx.summaries[cid] = None  # recursion guard
                 sub = _analyze(self.ctx, info, depth=self.depth + 1, hop=(), args=None)
@@ -1925,7 +1936,7 @@ def _analyze_sql(ctx: RepoContext, info: FnInfo) -> _SqlFnResult | None:
             srcs: set[Src] = set()
             for q, c in spec.refs:
                 t = _resolve_sql_ref(ctx, sel, q, c)
-                if t is not None and t in touched and t != target:
+                if t is not None and t != target:
                     srcs.add(Src(table=t, col=c, transform=spec.transform))
             if srcs:
                 res.writes.append(
@@ -2122,11 +2133,17 @@ def _build_feeds(ctx: RepoContext, writes: list[WriteEvent], skip_queue: bool = 
     graph = ctx.graph
     pairs: dict[tuple[str, str], dict[str, Any]] = {}
     for w in writes:
+        dst_cols = ctx.columns(w.target)
+        if w.col is not None and dst_cols is not None and w.col not in dst_cols:
+            continue  # not a column of the destination
         for s in w.srcs:
             if s.table is None or s.table == w.target:
                 continue
             if s.col is None and s.transform:
                 continue  # a whole row through some function: no value seen
+            src_cols = ctx.columns(s.table)
+            if s.col is not None and src_cols is not None and s.col not in src_cols:
+                continue  # a variable / parameter (plpgsql), an alias…: not a source column
             path = [*reversed(s.hops), w.fn]  # hops are newest-first
             # drop repeats (a hop can be the writer itself)
             dedup: list[str] = []
@@ -2333,35 +2350,77 @@ def link_queue_flows(graph: Graph) -> None:
 
 # ------------------------------------------------------------ entry ----
 
-_QUEUE_HINT = re.compile(r"\.(?:publish|subscribe|send|emit|enqueue|consume|process|produce)\w*\(|\bWorker\(|\.on\(")
-_FS_HINT = re.compile(r"\.(?:collection|Collection)\(")
+_PRODUCE_HINT = re.compile(r"\.(?:publish|publishJSON|send|sendMessage|emit|enqueue|produce|add)\(\s*['\"`]")
+_CONSUME_HINT = re.compile(r"\.(?:subscribe|on|once|consume|process|handle|listen|addListener)\(\s*['\"`]|\bWorker\(\s*['\"`]")
+_FS_HINT = re.compile(r"\.(?:collection|Collection)\(\s*['\"`]")
+# one statement that copies: INSERT … SELECT / UPDATE … SET … FROM (no reads edge needed)
+_COPY_HINT = re.compile(
+    r"\binsert\s+into\s+[\w.\"]+\s*(?:\([^)]*\))?\s*(?:with\b.{0,2000}?)?\(?\s*select\b"
+    r"|\bupdate\s+[\w.\"]+\s+(?:as\s+\w+\s+)?set\b[^;]{0,600}?\bfrom\b",
+    re.I | re.S,
+)
+
+
+@dataclass
+class _FileHints:
+    produce: list[int]
+    consume: list[int]
+    fs: list[int]
+    copy: list[int]
+
+
+def _hint_lines(text: str, rx: re.Pattern[str]) -> list[int]:
+    return [text.count("\n", 0, m.start()) + 1 for m in rx.finditer(text)]
+
+
+def _file_hints(text: str, firestore: bool) -> _FileHints:
+    return _FileHints(
+        produce=_hint_lines(text, _PRODUCE_HINT),
+        consume=_hint_lines(text, _CONSUME_HINT),
+        fs=_hint_lines(text, _FS_HINT) if firestore else [],
+        copy=_hint_lines(text, _COPY_HINT) if re.search(r"(?i)\binsert\b|\bupdate\b", text) else [],
+    )
+
+
+def _in_span(lines: list[int], info: FnInfo) -> bool:
+    return any(info.start <= ln <= info.end for ln in lines)
+
+
+def _candidates(ctx: RepoContext, firestore: bool) -> list[FnInfo]:
+    """Functions worth reading: a writer that also reads (or calls a reader), a
+    reader that calls a writer, a single-statement copy, a producer / consumer,
+    a Firestore write fed by a read."""
+    out: list[FnInfo] = []
+    writer_ids = {f for f, ts in ctx.direct_w.items() if ts}
+    hints: dict[str, _FileHints] = {}
+    for info in ctx.fns.values():
+        fid = info.fid
+        reads = fid in ctx.reads_any or any(c in ctx.reads_any for c in ctx.calls.get(fid, ()))
+        writes = bool(ctx.direct_w.get(fid))
+        calls_writer = bool(ctx.calls.get(fid, set()) & writer_ids) or bool(ctx.queue_targets.get(fid))
+        ok = (writes and reads) or (reads and calls_writer)
+        if not ok:
+            h = hints.get(info.file)
+            if h is None:
+                h = hints[info.file] = _file_hints(ctx.text(info.file) or "", firestore)
+            ok = (
+                (writes and _in_span(h.copy, info))
+                or (reads and (_in_span(h.produce, info) or _in_span(h.fs, info)))
+                or _in_span(h.consume, info)
+            )
+        if ok:
+            out.append(info)
+    return out
 
 
 def apply(graph: Graph, root: Path, texts: dict[str, str] | None = None, *, firestore: bool = False) -> None:
     """Add ``feeds`` edges (with ``column_map``) to a freshly scanned graph."""
     ctx = RepoContext(graph, root, texts, firestore=firestore)
-    candidates: list[FnInfo] = []
-    writer_ids = {f for f, ts in ctx.direct_w.items() if ts}
-    hint_files: dict[str, bool] = {}
-    for info in ctx.fns.values():
-        fid = info.fid
-        reads_any = fid in ctx.reads_any
-        writes = bool(ctx.direct_w.get(fid))
-        calls_writer = bool(ctx.calls.get(fid, set()) & writer_ids) or bool(ctx.queue_targets.get(fid))
-        calls_reader = any(c in ctx.reads_any for c in ctx.calls.get(fid, ()))
-        ok = (writes and (reads_any or calls_reader)) or ((reads_any or calls_reader) and calls_writer)
-        if not ok:
-            hint = hint_files.get(info.file)
-            if hint is None:
-                text = ctx.text(info.file) or ""
-                hint = bool(_QUEUE_HINT.search(text) or (firestore and _FS_HINT.search(text)))
-                hint_files[info.file] = hint
-            ok = hint and (reads_any or writes or calls_reader or info.name.endswith(".module"))
-        if ok:
-            candidates.append(info)
+    candidates = _candidates(ctx, bool(firestore))
     writes: list[WriteEvent] = []
     publishes: list[PublishEvent] = []
     for info in sorted(candidates, key=lambda f: f.fid):
+        ctx.budget = MAX_SUBCALLS
         try:
             an = _analyze(ctx, info)
         except Exception:  # noqa: BLE001 - one odd function never costs the others their feeds

@@ -218,8 +218,9 @@ def _go_graph(tmp_path: Path) -> Graph:
             ("reads", s, "column:pedidos.status", f, "src.QueryContext"),
             ("writes", s, "column:resumo_pedido.total", f, "dst.ExecContext"),
             ("writes", s, "column:resumo_pedido.pedido_id", f, "dst.ExecContext"),
-            ("reads", r, "column:pedidos.criado_em", f, "INSERT INTO resumo_mensal"),
+            # as the SQL detector emits it today: the INSERT … SELECT's writes, no reads of pedidos
             ("writes", r, "column:resumo_mensal.mes", f, "INSERT INTO resumo_mensal"),
+            ("writes", r, "column:resumo_mensal.receita", f, "INSERT INTO resumo_mensal"),
         ],
         {"pedidos": PEDIDOS, "resumo_pedido": RESUMO, "resumo_mensal": MENSAL},
     )
@@ -828,3 +829,93 @@ def test_sql_function_insert_select(tmp_path: Path) -> None:
             {("criado_em", "mes", "heuristic", True), ("valor_centavos", "receita", "heuristic", True)},
         ),
     }
+
+
+def test_insert_select_without_qualifier_and_without_reads_edge(tmp_path: Path) -> None:
+    src = GO_SYNC.replace(
+        "SELECT date_trunc('month', criado_em), sum(valor_centavos) FROM pedidos GROUP BY 1",
+        "SELECT criado_em, valor_centavos FROM pedidos",
+    )
+    f = "sync/orders.go"
+    r = "function:sync.RollupMonthly"
+    g = _graph(
+        tmp_path / "plain",
+        {f: src},
+        [(r, f, "func RollupMonthly")],
+        [("writes", r, "column:resumo_mensal.mes", f, "INSERT INTO resumo_mensal")],
+        {"pedidos": PEDIDOS, "resumo_mensal": MENSAL},
+    )
+    assert _feeds(g) == {
+        ("table:pedidos", "table:resumo_mensal"): (
+            "exact",
+            {("criado_em", "mes", "exact", False), ("valor_centavos", "receita", "exact", False)},
+        ),
+    }
+
+
+PLPGSQL = """CREATE TABLE stores (id uuid, name text);
+CREATE TABLE branches (id uuid, store_id uuid, name text);
+
+CREATE FUNCTION only_branch(store UUID) RETURNS UUID LANGUAGE plpgsql AS $$
+DECLARE found UUID;
+BEGIN
+  found := gen_random_uuid();
+  INSERT INTO branches (id, store_id, name) SELECT found, store, s.name FROM stores s WHERE s.id = store;
+  RETURN found;
+END $$;
+"""
+
+
+def test_plpgsql_variables_are_not_source_columns(tmp_path: Path) -> None:
+    f = "db/fn.sql"
+    fid = "function:sql.only_branch"
+    root = tmp_path / "plpgsql"
+    g = _graph(root, {f: PLPGSQL}, [], [], {"stores": ["id", "name"], "branches": ["id", "store_id", "name"]})
+    start = _line(PLPGSQL, "CREATE FUNCTION")
+    g.add_node(fid, "function", name="only_branch", language="plpgsql",
+               evidence={"file": f, "line": start, "symbol": "only_branch"}, end_line=_line(PLPGSQL, "END $$"))
+    g.add_edge("writes", fid, "table:branches", evidence=Evidence(f, start, "only_branch"))
+    g.add_edge("reads", fid, "table:stores", evidence=Evidence(f, start, "only_branch"))
+    dataflow.apply(g, root)
+    assert _feeds(g) == {("table:stores", "table:branches"): ("exact", {("name", "name", "exact", False)})}
+
+
+def test_column_not_in_the_source_schema_is_never_mapped(tmp_path: Path) -> None:
+    src = TS_SYNC.replace("SELECT id, valor_centavos, cliente_id, criado_em FROM pedidos", "SELECT id, total_bruto, cliente_id, criado_em FROM pedidos")
+    f = "src/sync.ts"
+    s = "function:src/sync.syncOrders"
+    g = _graph(
+        tmp_path / "noschema",
+        {f: src},
+        [(s, f, "export async function syncOrders")],
+        [
+            ("reads", s, "column:pedidos.id", f, "a.query('SELECT id, total_bruto"),
+            ("writes", s, "column:resumo_pedido.total", f, "'INSERT INTO resumo_pedido"),
+        ],
+        {"pedidos": PEDIDOS, "resumo_pedido": RESUMO},
+    )
+    cols = _feeds(g)[("table:pedidos", "table:resumo_pedido")][1]
+    assert not any(c[0] in ("total_bruto", "valor_centavos") for c in cols)
+
+
+def test_queue_path_keeps_its_order_in_json(tmp_path: Path) -> None:
+    gp, gc = _queue_graphs(tmp_path)
+    merged = merge_graphs([gp, gc])
+    dataflow.link_queue_flows(merged)
+    data = merged.to_dict()
+    feed = next(e for e in data["edges"] if e["type"] == "feeds")
+    want = ["pedidos/function:src/orders.onOrderPaid", "queue:topic:pedido-pago", "resumo/function:src/consumer.module"]
+    assert feed["via"][0]["path"] == want
+    assert all(c["path"] == want for c in feed["column_map"])
+    loaded = Graph.from_dict(json.loads(json.dumps(data)))
+    text = "\n".join(dataflow.why_lines(loaded, "resumo/column:resumo_pedido.total"))
+    assert "via pedidos/src/orders.onOrderPaid → queue pedido-pago → resumo/src/consumer.module" in text
+
+
+def test_untouched_table_gets_no_db(tmp_path: Path) -> None:
+    gp, gc = _queue_graphs(tmp_path)
+    gc.add_node("table:pedidos", "table", name="pedidos")  # only in the copied schema.sql
+    texts = source_texts(tmp_path / "resumo", [tmp_path / "resumo" / "src/consumer.ts"])
+    dbident.assign_dbs(gc, texts, dbident.build_index(texts, {}))
+    assert "db" not in gc.nodes["table:pedidos"].attrs
+    assert gc.nodes["table:resumo_pedido"].attrs["db"] == "summary_db"
