@@ -668,6 +668,7 @@ class RepoContext:
         self.write_lines: dict[tuple[str, str], set[int]] = defaultdict(set)  # (file, table) -> lines
         self.queue_targets: dict[str, list[tuple[str, str]]] = defaultdict(list)  # fid -> [(queue, fn)]
         self.summaries: dict[str, Any] = {}
+        self.doc_id_params: dict[str, dict[int, str]] = {}  # fid -> {param position: collection}
         self._index()
 
     def _index(self) -> None:
@@ -1118,6 +1119,7 @@ class Analyzer:
         self.strings = ctx.file_strings.get(fn.file) or {}
         self._chain_topic: str | None = None
         self.var_types: dict[str, str] = {}  # Go: variable -> struct type
+        self.param_names: list[str] = []
         self.callees = self._callee_index()
 
     # --- env
@@ -2031,7 +2033,8 @@ class Analyzer:
         arg_vals = [self.eval(a, depth + 1) for a in args]
         tainted = any(sources(v) or isinstance(v, (Msg, Fs)) for v in arg_vals)
         result: Any = None
-        if tainted and cid in self.ctx.writes_any and self.ctx.spend():
+        if tainted and (cid in self.ctx.writes_any or cid in self.ctx.go_topics) and self.ctx.spend():
+            # a writer, or a Go function that publishes what it is given (`Send(ctx, pub, payload)`)
             sub = _analyze(self.ctx, info, depth=self.depth + 1, hop=(*self.hop, *hop_ids), args=arg_vals, method_call=True)
             if sub is not None:
                 self.writes.extend(sub.writes)
@@ -2039,7 +2042,7 @@ class Analyzer:
         if tainted and cid not in self.ctx.reads_any and cid not in self.ctx.writes_any and self.ctx.spend():
             # a pure helper (`build(id, d)`): what it returns from the values passed in
             sub = _analyze(self.ctx, info, depth=self.depth + 1, hop=(*self.hop, *hop_ids), args=arg_vals, method_call=True)
-            ret = next((r for r in (sub.returns if sub else []) if r is not None), None)
+            ret = _best_return(sub.returns if sub else [])
             if ret is not None:
                 return ret
         if cid in self.ctx.reads_any:
@@ -2049,14 +2052,43 @@ class Analyzer:
             if summary is _NO_CALL:
                 self.ctx.summaries[cid] = None  # recursion guard
                 sub = _analyze(self.ctx, info, depth=self.depth + 1, hop=(), args=None)
-                summary = next((r for r in (sub.returns if sub else []) if r is not None), None)
+                summary = _best_return(sub.returns if sub else [])
                 self.ctx.summaries[cid] = summary
+                if sub is not None:
+                    self.ctx.doc_id_params[cid] = sub.doc_id_params()
             if summary is not None:
                 result = _hop_value(summary, cid)
+            # `GetOrder(ctx, id)` reads `orders/{id}`: the caller's `id` is the document id
+            for k, coll in (self.ctx.doc_id_params.get(cid) or {}).items():
+                if k < len(args):
+                    a = args[k].strip()
+                    if re.fullmatch(r"[A-Za-z_$][\w$]*", a) and not sources(self.lookup(a)):
+                        self.assign(a, Scalar(frozenset({Src(table=coll, col=DOC_ID, hops=(cid,))})))
         return result
+
+    def doc_id_params(self) -> dict[int, str]:
+        """Parameters (by position) this function used as a Firestore document id."""
+        out: dict[int, str] = {}
+        for k, p in enumerate(self.param_names):
+            v = self.env.get(p)
+            if isinstance(v, Scalar) and len(v.srcs) == 1:
+                src = next(iter(v.srcs))
+                if src.col == DOC_ID and src.table:
+                    out[k] = src.table
+        return out
 
 
 _NO_CALL = object()
+
+
+def _best_return(returns: list[Any]) -> Any:
+    """What a function returns: a value carrying sources first (`return OrderDoc{}, err`
+    on the error path is not what callers use)."""
+    vals = [r for r in returns if r is not None]
+    for r in vals:
+        if sources(r) or isinstance(r, (Msg, Fs)):
+            return r
+    return vals[0] if vals else None
 
 
 def _hops_of_sel(sel: ResolvedSelect) -> tuple[str, ...]:
@@ -2242,6 +2274,8 @@ def _analyze(
                 header = stmts[0].text
                 stmts = stmts[1:]
     an = Analyzer(ctx, info, m, depth=depth, hop=hop)
+    if header:
+        an.param_names = _header_params(header, info)
     if args is not None and header:
         params = _header_params(header, info)
         if info.lang == "python" and method_call and params and params[0] in ("self", "cls"):
@@ -2681,6 +2715,7 @@ def _candidates(ctx: RepoContext, firestore: bool) -> list[FnInfo]:
                 or _in_span(h.consume, info)
                 or fid in ctx.push_topics
                 or (reads and fid in ctx.go_topics)
+                or (reads and bool(ctx.calls.get(fid, set()) & set(ctx.go_topics)))
             )
         if ok:
             out.append(info)
