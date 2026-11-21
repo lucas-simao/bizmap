@@ -39,6 +39,7 @@
       screensLead2: "{n} screens call the API through its client code; {l} of {c} client files are linked to a screen by the calls the scan follows.",
       linkedLead: "{n} of {t} client files are linked to a screen by the calls the scan follows (a function passed by reference, as to a hook, is not followed).",
       hiddenCalls: "{n} HTTP calls from tests, mocks or generated code are not counted.",
+      hiddenCalls1: "1 HTTP call from tests, mocks or generated code is not counted.",
       noScreens: "No screen file reaches an API call through the calls the scan follows; see the API client code below.",
       noScreen: "no screen linked", noScreenLong: "No screen reaches this file through the calls the scan follows (for example when a function is passed by reference to a hook).",
       throughClient: "Through", usedOnScreens: "Used on screens", onScreens: "Screens", byFunctions: "Calling functions",
@@ -54,6 +55,7 @@
       required: "required", example: "example", or: "or", writesTo: "Writes", readsFrom: "Reads", dataTitleShort: "Data",
       tabExample: "Example", tabFields: "Fields", colField: "Field", colType: "Type", colDesc: "Description", oneOf: "one of",
       seeCode: "See in code", hideCode: "Hide code", calledByN: "Called by {n} functions in other services (no screen linked).",
+      calledByN1: "Called by 1 function in another service (no screen linked).",
       foldersTitle: "Code by folder", foldersRest: "Code no route reaches, by folder", colFolder: "Folder", colHttp: "HTTP calls", showMore: "Show {n} more (of {t})",
     },
     "pt-BR": {
@@ -88,6 +90,7 @@
       screensLead2: "{n} telas chamam a API pelo código cliente; {l} de {c} arquivos cliente estão ligados a uma tela pelas chamadas que o scan segue.",
       linkedLead: "{n} de {t} arquivos cliente estão ligados a uma tela pelas chamadas que o scan segue (função passada por referência, como para um hook, não é seguida).",
       hiddenCalls: "{n} chamadas HTTP de testes, mocks ou código gerado não entram na contagem.",
+      hiddenCalls1: "1 chamada HTTP de testes, mocks ou código gerado não entra na contagem.",
       noScreens: "Nenhum arquivo de tela chega a uma chamada de API pelas chamadas que o scan segue; veja o código cliente abaixo.",
       noScreen: "sem tela ligada", noScreenLong: "Nenhuma tela chega a este arquivo pelas chamadas que o scan segue (por exemplo, quando a função é passada por referência para um hook).",
       throughClient: "Por meio de", usedOnScreens: "Usado nas telas", onScreens: "Telas", byFunctions: "Funções que chamam",
@@ -103,6 +106,7 @@
       required: "obrigatório", example: "exemplo", or: "ou", writesTo: "Grava em", readsFrom: "Lê", dataTitleShort: "Dados",
       tabExample: "Exemplo", tabFields: "Campos", colField: "Campo", colType: "Tipo", colDesc: "Descrição", oneOf: "um de",
       seeCode: "Ver no código", hideCode: "Esconder código", calledByN: "Chamada por {n} funções de outros serviços (sem tela ligada).",
+      calledByN1: "Chamada por 1 função de outro serviço (sem tela ligada).",
       foldersTitle: "Código por pasta", foldersRest: "Código que nenhuma rota alcança, por pasta", colFolder: "Pasta", colHttp: "Chamadas HTTP", showMore: "Mostrar mais {n} (de {t})",
     },
   };
@@ -129,6 +133,8 @@
   }
   function homeOf(i) { var h = getNames().h[i]; return h >= 0 ? IX.chunks[h] : null; }
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+  // a string with a singular variant (`key1`) when n is 1
+  function plural(key, n, o) { o = o || {}; o.n = num(n); return fmt(n === 1 && L[key + "1"] ? L[key + "1"] : L[key], o); }
   function fmt(s, o) { return s.replace(/\{(\w+)\}/g, function (_, k) { return o[k]; }); }
   function num(n) { return Number(n).toLocaleString(); }
   function dirOf(ev) { var f = (ev || "").replace(/:\d+$/, ""); var k = f.lastIndexOf("/"); return k > 0 ? f.slice(0, k) : ""; }
@@ -298,7 +304,7 @@
            (sv.unmatched ? ' · <a class="risk" href="#/u/' + s + '">' + num(sv.unmatched) + " " + esc(L.unmatched) + "</a>" : "") + "</span></h2><p>" +
            Object.keys(targets).map(function (t) { return '<a class="chip http" href="#/s/' + t + '">→ ' + esc(svcName(+t)) + " · " + targets[t] + "</a>"; }).join("") + "</p>";
       if (sv.kind === "web" && sv.has_ui && sv.clients) h += '<p class="muted">' + esc(fmt(L.linkedLead, { n: num(sv.clients_linked), t: num(sv.clients) })) + "</p>";
-      if (sv.hidden_calls) h += '<p class="muted">' + esc(fmt(L.hiddenCalls, { n: num(sv.hidden_calls) })) + "</p>";
+      if (sv.hidden_calls) h += '<p class="muted">' + esc(plural("hiddenCalls", sv.hidden_calls)) + "</p>";
     }
     if (sv.data.length) {
       var first = sv.data.slice(0, 60), rest = sv.data.slice(60);
@@ -536,7 +542,7 @@
         return '<span class="chip screen' + (p[2] ? " guess" : "") + '" title="' + esc(p[1] + (p[2] ? " — " + L.guess : "")) + '">' + esc(humanFile(p[1])) + ' <span class="muted">' + esc(svcName(p[0])) + "</span>" + (p[2] ? " · " + esc(L.guess) : "") + "</span>";
       }).join("") + "</div>";
     } else if (r.nc) {
-      h += "<h4>" + esc(L.consumers) + '</h4><p class="muted">' + esc(fmt(L.calledByN, { n: num(r.nc) })) + "</p>";
+      h += "<h4>" + esc(L.consumers) + '</h4><p class="muted">' + esc(plural("calledByN", r.nc)) + "</p>";
     }
     if (r.t.length) h += "<h4>" + esc(L.dataTitleShort) + '</h4><p class="ep-data">' + dataSentence(r.t) + "</p>";
     h += '<p><button class="code-btn" data-code="' + r.i + '">' + esc(L.seeCode) + ' ▾</button></p><div class="tree code" id="code-' + r.i + '" hidden></div>';
@@ -661,7 +667,7 @@
         return "<li>" + fnLink(f) + ' <span class="muted">' + esc(svcName(s)) + "</span>" + (p[1] ? ' <span class="chip guess">' + esc(L.guess) + "</span>" : "") + (file ? '<div class="ev">' + esc(file) + "</div>" : "") + "</li>";
       }).join("") + (r.nc > r.c.length ? '<li class="muted">+' + (r.nc - r.c.length) + " " + esc(L.more) + "</li>" : "") + "</ul>";
     }
-    if (r.nh) h += '<p class="muted">' + esc(fmt(L.hiddenCalls, { n: num(r.nh) })) + "</p>";
+    if (r.nh) h += '<p class="muted">' + esc(plural("hiddenCalls", r.nh)) + "</p>";
     detail(h);
   }
 
@@ -804,7 +810,7 @@
     h += fileTable(ch.clients, "client", L.usedByScreens, function (c) {
       return routeChips(c.r) + (sv.kind === "web" && sv.has_ui && !c.ui.length && !/\.(tsx|jsx|vue|svelte)$/.test(c.f) ? ' <span class="chip">' + esc(L.noScreen) + "</span>" : "");
     });
-    if (sv.hidden_calls) h += '<p class="muted">' + esc(fmt(L.hiddenCalls, { n: num(sv.hidden_calls) })) + "</p>";
+    if (sv.hidden_calls) h += '<p class="muted">' + esc(plural("hiddenCalls", sv.hidden_calls)) + "</p>";
     read(h);
     detail('<p class="muted">' + esc(L.guessHint) + "</p>");
     $("read").onclick = function (ev) {
@@ -846,7 +852,7 @@
         return '<tr class="row" data-href="#/f/' + x[0] + '"><td>' + '<span class="chip bad">' + esc(x[1][0] || "?") + '</span> <code class="wrap">' + esc(x[1][1]) + '</code></td><td class="mono ell">' + esc(label(x[0])) + '</td><td class="ev">' + esc(x[2]) + "</td></tr>";
       }).join("") + "</tbody></table>";
     });
-    if (sv.hidden_calls) h += '<p class="muted">' + esc(fmt(L.hiddenCalls, { n: num(sv.hidden_calls) })) + "</p>";
+    if (sv.hidden_calls) h += '<p class="muted">' + esc(plural("hiddenCalls", sv.hidden_calls)) + "</p>";
     read(h); detail("");
   }
 

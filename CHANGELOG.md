@@ -44,7 +44,8 @@
   marked likely in "Consumed by".
 - Service links (system page, side panel, map) leave out tests, mocks and
   generated code, so every count matches; "1 screen" / "1 file"; a front-end
-  without UI files no longer reads "0 of 1 client files linked".
+  without UI files no longer reads "0 of 1 client files linked"; "Called by 1
+  function", "1 HTTP call … is not counted".
 
 ### Changed
 
