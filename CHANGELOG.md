@@ -26,6 +26,17 @@
   table:order_summary`, or `orders_mirror -> order_summary` when Go re-reads
   its table, also through `Build(row)` / `Send(ctx, pub, payload)` in other
   packages).
+- Go: publishers built in `if p, err := NewPublisher(…); … else { x = p }` (also
+  into a topic map) keep their topics; `candidates` only list topics of the
+  constructors that build the receiver's type.
+- Go SQL: a function returning `"INSERT INTO t (" + …` passed to
+  `pgx.Batch.Queue` / `Exec` is `writes table:t` (table level), a literal write
+  in `batch.Queue(…)` too, and a call on a closure parameter typed with an
+  interface gets `calls` to its one implementation. A Firestore → Postgres
+  mirror of that shape gives a table-level `feeds`.
+- Go Firestore: files of a package that imports Firestore elsewhere, references
+  passed to local helpers (read or write by what the helper does), and
+  `refs = append(refs, …)`.
 - Go Firestore: references built in a loop (`refs[i] = …Doc(id)` then
   `GetAll(ctx, refs)` / `batch.Update(refs[i], …)`) and a collection held in
   a struct field set in its constructor. A document read by one repository

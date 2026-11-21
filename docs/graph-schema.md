@@ -342,7 +342,12 @@ each call:
   built in a loop (`refs[i] = c.Collection("x").Doc(id)`, then
   `c.GetAll(ctx, refs)` or `batch.Update(refs[i], …)`) count, and the
   collection can be a struct field set once in its constructor
-  (`Collection(r.collection)` with `&Repo{collection: "customers"}`). A
+  (`Collection(r.collection)` with `&Repo{collection: "customers"}`). Files of
+  a package that imports Firestore in another file count too. A reference
+  passed straight to a local helper (`updateFields(ctx, c.Collection("x").Doc(id),
+  f)`, `rawQuery(ctx, c.Collection("x").Where(…))`, `arrayUpdate(ctx, ref, …)`)
+  is a write when the helper writes through that parameter, else a read, on
+  the caller; `refs = append(refs, …Doc(id))` is a reference too. A
   document read in one function and written to SQL in another (a Firestore
   repository returning the struct, a Postgres repository writing it) still
   gives `feeds` (`heuristic`, as SQL → SQL across calls); the id the caller
@@ -355,7 +360,9 @@ each call:
   constructor is an **instance** with its own topics. bizmap follows the
   instance from where it is built through assignments, `pubs[k] = p`, struct
   literals (`&Announcer{pub: pub}`), `s.pub = pub` and call arguments into
-  the callee's parameters, so `a.pub.Publish(…)` in `Announcer` publishes only
+  the callee's parameters (also `if p, err := NewPublisher(…); err != nil { … }
+  else { annPub = p }`: each `:=` is its own variable, so two such blocks are
+  two instances), so `a.pub.Publish(…)` in `Announcer` publishes only
   to the topics of the instance given to `NewAnnouncer`, and
   `Send(ctx, pub, payload)` to those of the instances its callers pass.
   Publishers built in a loop from a map (`topics := map[Kind]string{…}`,
@@ -369,7 +376,9 @@ each call:
   publishes to all of them (one edge each). When the receiver could be any of
   several instances (an unknown map key, a publisher interface no instance
   reaches), no `enqueues` edge is added: the function lists the topics in
-  `unresolved_queues` (`{kind: pubsub, candidates: [...]}`).
+  `unresolved_queues` (`{kind: pubsub, candidates: [...]}`), only those of the
+  constructors that build that type (the wrapper itself, or one whose
+  `Publish` matches the interface).
 - The topic comes from a literal, a package constant, or a config field filled
   by `getEnv("X", "def")`, `os.Getenv("X")` or an `env:"X" envDefault:"y"`
   tag; the queue node then has `env: X`. `os.Getenv("X")` without a default
@@ -383,6 +392,22 @@ each call:
   payload)`), so a Go publisher and a push route in another
   repo give `feeds` (`collection:orders -> table:order_summary`, or
   `orders_mirror -> order_summary` when Go re-reads its own table).
+
+### SQL built by a function, and interface calls in closures
+
+- A Go function returning write SQL text (`return "INSERT INTO orders_mirror (" +
+  strings.Join(names, ", ") + …`, also through `fmt.Sprintf`) is a SQL
+  builder; a call passing its result to `Queue` (`pgx.Batch`), `Exec`,
+  `Query`… is `writes table:orders_mirror` (`confidence: inferred`, `via:
+  <builder>`), table level since the columns are built at run time. A
+  literal write passed to `batch.Queue(…)` is a write as well.
+- `x.M(…)` on a closure parameter whose type is an interface
+  (`func(ctx context.Context, tx models.OrderMirrorTx) error { … }`) gets
+  `calls` to the one type that implements every method of that interface
+  (`via: interface`).
+- The dataflow follows both: a Firestore document read in a closure, mapped
+  by a helper and written through the built SQL gives a table-level `feeds
+  collection:orders -> table:orders_mirror` (`heuristic`, no `column_map`).
 
 ## Queue and topic names
 
