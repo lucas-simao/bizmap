@@ -36,7 +36,8 @@
       apis: "APIs", workers: "Workers", libs: "Libraries", httpTitle: "HTTP calls it makes", files: "files", file1: "file",
       screensLeadFiles: "{n} files call the API (no UI files: each calling file is a screen).", screensLeadOne: "1 file calls the API (no UI files: it is the screen).",
       clientTitle: "API client code", clientFile: "API client", clientLead: "Files whose functions call an API (the client layer). Tests, mocks and generated code are left out.",
-      screensLead2: "{n} screens call the API through its client code; {l} of {c} client files are linked to a screen by the calls the scan follows.",
+      screensN: "{n} screens call the API through its client code.", screensN1: "1 screen calls the API through its client code.",
+      linkedN: "{l} of {n} client files are linked to a screen by the calls the scan follows.", linkedN1: "{l} of 1 client file is linked to a screen by the calls the scan follows.",
       linkedLead: "{n} of {t} client files are linked to a screen by the calls the scan follows (a function passed by reference, as to a hook, is not followed).",
       hiddenCalls: "{n} HTTP calls from tests, mocks or generated code are not counted.",
       hiddenCalls1: "1 HTTP call from tests, mocks or generated code is not counted.",
@@ -90,7 +91,8 @@
       apis: "APIs", workers: "Workers", libs: "Bibliotecas", httpTitle: "Chamadas HTTP que faz", files: "arquivos", file1: "arquivo",
       screensLeadFiles: "{n} arquivos chamam a API (sem arquivos de UI: cada arquivo que chama é uma tela).", screensLeadOne: "1 arquivo chama a API (sem arquivos de UI: ele é a tela).",
       clientTitle: "Código cliente da API", clientFile: "cliente da API", clientLead: "Arquivos cujas funções chamam uma API (a camada cliente). Testes, mocks e código gerado ficam de fora.",
-      screensLead2: "{n} telas chamam a API pelo código cliente; {l} de {c} arquivos cliente estão ligados a uma tela pelas chamadas que o scan segue.",
+      screensN: "{n} telas chamam a API pelo código cliente.", screensN1: "1 tela chama a API pelo código cliente.",
+      linkedN: "{l} de {n} arquivos cliente estão ligados a uma tela pelas chamadas que o scan segue.", linkedN1: "{l} de 1 arquivo cliente está ligado a uma tela pelas chamadas que o scan segue.",
       linkedLead: "{n} de {t} arquivos cliente estão ligados a uma tela pelas chamadas que o scan segue (função passada por referência, como para um hook, não é seguida).",
       hiddenCalls: "{n} chamadas HTTP de testes, mocks ou código gerado não entram na contagem.",
       hiddenCalls1: "1 chamada HTTP de testes, mocks ou código gerado não entra na contagem.",
@@ -287,7 +289,7 @@
     }
     if (sv.uses) {
       var usesBy = {};
-      chunk(sv.screen_chunk).uses.forEach(function (u) { var t = getNames().s[u.r]; usesBy[t] = (usesBy[t] || 0) + 1; });
+      chunk(sv.uses_chunk).uses.forEach(function (u) { var t = getNames().s[u.r]; usesBy[t] = (usesBy[t] || 0) + 1; });
       h += "<h2>" + esc(L.usesTitle) + '</h2><p><a href="#/x/' + s + '">' + esc(fmt(L.usesSummary, { n: num(sv.uses) })) + "</a> " +
            Object.keys(usesBy).map(function (t) { return '<a class="chip http" href="#/x/' + s + '">' + esc(svcName(+t)) + " · " + usesBy[t] + "</a>"; }).join("") + "</p>";
     }
@@ -815,7 +817,7 @@
     crumbs(['<a href="#/s/' + s + '">' + esc(sv.name) + "</a>", esc(sv.kind === "web" ? L.screensTitle : L.httpTitle)]); toc("w" + s);
     var h = "<h1>" + esc(sv.name) + ' <span class="kind">' + esc(L[sv.kind] || sv.kind) + "</span></h1>";
     if (sv.kind === "web") {
-      h += '<p class="lead">' + esc(sv.has_ui ? fmt(L.screensLead2, { n: num(sv.screens), c: num(sv.clients), l: num(sv.clients_linked) })
+      h += '<p class="lead">' + esc(sv.has_ui ? plural("screensN", sv.screens) + " " + plural("linkedN", sv.clients, { l: num(sv.clients_linked) })
                                           : fmt(sv.screens === 1 ? L.screensLeadOne : L.screensLeadFiles, { n: num(sv.screens) })) + "</p>";
       h += "<h2>" + esc(L.screensTitle) + "</h2>" + (ch.screens.length ? fileTable(ch.screens, "screen", L.usedByScreens, function (sc) { return routeChips(sc.r); }) : '<p class="muted">' + esc(L.noScreens) + "</p>");
     }
@@ -854,7 +856,7 @@
   }
   // the API routes a service uses, by API and domain: "web uses these routes of api"
   function pageUses(s) {
-    var sv = SV[s], ch = chunk(sv.screen_chunk), nm = getNames();
+    var sv = SV[s], ch = chunk(sv.uses_chunk), nm = getNames();
     crumbs(['<a href="#/s/' + s + '">' + esc(sv.name) + "</a>", esc(L.usesTitle)]); toc("x" + s);
     var h = "<h1>" + esc(fmt(L.usesHeading, { s: sv.name })) + '</h1><p class="lead">' + esc(plural("usesLead", ch.uses.length)) + "</p>";
     var bySvc = {};
@@ -1004,7 +1006,7 @@
       else if (h[0] === "w" && SV[+h[1]] && SV[+h[1]].screen_chunk) pageScreens(+h[1]);
       else if (h[0] === "u" && SV[+h[1]] && SV[+h[1]].screen_chunk) pageUnmatched(+h[1]);
       else if (h[0] === "p" && SV[+h[1]]) pageFolder(+h[1], +h[2]);
-      else if (h[0] === "x" && SV[+h[1]] && SV[+h[1]].screen_chunk) pageUses(+h[1]);
+      else if (h[0] === "x" && SV[+h[1]] && SV[+h[1]].uses_chunk) pageUses(+h[1]);
       else if (h[0] === "map") pageMap();
       else pageSystem();
     } catch (err) {

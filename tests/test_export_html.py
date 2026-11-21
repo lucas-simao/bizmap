@@ -881,6 +881,25 @@ def test_spec_without_description_takes_the_handler_comment_and_query_enums() ->
     assert comment_text("ListProducts godoc @Summary x @Router /p [get]") == ""
 
 
+def test_screens_of_a_used_route_come_per_route_not_per_client_file() -> None:
+    # one client file calls two routes; the page reaches only one of them
+    g = react_graph()
+    g["nodes"] += [
+        _n("api/entrypoint:http:DELETE:/orders/:id", "entrypoint", kind="http", method="DELETE", path="/orders/:id",
+           evidence={"file": "main.go", "line": 4}),
+        _n("web/function:src.api.orders.removeOrder", "function", name="removeOrder",
+           evidence={"file": "src/api/orders.ts", "line": 5}),
+    ]
+    g["edges"] += [_e("calls_http", "web/function:src.api.orders.removeOrder",
+                      "api/entrypoint:http:DELETE:/orders/:id", "inferred")]
+    index, chunks = _book(g)
+    names = chunks["names"]["l"]
+    web = next(s for s in index["services"] if s["name"] == "web")
+    uses = {names[u["r"]]: u for u in chunks[web["uses_chunk"]]["uses"]}
+    assert uses["GET /orders/:id"]["ui"] == ["src/pages/Orders.tsx"]
+    assert uses["DELETE /orders/:id"]["ui"] == [] and uses["DELETE /orders/:id"]["files"] == ["src/api/orders.ts"]
+
+
 def test_a_comment_that_only_restates_the_route_is_not_a_summary() -> None:
     from bizmap.export.openapi import plain_summary
 
@@ -893,7 +912,19 @@ def test_front_end_lists_the_api_routes_it_uses() -> None:
     index, chunks = _book(react_graph())
     names = chunks["names"]["l"]
     web = next(s for s in index["services"] if s["name"] == "web")
-    uses = chunks[web["screen_chunk"]]["uses"]
+    assert "uses" not in chunks[web["screen_chunk"]]  # own chunk: the screens page does not parse it
+    uses = chunks[web["uses_chunk"]]["uses"]
     assert web["uses"] == 1 and [names[u["r"]] for u in uses] == ["GET /orders/:id"]
     u = uses[0]
     assert u["files"] == ["src/api/orders.ts", "src/api/users.ts"] and u["ui"] == ["src/pages/Orders.tsx"] and u["g"] == 0
+
+
+def test_every_counted_string_has_a_singular_in_both_languages() -> None:
+    import re
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parents[1] / "src/bizmap/export/book.js").read_text()
+    keys = set(re.findall(r'plural\("(\w+)"', js))
+    assert {"screensN", "linkedN", "usesLead", "hiddenCalls"} <= keys
+    for k in sorted(keys):
+        assert len(re.findall(rf"\b{k}1:", js)) == 2, k  # en and pt-BR
