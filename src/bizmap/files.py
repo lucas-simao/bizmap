@@ -66,6 +66,11 @@ SKIPPED_PATHS_CAP = 200
 # back). Generated *data access* code (sqlc, or any generated file that runs
 # Exec/Query) is source for BizMap and is always kept.
 GO_SKIP_DIR_NAMES = {"testdata", "mocks"}
+# Python tests (skipped like Go's *_test.go): `tests/` and `test/` dirs,
+# test_*.py, *_test.py, conftest.py. `scan: include_tests: true`,
+# `--include-tests` or `scan: include: [tests]` bring them back.
+PY_TEST_DIR_NAMES = {"tests", "test"}
+PY_TEST_GLOBS = ("test_*.py", "*_test.py", "conftest.py")
 GO_TEST_GLOBS = ("*_test.go",)
 GO_GENERATED_GLOBS = ("*.pb.go", "*.pb.gw.go", "*_mock.go", "mock_*.go", "*_mocks.go")
 _GO_GENERATED_HEADER = re.compile(rb"^// Code generated .* DO NOT EDIT\.\s*$", re.M)
@@ -233,6 +238,7 @@ class WalkOptions:
     include: Sequence[str] = ()  # dir names / globs brought back even if generated or ignored
     gitignore: bool = True
     skip_generated: bool = True
+    include_tests: bool = False  # Go *_test.go / testdata and Python tests
     stats: dict[str, int] = field(default_factory=dict)
     paths: dict[str, list[str]] = field(default_factory=dict)
     _seen: set[tuple[str, str]] = field(default_factory=set, repr=False)
@@ -341,6 +347,8 @@ def iter_files(
     opts = options if options is not None else WalkOptions()
     wanted = {s.lower() if s.startswith(".") else f".{s.lower()}" for s in suffixes}
     go_only = wanted == {".go"}
+    py_only = wanted == {".py"}
+    skip_tests = opts.skip_generated and not opts.include_tests
     out: list[Path] = []
     root = root.resolve()
     ignore = GitIgnore()
@@ -374,7 +382,11 @@ def iter_files(
                 opts.bump("generated_dirs", d_rel)
                 continue
             if opts.skip_generated and go_only and d in GO_SKIP_DIR_NAMES:
-                opts.bump("go_test_dirs" if d == "testdata" else "generated_dirs", d_rel)
+                if not (d == "testdata" and opts.include_tests):
+                    opts.bump("go_test_dirs" if d == "testdata" else "generated_dirs", d_rel)
+                    continue
+            if skip_tests and py_only and d in PY_TEST_DIR_NAMES:
+                opts.bump("py_test_dirs", d_rel)
                 continue
             if opts.gitignore and ignore.ignored((prefix + "/" + d_rel).strip("/") if prefix else d_rel, True):
                 opts.bump("gitignored", d_rel)
@@ -401,9 +413,12 @@ def iter_files(
                 continue
             if opts.skip_generated and path.suffix.lower() == ".go":
                 kind = go_generated_kind(path)
-                if kind is not None:
+                if kind is not None and not (kind == "tests" and opts.include_tests):
                     opts.bump("go_tests" if kind == "tests" else "generated_files", rel_posix)
                     continue
+            if skip_tests and path.suffix.lower() == ".py" and any(fnmatch.fnmatch(name, g) for g in PY_TEST_GLOBS):
+                opts.bump("py_tests", rel_posix)
+                continue
             out.append(path)
     return sorted(out)
 

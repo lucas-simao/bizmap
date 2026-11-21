@@ -38,6 +38,36 @@
 - Graph format version `0.6.0` (no field changed; it follows the release).
   GitHub Action examples pin `@v0.6.0`.
 
+## 0.5.2 — 2026-11-20
+
+### Fixed
+
+- **Python tests are skipped by default**, like Go's `*_test.go`: `tests/` and
+  `test/` directories, `test_*.py`, `*_test.py`, `conftest.py` (counted as
+  "Python test dirs/files" under `skipped:`). `--include-tests` or
+  `scan: include_tests: true` scans them (and Go tests) again.
+- **A test helper no longer changes production results**: an HTTP wrapper is
+  only used where the call can reach it (defined in the same module,
+  imported from its module, `self.x()` in its class, `mod.x()` through the
+  module; a private wrapper name such as `client._post` still matches a
+  method of that name). A `post(app, path, body)` helper in `tests/` used to
+  capture every `.post(...)` of the repo, `httpx.post` included, turning
+  `POST {HOOKS_URL}/hooks/orders/{order_id}` into `POST {base}/{path}`.
+  Wrappers whose first parameter is the app or client (`_post(client, id)`)
+  take the path from the next one, and a path passed by keyword is used.
+- **In-process test calls are not calls between services**: calls through
+  `TestClient(...)`, `httpx.AsyncClient(transport=ASGITransport(app=…))` /
+  `WSGITransport` / `Client(app=…)`, functions returning one, and parameters
+  receiving one, produce no `calls_http` and are not unresolved; the scan
+  prints `in-process test calls: N` (`in_process_http` in the graph).
+- **Clean URL labels**: a dynamic part of a Python URL keeps its name
+  (`{oid}`, `{settings.API_URL}`) and anything else becomes `{dynamic}` — no
+  more `{X.format(oid)}`, `{Report(\n rows=…}` or `{1 << 20}`.
+  `CONST.format(oid)` with a URL template is resolved
+  (`"/orders/{}/confirm"` → `/orders/{oid}/confirm`).
+- **Unresolved HTTP by origin**: the scan summary splits unresolved calls
+  into app / scripts / eval / tests.
+
 ## 0.5.1 — 2026-11-20
 
 ### Fixed

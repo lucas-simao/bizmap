@@ -1817,6 +1817,9 @@ def _apply_sql_functions(graph: Graph, schema: Schema) -> None:
             )
 
 
+# `bizmap scan --include-tests` sets this for the scan it runs
+INCLUDE_TESTS = [False]
+
 _TRIGGER_CHAIN_DEPTH = 4
 
 
@@ -2453,7 +2456,12 @@ def _scan_one(
     graph.version = GRAPH_VERSION
 
     t0 = time.perf_counter()
-    walk = WalkOptions(include=cfg.include, gitignore=cfg.gitignore, skip_generated=cfg.skip_generated)
+    walk = WalkOptions(
+        include=cfg.include,
+        gitignore=cfg.gitignore,
+        skip_generated=cfg.skip_generated,
+        include_tests=cfg.include_tests or INCLUDE_TESTS[0],
+    )
     sql_files = discover_sql_files(root, exclude=exclude_pats, options=walk)
     schema = replay_files(sql_files, root)
     go_files = iter_files(root, [".go"], exclude=exclude_pats, options=walk)
@@ -2550,6 +2558,12 @@ def _scan_one(
         if msg not in existing:
             existing.append(msg)
         graph.attrs["warnings"] = existing
+    # TestClient / ASGITransport calls exercise the app in-process: they are
+    # tests, not calls between services (no calls_http, not unresolved)
+    in_process = [c for c in py_analysis.http_calls if getattr(c, "in_process", False)]
+    if in_process:
+        py_analysis.http_calls = [c for c in py_analysis.http_calls if not getattr(c, "in_process", False)]
+        graph.attrs["in_process_http"] = len(in_process)
     _link_http(graph, py_analysis, js_analysis, cfg.services, go=go_analysis)
     _link_queue_consumers(graph, py_analysis, cfg)
     # stash client calls on function nodes so merge can re-match cross-repo

@@ -32,6 +32,7 @@ class ScanConfig:
     include: list[str] = field(default_factory=list)
     gitignore: bool = True
     skip_generated: bool = True
+    include_tests: bool = False  # `scan: include_tests: true` (or --include-tests)
 
 
 def git_toplevel(start: Path) -> Path | None:
@@ -134,7 +135,7 @@ class ConfigError(ValueError):
     """bizmap.yaml has a value of the wrong type (shown without a traceback)."""
 
 
-_SCAN_KEYS = ("include", "exclude", "gitignore", "skip_generated", "expand_star")
+_SCAN_KEYS = ("include", "exclude", "gitignore", "skip_generated", "include_tests", "expand_star")
 
 
 def _globs(path: Path, key: str, value: Any) -> list[str]:
@@ -200,6 +201,7 @@ def _load_scan_config(root: Path, config: Path | None = None) -> ScanConfig:
         include=include,
         gitignore=_flag(path, "scan.gitignore", scan_opts.get("gitignore"), True),
         skip_generated=_flag(path, "scan.skip_generated", scan_opts.get("skip_generated"), True),
+        include_tests=_flag(path, "scan.include_tests", scan_opts.get("include_tests"), False),
         exclude=list(dict.fromkeys(exclude)),
         expand_star=expand,
         path=path,
