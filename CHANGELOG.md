@@ -1,6 +1,51 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-11-20
+
+### Added
+
+- **`bizmap export --format html` reads like API docs.** A domain lists its
+  endpoints (method, path, summary); opening one shows the description,
+  parameters, the **JSON request body** and each **response with its JSON**
+  (nested objects open on click), the screens that use it by name, its data in
+  one sentence ("Writes orders. Reads products."), and **See in code** for the
+  call tree. Domains follow the API's tags.
+- Docs come from an **OpenAPI / Swagger file** (swag's `docs/swagger.json`,
+  FastAPI's `openapi.json`; Swagger 2.0 / OpenAPI 3, JSON or YAML), found next
+  to each repo or given with `--openapi [SERVICE=]FILE` / `export.openapi` in
+  `bizmap.yaml`; else from **swag comments** in the graph (`@Summary`, `@Tags`,
+  `@Param`, `@Success`, `@Failure`); else from the handler's comment.
+- Service pages are shorter: domains with endpoint counts and data; screens,
+  HTTP calls, tables and code fold under one "more" section.
+- Fictional example `examples/export/api/openapi.json`.
+- Request and response JSON shown like Swagger UI: an **Example** tab (a real,
+  colored JSON with sample values: enum's first value, `example`, dates,
+  numbers) and a **Fields** tab (field, type, required, description, nested
+  fields indented).
+- Specs found next to the code: also every spec in a repo's `openapi/`,
+  `docs/`, `api/`, `spec/`, `specs/` folder (one per area), in the folder the
+  graph's `repo_roots` names; a bad one found that way is skipped with a note,
+  and the export lists the specs it used. `--openapi` for a service the graph
+  does not have is an error.
+- A spec without `description` takes the handler's comment/docstring; query
+  parameters show their enum and default; routes without docs join the tag
+  named like a segment of their path after any prefix; the side panel no
+  longer repeats the raw swag comment.
+- Graph format version `0.7.0` (no field changed; it follows the release).
+  GitHub Action examples pin `@v0.7.0`.
+
+### Fixed
+
+- Front-end ↔ API noise: `mocks/` (MSW), `test-utils/`, `testing/`,
+  `stories/`, `cypress/`, `playwright/` folders and `*.cy.*` / `*.mock.*`
+  files are left out like tests; a service calling its own routes from code
+  none of its routes reaches (a generated SDK kept in the API repo) is too.
+- A screen that reaches a route only through a likely (heuristic) link is
+  marked likely in "Consumed by".
+- Service links (system page, side panel, map) leave out tests, mocks and
+  generated code, so every count matches; "1 screen" / "1 file"; a front-end
+  without UI files no longer reads "0 of 1 client files linked"; "Called by 1
+  function", "1 HTTP call … is not counted".
 
 ### Added
 
