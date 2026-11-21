@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Firestore names built at runtime are counted** in Go and JS/TS:
+  `Collection(coll)`, `CollectionGroup(name)`, `Doc(path)` (Go) and
+  `collection(db, x)`, `doc(db, name, id)`, `db.collection(x)` (a helper whose
+  callers do not name it) now give `reads` / `writes` to `collection:unknown`
+  with evidence, kept on the function (never copied to callers, never a
+  `feeds` end, never `same_as` across repos). `bizmap who-writes` /
+  `who-reads` / `trace` list them in "Could change this answer" per repo with
+  the functions: "2 write(s) with a collection name built at runtime
+  (orders-api: 1, shop-web: 1) …". Go `Doc("orders/" + id)` now reads /
+  writes `orders`.
+- **Go publisher with the topic in a struct field**: `s.topic.Publish(…)`
+  after `&Service{topic: ps.Topic("order-created")}` or `s.topic =
+  c.Publisher(T)` (literal, constant or config) is an `enqueues` to the topic.
+
+### Changed
+
+- **Short path skips start-up wiring**: when only a `main` / job reaches the
+  writer, the functions right after it that wire things up (`buildRouter`,
+  `Register*`, `setup*`, `New*Server`, `*Router`, `run`, their closures) are
+  folded into `…`: `main → … → Handle → (via 1 function) → WriteOrder`.
+  JSON: `wiring` (count) on each entrypoint.
+- **One store label per entity**: the SQL engine is also read from
+  dependency manifests (`requirements*.txt`, `pyproject.toml`, `Pipfile`,
+  `package.json`, `go.mod`: `psycopg`, `asyncpg`, `pg`…), and a table whose
+  engine is unknown takes the one of the same table in another repo — the
+  query output and the HTML no longer say `Postgres/SQL`.
+- **Faster queries**: the first question writes `bizmap.graph.idx` next to
+  the graph (marshal, indexes prebuilt); later ones load it while the graph
+  keeps its size and mtime (~2× faster load). `orjson` is used when installed.
+- The "names built at runtime" line groups repos: `(billing-worker: 1,
+  orders-api: 1)` instead of one line per repo.
+
 ## 0.13.0 — 2026-11-21
 
 ### Added

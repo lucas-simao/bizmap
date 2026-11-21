@@ -59,6 +59,9 @@ _PUBLISH = re.compile(r"\.\s*topic\s*\(\s*([^()]*?)\s*\)\s*\.\s*(publishMessage|
 _NAME_BEFORE = re.compile(r"(?:export\s+const|const|let|var|exports\.|module\.exports\.)\s*([A-Za-z_$][\w$]*)\s*=\s*$")
 
 
+UNKNOWN = "unknown"  # the collection of an access whose name is only known at runtime
+
+
 @dataclass
 class FsAccess:
     kind: str  # read | write
@@ -333,7 +336,8 @@ def _collection(t: _Target) -> tuple[str | _Param, str] | None:
     if isinstance(last, _Param):
         return last, path
     if not isinstance(last, str) or last in ("{}",) or "{" in last:
-        return None
+        # `collection(db, name)` with a name built at runtime: counted, not named
+        return UNKNOWN, path
     return last, path
 
 
@@ -388,7 +392,7 @@ def scan_files(
             header = "\n".join(fs_files[file].split("\n")[line - 1 : min(line + 3, end)])
             hm = re.search(r"\)\s*(?::\s*[^={]+)?(?:=>|\{)", header)
             by_file.setdefault(file, []).append(_Fn(qual, line, end, _params_of(header[: hm.end()] if hm else header)))
-    pending: list[tuple[str, int, str, str, int, list[str]]] = []  # helper qual, param, kind, file, line, fields
+    pending: list[tuple[str, int, str, str, int, list[str], str]] = []  # helper qual, param, kind, file, line, fields, path
     scans: dict[str, _FileScan] = {}
     for rel in sorted(fs_files):
         fs = _FileScan(rel, fs_files[rel], by_file.get(rel, []), consts)
@@ -405,12 +409,12 @@ def scan_files(
             sym = fn.qual if fn is not None else f"{fs.module}.module"
             if isinstance(coll, _Param):
                 if fn is not None:
-                    pending.append((fn.qual, coll.index, kind, rel, line, fields))
+                    pending.append((fn.qual, coll.index, kind, rel, line, fields, path))
                 continue
             res.accesses.append(FsAccess(kind, coll, path, rel, line, sym, fields))
         _publishes(fs, res)
     # a collection named by the caller of a helper: `listAll('customers')`
-    for helper, index, kind, rel, _line, fields in pending:
+    for helper, index, kind, rel, hline, fields, _hpath in pending:
         short = helper.split(".")[-1]
         sites: list[tuple[str, str, int]] = []
         for caller, callee, cfile, cline in calls or []:
@@ -424,6 +428,11 @@ def scan_files(
                 if caller_fn is not None and caller_fn.qual == helper:
                     continue
                 sites.append((caller_fn.qual if caller_fn else f"{fs.module}.module", rel, cline))
+        if not sites:
+            # nobody in the scan names it (`export function saveTo(name, …)`):
+            # the helper writes to a collection only known at runtime
+            res.accesses.append(FsAccess(kind, UNKNOWN, UNKNOWN, rel, hline, helper, fields))
+            continue
         for caller, cfile, cline in sites:
             cscan = scans.get(cfile) or _FileScan(cfile, texts[cfile], [], consts)
             scans[cfile] = cscan

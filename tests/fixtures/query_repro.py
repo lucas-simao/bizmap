@@ -10,6 +10,13 @@ shape `bizmap scan` writes (multi-repo ids `<repo>/...`; queues are shared).
 - shop-web (TS): reads Firestore `orders`; createOrder calls POST /orders.
 - billing-worker (Python): consumes `order-created` and writes Postgres
   `orders.status` too (the "forgotten worker").
+
+Names only known at runtime (counted as `table:unknown` / `collection:unknown`):
+orders-api `Service.Archive` (Go `Collection(coll)`), shop-web `saveTo`
+(TS `doc(db, name, id)`), billing-worker `touch` (SQL `UPDATE {table_name}`).
+An event route registered through orders-api's own wrapper: `main →
+buildRouter → platform.RegisterEvent → (closure) → sync.Handle →
+Service.Sync → mirrorTx.WriteOrder` writes Postgres `orders`.
 """
 
 from __future__ import annotations
@@ -59,12 +66,23 @@ def build() -> dict[str, Any]:
         _n(f"{API}/table:orders", "table", name="orders", engine="postgres"),
         *[_n(f"{API}/column:orders.{c}", "column", table="orders", name=c) for c in ("id", "customer_id", "total", "status")],
         _n(f"{API}/table:unknown", "table", name="unknown"),
+        _n(f"{API}/collection:unknown", "collection", name="unknown", kind="collection", confidence="unknown"),
+        _fn(API, "internal/orders.Service.Archive", "internal/orders/service.go", 40),
+        _fn(API, "cmd/api.main", "cmd/api/main.go", 10),
+        _fn(API, "cmd/api.buildRouter", "cmd/api/main.go", 20),
+        _fn(API, "internal/platform.RegisterEvent", "internal/platform/events.go", 8),
+        _fn(API, "internal/platform.RegisterEvent.func1", "internal/platform/events.go", 9),
+        _fn(API, "internal/sync.Handle", "internal/sync/handler.go", 12),
+        _fn(API, "internal/sync.Service.Sync", "internal/sync/service.go", 30),
+        _fn(API, "internal/pgstore.mirrorTx.WriteOrder", "internal/pgstore/store.go", 44),
         # shop-web
         _fn(WEB, "src.orders.listOrders", "src/orders.ts", 4),
         _fn(WEB, "src.orders.createOrder", "src/orders.ts", 9),
         _fn(WEB, "src.pages.Orders.OrdersPage", "src/pages/Orders.tsx", 3),
         _n(f"{WEB}/collection:orders", "collection", name="orders", kind="collection", db="firestore:default",
            same_as=[f"{API}/collection:orders"]),
+        _n(f"{WEB}/collection:unknown", "collection", name="unknown", kind="collection", confidence="unknown"),
+        _fn(WEB, "src.orders.saveTo", "src/orders.ts", 14),
         # billing-worker
         _n(f"{BILL}/entrypoint:pubsub:order-created", "entrypoint", kind="pubsub", path="order-created",
            evidence={"file": "billing/consumer.py", "line": 8}),
@@ -72,6 +90,8 @@ def build() -> dict[str, Any]:
         _fn(BILL, "billing.repo.mark_billed", "billing/repo.py", 21),
         _n(f"{BILL}/table:orders", "table", name="orders", engine="postgres"),
         _n(f"{BILL}/column:orders.status", "column", table="orders", name="status"),
+        _n(f"{BILL}/table:unknown", "table", name="unknown"),
+        _fn(BILL, "billing.app.touch", "billing/app.py", 30),
         # shared
         _n(Q, "queue", kind="pubsub", name="order-created"),
     ]
@@ -108,6 +128,18 @@ def build() -> dict[str, Any]:
         _e("triggers", f"{BILL}/entrypoint:pubsub:order-created", f"{BILL}/function:billing.consumer.handle_order_created", file="billing/consumer.py", line=8),
         _e("calls", f"{BILL}/function:billing.consumer.handle_order_created", f"{BILL}/function:billing.repo.mark_billed", file="billing/consumer.py", line=14),
         _e("writes", f"{BILL}/function:billing.repo.mark_billed", f"{BILL}/column:orders.status", file="billing/repo.py", line=24, ops=["UPDATE"]),
+        _e("writes", f"{BILL}/function:billing.app.touch", f"{BILL}/table:unknown", "unknown", file="billing/app.py", line=32),
+        # names only known at runtime, in Go and TS
+        _e("writes", a + "internal/orders.Service.Archive", f"{API}/collection:unknown", "unknown", file="internal/orders/service.go", line=41),
+        _e("writes", f"{WEB}/function:src.orders.saveTo", f"{WEB}/collection:unknown", "unknown", file="src/orders.ts", line=15),
+        # the event route behind orders-api's own wrapper
+        _e("calls", a + "cmd/api.main", a + "cmd/api.buildRouter", file="cmd/api/main.go", line=12),
+        _e("calls", a + "cmd/api.buildRouter", a + "internal/platform.RegisterEvent", file="cmd/api/main.go", line=22),
+        _e("calls", a + "internal/platform.RegisterEvent", a + "internal/platform.RegisterEvent.func1", file="internal/platform/events.go", line=9),
+        _e("calls", a + "internal/platform.RegisterEvent.func1", a + "internal/sync.Handle", "inferred", file="internal/platform/events.go", line=9),
+        _e("calls", a + "internal/sync.Handle", a + "internal/sync.Service.Sync", file="internal/sync/handler.go", line=15),
+        _e("calls", a + "internal/sync.Service.Sync", a + "internal/pgstore.mirrorTx.WriteOrder", file="internal/sync/service.go", line=38),
+        _e("writes", a + "internal/pgstore.mirrorTx.WriteOrder", f"{API}/table:orders", file="internal/pgstore/store.go", line=47, ops=["INSERT"]),
     ]
     return {
         "version": "test",

@@ -2533,6 +2533,7 @@ def _apply_dataflow(
             **known,
         }
         idx = dbident.build_index(texts, cfg.raw)
+        idx.engines |= dbident.manifest_engines(root)
         dbident.assign_dbs(graph, texts, idx)
         dataflow.apply(graph, root, texts, firestore=idx.firestore or False, go_meta=go_meta)
     except Exception as exc:  # noqa: BLE001 - never lose the scan over data flow

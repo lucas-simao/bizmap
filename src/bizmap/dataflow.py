@@ -787,6 +787,9 @@ class RepoContext:
         return [str(c).lower() for c in (spec.get("columns") or {})]
 
 
+_UNKNOWN_DATA = frozenset({"table:unknown", "collection:unknown"})
+
+
 def _bare(node_id: str) -> str:
     """The id without its repo prefix (``repo/table:x`` → ``table:x``)."""
     head = node_id.split(":", 1)[0]
@@ -2403,6 +2406,8 @@ def add_feed(
     entries: list[dict[str, Any]],
 ) -> None:
     """Add (or extend) ``feeds src -> dst``."""
+    if _bare(src) in _UNKNOWN_DATA or _bare(dst) in _UNKNOWN_DATA:
+        return  # a name built at runtime is never a feeds end
     eid = edge_id("feeds", src, dst)
     edge = graph.edges.get(eid)
     via_item = {"path": list(path), "confidence": confidence, "evidence": evidence}

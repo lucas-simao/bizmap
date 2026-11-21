@@ -50,7 +50,15 @@ def _ensure_fn(graph: Graph, qual: str, file: str, line: int) -> str:
     return fid
 
 
+UNKNOWN = "unknown"  # a collection whose name is built at runtime (`Collection(name)`)
+
+
 def _ensure_coll(graph: Graph, name: str, path: str | None = None) -> str:
+    if name == UNKNOWN:
+        # like `table:unknown`: one node per repo, no path, never a feeds end
+        cid = collection_id(UNKNOWN)
+        graph.add_node(cid, "collection", name=UNKNOWN, kind="collection", confidence=Confidence.UNKNOWN.value)
+        return cid
     cid = collection_id(name)
     graph.add_node(cid, "collection", name=name.lower(), kind="collection")
     if path and path.lower() != name.lower():
@@ -100,13 +108,16 @@ def apply_js_firestore(
         attrs: dict[str, Any] = {}
         if a.via:
             attrs["via"] = function_id(a.via)
+        dynamic = a.collection == UNKNOWN
         edge = graph.add_edge(
-            etype, fid, cid, confidence=Confidence.INFERRED if a.via else Confidence.EXACT,
+            etype, fid, cid,
+            confidence=Confidence.UNKNOWN if dynamic else Confidence.INFERRED if a.via else Confidence.EXACT,
             evidence=Evidence(a.file, a.line, a.symbol), **attrs,
         )
         if a.fields:
             edge.attrs["fields"] = sorted(set(edge.attrs.get("fields") or []) | set(a.fields))
-        direct.append((etype, fid, cid))
+        if not dynamic:  # a runtime name stays on the function: not copied to callers
+            direct.append((etype, fid, cid))
     for p in res.publishes:
         fid = _ensure_fn(graph, p.symbol, p.file, p.line)
         qid = queue_id("pubsub", p.topic)
@@ -155,10 +166,13 @@ def apply_go_cloud(
             continue
         cid = _ensure_coll(graph, a.collection, a.path)
         etype = "writes" if a.kind == "write" else "reads"
-        edge = graph.add_edge(etype, fid, cid, confidence=Confidence.EXACT, evidence=Evidence(a.file, a.line, a.symbol))
+        dynamic = a.collection == UNKNOWN
+        edge = graph.add_edge(etype, fid, cid, confidence=Confidence.UNKNOWN if dynamic else Confidence.EXACT,
+                              evidence=Evidence(a.file, a.line, a.symbol))
         if a.fields:
             edge.attrs["fields"] = sorted(set(edge.attrs.get("fields") or []) | set(a.fields))
-        direct.append((etype, fid, cid))
+        if not dynamic:
+            direct.append((etype, fid, cid))
     for p in res.publishes:
         fid = function_id(p.symbol)
         node = graph.nodes.get(fid)

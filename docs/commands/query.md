@@ -62,9 +62,11 @@ orders-api
       internal/mirror/job.go:30
   PATCH /orders/{id}/status → OrdersHandler.UpdateStatus → Repo.SetStatus  writes orders (status)  [exact]
       internal/orders/repo.go:33
+  main → … → Handle → (via 1 function) → mirrorTx.WriteOrder  writes orders  [inferred]
+      internal/pgstore/store.go:47
 
 Could change this answer:
-  1 write(s) with a table name built at runtime in orders-api could not be resolved: Repo.BulkFix
+  2 write(s) with a table name built at runtime (billing-worker: 1, orders-api: 1) could not be resolved: app.touch [billing-worker], Repo.BulkFix [orders-api]
 ```
 
 How to read a line: *entrypoint → handler → (via N functions) → the function
@@ -72,6 +74,15 @@ that writes*, the columns it writes, the confidence of the weakest link
 (`exact` > `inferred` > `heuristic` > `unknown`), and the `file:line` of the
 write. Intermediate functions are folded into "via N functions"; **`--path`**
 shows all of them.
+
+When nothing but start-up code reaches the writer — a `main`, a job — the
+wiring right after it (`buildRouter`, `Register*`, `setup*`, `New*Server`,
+`*Router`, `run`, the closures inside them) is folded into `…`, so the line
+starts at the first real handler: `main → … → Handle → (via 1 function) →
+mirrorTx.WriteOrder`. After an HTTP route, a consumer or a trigger nothing is
+folded that way: the function the route calls is its handler, whatever its
+name. `--path` still shows every step
+(`main → buildRouter → RegisterEvent → RegisterEvent.func1 → Handle → Service.Sync → mirrorTx.WriteOrder`).
 
 ## `trace`
 
@@ -113,9 +124,30 @@ Every answer ends with what the graph could **not** resolve and could change
 it, so a short list never reads as a complete one:
 
 - reads / writes whose table or collection name is built at runtime, in the
-  entity's repos (`table:unknown` in the graph);
+  entity's repos — `table:unknown` / `collection:unknown` in the graph: SQL
+  with a table name from a variable (`UPDATE {table_name} …`), and Firestore
+  with the collection from a variable or parameter in Go
+  (`Collection(coll)`, `CollectionGroup(name)`, `Doc(path)`) and in
+  JavaScript / TypeScript (`collection(db, x)`, `doc(db, name, id)`,
+  `db.collection(x)`). They are counted per repo with the functions that do
+  them, and never turned into a collection of their own:
+
+  ```text
+  Could change this answer:
+    2 write(s) with a collection name built at runtime (orders-api: 1, shop-web: 1) could not be resolved: Service.Archive [orders-api], orders.saveTo [shop-web]
+  ```
 - in `trace`: publishes to a topic only known at runtime, and HTTP calls from
   the functions involved that matched no route.
+
+## The index cache
+
+The first question on a graph writes `bizmap.graph.idx` next to
+`bizmap.graph.json`: the same nodes and edges with the indexes already built,
+in a format Python loads about twice as fast. Later questions use it while the
+graph file keeps the same size and modification time (a new scan replaces it
+on the next question); a cache from another Python version is rebuilt. Add it
+to `.gitignore` next to the graph. `orjson`, when installed, also speeds up
+the first read.
 
 ## Output formats
 
@@ -154,7 +186,7 @@ graph and question always give the same bytes. A node anywhere in the output is
       "entrypoints": [
         {"entrypoint": {"label": "PATCH /orders/{id}/status", "…": "…"},
          "handler": {"label": "OrdersHandler.UpdateStatus", "…": "…"},
-         "via": 0, "path": [{"…": "…"}], "confidence": "exact"}
+         "wiring": 0, "via": 0, "path": [{"…": "…"}], "confidence": "exact"}
       ],
       "entrypoints_partial": false
     }
@@ -165,13 +197,22 @@ graph and question always give the same bytes. A node anywhere in the output is
 }
 ```
 
-- `store`: `Firestore`, `Postgres`, `MySQL`, `SQLite`, `SQL Server` or `SQL`
-  (a list when the grouped nodes disagree).
+- `store`: `Firestore`, `Postgres`, `MySQL`, `SQLite`, `SQL Server` or `SQL`.
+  `SQL` only means the engine is unknown: a node that is `SQL` takes the engine
+  of the same table in another repo when exactly one is known, so one entity
+  has one label (in text, md, JSON and the HTML). A list only when known
+  engines really differ. The engine comes from the repo's SQL driver imports,
+  its dependency manifests (`requirements*.txt`, `pyproject.toml`, `Pipfile`,
+  `package.json`, `go.mod`) and literal DSNs (`postgresql://…`).
 - `entrypoints`: empty list → nothing reaches the function; otherwise at most
   25, shortest path first. `entrypoints_partial` is `true` when there are more,
   or the walk stopped in a very dense call graph. `handler` is `null` when the
   entrypoint calls the writer directly; `via` counts the functions between the
-  handler and the writer.
+  handler and the writer; `wiring` counts the start-up functions folded into
+  `…` right after a `main` / job root (0 otherwise).
+- `unresolved` (`who-*`): one item per repo and kind (`dynamic_table`,
+  `dynamic_collection`), with `access`, `repo`, `count` and the `functions`;
+  `trace` has the same items under `unresolved.dynamic_writes`.
 - `confidence` on an entrypoint is the weakest link on the path *and* the
   access.
 
