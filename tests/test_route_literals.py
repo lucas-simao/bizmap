@@ -560,15 +560,16 @@ def item(item_id: str):
     assert hits == {"api/entrypoint:http:GET:/v1/items/{item_id}"}, hits
 
 
-def test_uncalled_helper_keeps_its_literal(tmp_path: Path) -> None:
-    """No caller found → the link stays on the helper (origin: path_helper)."""
+def test_uncalled_helper_is_navigation(tmp_path: Path) -> None:
+    """No caller seen sending it → a URL builder, not a request: no link
+    (round 45 review; before, the link stayed on the helper as `path_helper`)."""
     web, api = _project(
         tmp_path,
         {"src/orphan.ts": "export const orderPath = (id: string) => `${window.base}/api/v1/orders/${id}`;\n"},
     )
     graph = scan_paths([web, api])
     edges = [e for e in graph.edges.values() if e.type == "calls_http" and e.from_id.endswith("orderPath")]
-    assert len(edges) == 1 and edges[0].attrs.get("origin") == "path_helper", [(e.id, e.attrs) for e in edges]
+    assert edges == [], [(e.id, e.attrs) for e in edges]
 
 
 def test_unmapped_env_base_self_call_is_kept_cross_repo_is_not(tmp_path: Path) -> None:

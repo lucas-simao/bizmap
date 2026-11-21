@@ -885,10 +885,21 @@ def _config_call_url(
     wins over the wrapper's client base."""
     path_val, unresolved, http_method = _js_client_url_and_method("request", [config], consts)
     override = _per_call_base("request", [config], consts)
+    if override:
+        # `const V2 = `${API_BASE_URL}/api/v2`` was built before the import of
+        # API_BASE_URL was known: expand such holes once
+        override = _HOLE.sub(lambda m: _expand_hole(m, consts), override)
     base = override if override is not None else wrap.base
     if path_val is None and override is None:
         return None, unresolved, http_method
     return _join_route(base, path_val or ""), unresolved, http_method
+
+
+def _expand_hole(m: re.Match, consts: dict[str, str]) -> str:
+    val = consts.get(m.group(1))
+    if val and val.startswith(("{", "http://", "https://")) and m.group(0) not in val:
+        return val
+    return m.group(0)
 
 
 @dataclass
@@ -1283,18 +1294,24 @@ class JsAnalyzer:
                 tree, consts_by_mod.get(module) or {}, clients_by_mod.get(module) or {}
             )
         _import_wrappers(wrappers_by_mod, import_specs_by_mod, exports_by_mod, set(trees_by_mod))
-        if any(w.config_index is not None for ws in wrappers_by_mod.values() for w in ws.values()):
-            # helpers that call a config wrapper of another module
-            # (`reportsGet = (url) => requestWithStatus({ baseURL: V2, url })`)
-            visible = {mod: dict(ws) for mod, ws in wrappers_by_mod.items()}
+        cfg_by_mod = {
+            mod: {k: w for k, w in ws.items() if w.config_index is not None} for mod, ws in wrappers_by_mod.items()
+        }
+        if any(cfg_by_mod.values()):
+            # helpers that hand a config to a config wrapper, possibly of
+            # another module (`reportsGet = (url) => requestWithStatus({ baseURL: V2, url })`).
+            # Direct calls of a config wrapper stay with the route literals.
             for module, tree in trees_by_mod.items():
                 wrappers_by_mod[module] = _collect_wrappers(
                     tree,
                     consts_by_mod.get(module) or {},
                     clients_by_mod.get(module) or {},
-                    known=visible.get(module) or {},
+                    known=cfg_by_mod.get(module) or {},
                 )
             _import_wrappers(wrappers_by_mod, import_specs_by_mod, exports_by_mod, set(trees_by_mod))
+        for ws in wrappers_by_mod.values():
+            for k in [k for k, w in ws.items() if w.config_index is not None]:
+                del ws[k]
 
         for scan_n, (_path, rel_file, module, tree, _src) in enumerate(parsed):
             progress.counter("js/ts: analysing", scan_n, len(parsed))
@@ -1344,12 +1361,6 @@ class JsAnalyzer:
             chain_router = _is_router_factory(node)
             wrap = wrappers.get(raw_method) or wrappers.get(method)
             if wrap and args and not recv:
-                if wrap.config_index is not None:
-                    if wrap.config_index < len(args):
-                        self._record_config_wrapper_call(
-                            analysis, node, wrap, args[wrap.config_index], consts, rel_file, module
-                        )
-                    continue
                 if wrap.recv:
                     if wrap.path_index < len(args):
                         self._record_client_http(
@@ -1624,33 +1635,6 @@ class JsAnalyzer:
                 line=line_of(node),
                 symbol=_enclosing_symbol(node, module),
                 unresolved=path_unresolved or ("{" in composed),
-            )
-        )
-
-    def _record_config_wrapper_call(
-        self,
-        analysis: JsAnalysis,
-        node: Node,
-        wrap: JsHttpWrapper,
-        config: Node,
-        consts: dict[str, str],
-        rel_file: str,
-        module: str,
-    ) -> None:
-        url, unresolved, http_method = _config_call_url(wrap, config, consts)
-        if not url:
-            return
-        composed = _normalize_http_url(url)
-        if not _looks_like_http_path(composed):
-            return
-        analysis.http_calls.append(
-            JsHttpCall(
-                method=http_method,
-                url=composed,
-                file=rel_file,
-                line=line_of(node),
-                symbol=_enclosing_symbol(node, module),
-                unresolved=unresolved or ("{" in composed),
             )
         )
 

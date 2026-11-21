@@ -1,4 +1,4 @@
-# nodes (39)
+# nodes (38)
 column column:invoices.amount_cents
 column column:invoices.id
 column column:invoices.order_id
@@ -33,7 +33,6 @@ function api/function:main.main
 function api/function:main.registerOrderRoutes
 function billing/function:app.create_invoice
 function billing/function:app.payment_webhook
-function web/function:src.api.client.module
 function web/function:src.checkout.placeOrder
 function web/function:src.checkout.pollOrder
 table table:invoices
