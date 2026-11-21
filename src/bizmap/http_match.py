@@ -457,7 +457,8 @@ def classify_unresolved_http(
         return "path_dynamic"
     # A segment built by a call the scanner could not evaluate
     # (`/client{site(siteId)}/orders`) is a dynamic path, whatever the base.
-    if any("(" in p for p in other_holes):
+    # `{dynamic}` is what URL cleaning leaves for such an expression.
+    if any("(" in p or p == "dynamic" for p in other_holes):
         return "path_dynamic"
     if base_holes and not env_holes and "://" not in raw:
         return "base_unknown"
