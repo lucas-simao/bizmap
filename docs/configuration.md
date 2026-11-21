@@ -56,6 +56,7 @@ scan:                         # what is left out by default, and how to bring it
   include: ["*_test.go", .yarn]
   gitignore: true             # false: also scan .gitignored paths
   skip_generated: true        # false: also scan build caches, bundles, generated Go
+  include_tests: false        # true (or --include-tests): also scan Python and Go tests
   expand_star: false          # true: SELECT * reads every schema column
 
 discover:                     # only read by `bizmap scan --discover DIR`
@@ -163,13 +164,19 @@ Never scanned unless listed in `scan: include`: `node_modules`, `vendor`,
 - build caches (`.next`, `.yarn`, `.turbo`…, and `out/` / `coverage/` next to a
   project manifest), minified or bundled JS;
 - `.gitignore`d paths;
+- Python tests: `tests/` and `test/` directories, `test_*.py`, `*_test.py`,
+  `conftest.py`;
 - in Go: `*_test.go`, `testdata/`, `mocks/`, `*.pb.go`, `*_mock.go` and files
   headed `// Code generated … DO NOT EDIT.` — except generated data-access
   code (sqlc, or anything that runs `.Exec(` / `.Query…(`), which is always
   scanned.
 
 `bizmap scan` names what it skipped. `scan: include:` brings paths back;
-`skip_generated: false` and `gitignore: false` turn the defaults off.
+`skip_generated: false` and `gitignore: false` turn the defaults off;
+`include_tests: true` (or `bizmap scan --include-tests`) scans Python and Go
+tests. Calls made through an in-process test client (`TestClient`,
+`httpx.AsyncClient(transport=ASGITransport(app=…))`) are counted as
+`in-process test calls`, never as calls between services.
 `expand_star: true` (or `--expand-star`) makes `SELECT *` read every column of
 the table instead of the table as a whole.
 
