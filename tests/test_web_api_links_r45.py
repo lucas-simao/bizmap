@@ -66,8 +66,8 @@ const PORTAL_URL = import.meta.env.VITE_PORTAL_API_URL ?? '';
 export const createDeliveryHttpClient = (api: any) => {
   async function read<T>(url: string) { return (await api.get(url)).data; }
   return {
-    getSite: (id: string) => read(`/sites/${id}`),
-    getSummary: () => api.get('/portfolio/summary'),
+    getSite: (id: string) => read(`/delivery-sites/${id}`),
+    getSummary: () => api.get('/delivery-summary'),
   };
 };
 
@@ -77,6 +77,7 @@ export const portalDelivery = createDeliveryHttpClient(createClientApi(PORTAL_UR
 
 
 def test_internal_read_helper_keeps_both_bases(tmp_path: Path) -> None:
+    # paths the API does not serve: each call stays unresolved, once per base
     _workspace(tmp_path, {"src/delivery.ts": DELIVERY})
     graph = scan_path(tmp_path)
     site = sorted(_unresolved_from(graph, "getSite"))
