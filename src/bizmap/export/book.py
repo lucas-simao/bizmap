@@ -587,6 +587,11 @@ def build_book(
         cols_by_table[t].append(c)
     flow_by_table = _flows(data, index)
     database = data.get("database")
+    same_of = {
+        index[nid]: [index[o] for o in node.get("same_as") or [] if o in index]
+        for nid, node in raw_nodes.items()
+        if node.get("same_as") and nid in index
+    }
     table_rows = []
     for k, t in enumerate(table_ids):
         cid = f"t{k // TABLE_CHUNK}"
@@ -604,6 +609,13 @@ def build_book(
                 "chunk": cid,
             }
         )
+        row = table_rows[-1]
+        row["st"] = storage_of(node, row["db"])
+        flow = flow_by_table.get(t)
+        if flow:
+            row["fl"] = len(flow["in"]) + len(flow["out"])
+        if same_of.get(t):
+            row["same"] = same_of[t]
         chunk = chunks.setdefault(cid, {"tables": {}, "fns": {}})
         chunk["tables"][str(t)] = {
             "cols": [[labels[c].rsplit(".", 1)[-1], str(nodes[c].get("data_type") or "")] for c in sorted(cols_by_table.get(t, []))],
@@ -660,6 +672,9 @@ def build_book(
 
     if table.named:
         chunks["s0"] = {"schemas": table.named}
+    # every feeds edge, for the central data-flow page (its own small chunk)
+    flow_rows = _flow_page_rows(data, index, order, raw_nodes)
+    chunks["flow"] = {"rows": flow_rows}
     chunk_ids = sorted(chunks, key=lambda c: (c[0], int(c[1:]) if c[1:].isdigit() else 0))
     chunk_no = {c: n for n, c in enumerate(chunk_ids)}
     chunks["names"] = {
@@ -692,6 +707,7 @@ def build_book(
         "risks": risks,
         "chunks": chunk_ids,
         "routeDomain": {str(e): d for e, d in route_domain.items()},
+        "flows": len(flow_rows),
         "docs": {"spec": sum(1 for v in docs.values() if v.get("src") == "spec"),
                  "swag": sum(1 for v in docs.values() if v.get("src") == "swag"),
                  "comment": sum(1 for v in docs.values() if v.get("src") == "comment"),
@@ -730,6 +746,61 @@ def _flows(data: dict[str, Any], index: dict[str, int]) -> dict[int, dict[str, l
         out.setdefault(b, {"in": [], "out": []})["in"].append([a, conf, cols, path, total])
         out.setdefault(a, {"in": [], "out": []})["out"].append([b, conf, cols, path, total])
     return out
+
+
+_ENGINE_LABEL = {"postgres": "Postgres", "mysql": "MySQL", "sqlite": "SQLite", "sqlserver": "SQL Server"}
+
+
+def storage_of(node: dict[str, Any], db: str) -> str:
+    """What kind of store a table / view / collection lives in, for labels:
+    ``Firestore``, ``Postgres``, ``MySQL``… or plain ``SQL`` when unknown."""
+    low = (db or "").lower()
+    if node.get("type") == "collection" or low.startswith("firestore"):
+        return "Firestore"
+    engine = str(node.get("engine") or "")
+    if engine in _ENGINE_LABEL:
+        return _ENGINE_LABEL[engine]
+    for key, lbl in (("postgres", "Postgres"), ("pg", "Postgres"), ("mysql", "MySQL"), ("sqlite", "SQLite")):
+        if key in re.split(r"[^a-z]+", low) or low.startswith(key + ":"):
+            return lbl
+    return "SQL"
+
+
+def _flow_page_rows(
+    data: dict[str, Any], index: dict[str, int], order: list[str], raw_nodes: dict[str, dict[str, Any]]
+) -> list[list[Any]]:
+    """``[source, destination, confidence, columns, functions, evidence, via_total]``
+    per ``feeds`` edge; columns ``[from, to, confidence, transformed, same-name]``,
+    functions: the path's function indices, evidence ``file:line``."""
+    rows = []
+    for edge in data.get("edges") or []:
+        if edge.get("type") != "feeds":
+            continue
+        a, b = index.get(edge["from"]), index.get(edge["to"])
+        if a is None or b is None:
+            continue
+        cols = [
+            [
+                str(c.get("from", "")).split(".", 1)[-1],
+                str(c.get("to", "")).split(".", 1)[-1],
+                str(c.get("confidence") or ""),
+                1 if c.get("transform") else 0,
+                1 if c.get("match") == "name" else 0,
+            ]
+            for c in edge.get("column_map") or []
+        ]
+        via = (edge.get("via") or [{}])[0] or {}
+        fns = [index[str(p)] for p in via.get("path") or [] if str(p) in index]
+        if not fns:
+            fns = sorted({index[str(c.get("fn"))] for c in edge.get("column_map") or [] if str(c.get("fn") or "") in index})
+        ev = edge.get("evidence") or via.get("evidence") or {}
+        if isinstance(ev, dict) and ev.get("file"):
+            evidence = f"{ev['file']}:{ev['line']}" if ev.get("line") else str(ev["file"])
+        else:  # the function that copies the values
+            evidence = next((e for e in (_evidence(raw_nodes[order[f]]) for f in fns) if e), "")
+        total = int(edge.get("via_total") or len(edge.get("via") or []) or 1)
+        rows.append([a, b, str(edge.get("confidence") or ""), cols, fns, evidence, total])
+    return rows
 
 
 def http_pairs_self(http_out: list[list[int]], nsvc: list[int], ntype: list[int]):

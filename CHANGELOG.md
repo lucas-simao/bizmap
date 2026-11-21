@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Added
+
+- **HTML: a central "Data flow" page** (`#/flow`) listing every `feeds` edge:
+  source → destination with the kind of each end (collection / table / view),
+  its store (Firestore / Postgres / MySQL / SQLite / SQL, from `db` and the
+  repo's SQL driver), its repo, the confidence, the `column_map` (expandable,
+  "table level" when empty) and the evidence (function and `file:line`).
+  Filters by repo (source or destination), by store and by text, with a ★
+  "Firestore → Postgres" shortcut (or "Firestore → SQL") and "Between
+  different stores"; copies between stores come first. Reached from the top
+  navigation ("Data flow (N)") and a counter on the overview; a row opens the
+  destination's table page. Rendered 200 rows at a time; the rows travel in
+  their own small `flow` chunk. With no `feeds` (or an older graph) the page
+  explains what creates one.
+- Tables carry an `engine` (`postgres`, `mysql`, `sqlite`, `sqlserver`) when
+  the repo imports a single SQL driver family (`jackc/pgx`, `lib/pq`, `pg`,
+  `psycopg`, `mysql2`…).
+
+### Changed
+
+- **Search tells a collection from a table**: "collection · Firestore",
+  "table · Postgres", "view", "column" / "field · Firestore", with the repo;
+  tables and collections with data flow rank first on a tie and carry a
+  "flow N" badge. The table list and table pages show the same labels and
+  badge.
+- The same collection in the same Firestore base seen by several repos is
+  linked: the collection page lists the other repos that use it ("The same
+  collection in other repos"), the table list says "also in …".
+- **Firestore base label**: a literal project id in a helper command
+  (`cmd/<tool>/` other than `cmd/api|server|…`, `scripts/`, `tools/`, tests)
+  no longer becomes the repo's base. A collection gets the project of the
+  client in the files that access it (the service's own files first); when
+  they name none, the repo's label (`firestore:default` unless the service
+  itself names one project).
+
 ## 0.11.0 — 2026-11-21
 
 ### Added

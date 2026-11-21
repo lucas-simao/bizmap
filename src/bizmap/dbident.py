@@ -153,6 +153,9 @@ class ConnIndex:
     named: set[str] = field(default_factory=set)  # every database name seen
     unnamed_conns: int = 0
     firestore: str | None = None
+    # file -> Firestore project its own client names (`firestore.NewClient(ctx, "p")`)
+    fs_file_project: dict[str, str] = field(default_factory=dict)
+    engines: set[str] = field(default_factory=set)  # SQL drivers imported in the repo
 
     def add(self, rel: str, var: str, db: str | None) -> None:
         if not db:
@@ -271,8 +274,16 @@ def build_index(texts: dict[str, str], raw_config: dict[str, Any] | None) -> Con
         text = texts[rel]
         if _FS_CLIENT_RE.search(text):
             fs_seen = True
-            for rx in _FS_PROJECT_RES:
-                projects.update(rx.findall(text))
+            found = {p for rx in _FS_PROJECT_RES for p in rx.findall(text)}
+            if len(found) == 1:
+                idx.fs_file_project[rel] = next(iter(found))
+            if not is_aux_file(rel):
+                # a literal project in a helper command (`cmd/snapshot`), a
+                # script or a test names that tool's client, not the repo's
+                projects.update(found)
+        for engine, rx in _ENGINE_RES:
+            if engine not in idx.engines and rx.search(text):
+                idx.engines.add(engine)
         if not _CTOR_RE.search(text) and "cursor(" not in text and "Begin" not in text and "connect(" not in text:
             continue
         dsn_vars: dict[str, str] = {}
@@ -316,6 +327,51 @@ def build_index(texts: dict[str, str], raw_config: dict[str, Any] | None) -> Con
     return idx
 
 
+# SQL drivers / ORMs by engine: a repo importing only one family labels its
+# tables with it (``engine``), the page shows "table · Postgres"
+_ENGINE_RES = [
+    ("postgres", re.compile(
+        r"jackc/pgx|lib/pq|\bpsycopg2?\b|\basyncpg\b|['\"]pg['\"]|['\"]pg-promise['\"]|['\"]postgres['\"]|"
+        r"@neondatabase|drizzle-orm/(?:node-)?postgres|drizzle-orm/pg|postgres(?:ql)?://|gorm\.io/driver/postgres|"
+        r"provider\s*=\s*\"postgresql\""
+    )),
+    ("mysql", re.compile(r"go-sql-driver/mysql|['\"]mysql2?(?:/promise)?['\"]|\bpymysql\b|\bMySQLdb\b|mysql://|gorm\.io/driver/mysql")),
+    ("sqlite", re.compile(r"go-sqlite3|modernc\.org/sqlite|better-sqlite3|['\"]sqlite3['\"]|\bimport sqlite3\b|sqlite://")),
+    ("sqlserver", re.compile(r"go-mssqldb|['\"]mssql['\"]|\bpyodbc\b|sqlserver://")),
+]
+
+
+_AUX_DIR_RE = re.compile(
+    r"(^|/)(scripts?|tools?|hack|examples?|testdata|tests?|__tests__|e2e|fixtures|seed(s|ers?)?|migrations?)/"
+)
+
+
+def is_aux_file(rel: str) -> bool:
+    """A helper command / script / test: ``cmd/<tool>/`` other than the
+    service's own binary (``cmd/api``, ``cmd/server``…), ``scripts/``,
+    ``tools/``, tests."""
+    rel = rel.replace("\\", "/")
+    if _AUX_DIR_RE.search(rel) or re.search(r"(_test\.go|\.(test|spec)\.[jt]sx?|(^|/)test_[^/]+\.py)$", rel):
+        return True
+    m = re.search(r"(^|/)cmd/([^/]+)/", rel)
+    return bool(m) and m.group(2).lower() not in _MAIN_CMDS
+
+
+_MAIN_CMDS = {"api", "server", "service", "app", "main", "web", "http", "grpc", "worker", "svc"}
+
+
+def _collection_db(files: set[str], idx: ConnIndex) -> str | None:
+    """``firestore:<project>`` for a collection from the files that access it:
+    the service's own files first; a project only when their clients name it,
+    else the repo's label."""
+    main = {f for f in files if not is_aux_file(f)}
+    pool = main or files
+    projs = {idx.fs_file_project.get(f) for f in pool}
+    if len(projs) == 1 and None not in projs:
+        return f"firestore:{next(iter(projs))}"
+    return idx.firestore
+
+
 _CHAINED_RE = re.compile(
     r"([\w.]+)\.(?:cursor|connect|acquire|begin|Begin|session|connection)\([^()]*\)\s*\.\s*"
     r"(?:execute|executemany|query|Query|Exec|QueryContext|ExecContext|fetch|fetchrow)\s*\("
@@ -357,9 +413,20 @@ def _table_of(to_id: str) -> str | None:
 def assign_dbs(graph: Graph, texts: dict[str, str], idx: ConnIndex) -> None:
     """Set ``db`` on table / view / collection nodes the code places in a database."""
     if idx.firestore:
+        access: dict[str, set[str]] = defaultdict(set)
+        for edge in graph.edges.values():
+            if edge.type in ("reads", "writes") and edge.evidence is not None:
+                node = graph.nodes.get(edge.to_id)
+                if node is not None and node.type == "collection":
+                    access[edge.to_id].add(edge.evidence.file)
         for node in graph.nodes.values():
             if node.type == "collection" and not node.attrs.get("db"):
-                node.attrs["db"] = idx.firestore
+                node.attrs["db"] = _collection_db(access.get(node.id, set()), idx) or idx.firestore
+    if len(idx.engines) == 1:
+        engine = next(iter(idx.engines))
+        for node in graph.nodes.values():
+            if node.type in ("table", "view") and not node.attrs.get("external") and not node.attrs.get("engine"):
+                node.attrs["engine"] = engine
     if not idx.named:
         return
     only = idx.only_db()
