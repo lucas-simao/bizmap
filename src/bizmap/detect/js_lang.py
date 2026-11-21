@@ -390,6 +390,9 @@ def _js_client_url_and_method(
         return None, False, http_method
     first = args[0]
     first = unwrap_callee_expr(first) or first
+    if method == "request" and first.type == "identifier" and len(args) == 1:
+        # `api.request(config)`: the method is whatever the config says
+        http_method = "{dynamic}"
     if first.type == "object":
         mnode = _object_prop_node(first, ("method", "httpMethod", "http_method"))
         unode = _object_prop_node(first, ("url", "path", "href"))
@@ -397,6 +400,9 @@ def _js_client_url_and_method(
             mval, _u = _resolve_js_string(mnode, consts)
             if mval:
                 http_method = mval.upper()
+        elif method == "request" and any(c.type == "spread_element" for c in first.named_children):
+            # `api.request({ ...config, validateStatus })`: method from the spread config
+            http_method = "{dynamic}"
         if unode is not None:
             path_val, unresolved = _resolve_js_string(unode, consts)
         return path_val, unresolved, http_method
@@ -894,6 +900,33 @@ def _config_call_url(
     if path_val is None and override is None:
         return None, unresolved, http_method
     return _join_route(base, path_val or ""), unresolved, http_method
+
+
+_CONFIG_OWN_KEYS = {"url", "baseurl", "method", "path", "prefixurl"}
+
+
+def _passes_config(arg: Node, pname: str) -> bool:
+    """`api.request(config)` or `api.request({ ...config, validateStatus })`:
+    the caller's config reaches the client. An object that sets its own
+    `url` / `baseURL` / `method` is not a pass-through (its keys would win)."""
+    arg = unwrap_callee_expr(arg) or arg
+    if arg.type == "identifier":
+        return text(arg) == pname
+    if arg.type != "object":
+        return False
+    spread = False
+    for child in arg.named_children:
+        if child.type == "spread_element":
+            inner = child.named_children[0] if child.named_children else None
+            if inner is not None and text(inner) == pname:
+                spread = True
+        elif child.type == "pair":
+            key = child.child_by_field_name("key")
+            if key is not None and _unquote(text(key)).lower() in _CONFIG_OWN_KEYS:
+                return False
+        elif child.type in {"shorthand_property_identifier"} and text(child).lower() in _CONFIG_OWN_KEYS:
+            return False
+    return spread
 
 
 def _expand_hole(m: re.Match, consts: dict[str, str]) -> str:
@@ -2429,7 +2462,7 @@ def _collect_wrappers(
                     continue
                 args = call_args(node)
                 recv = _receiver_ident(node)
-                if not args or text(args[0]) != pname or not _is_known_http_client(recv, clients, node):
+                if not args or not _passes_config(args[0], pname) or not _is_known_http_client(recv, clients, node):
                     continue
                 wrappers[name] = JsHttpWrapper(
                     method="", base=(clients.get(recv) or "").rstrip("/"), path_index=-1, config_index=i
