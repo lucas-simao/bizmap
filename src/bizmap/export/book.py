@@ -480,6 +480,7 @@ def build_book(
     for s, row in enumerate(svc_rows):
         row["screens"] = 0
         row["clients"] = 0
+        row["uses"] = 0
         row["unmatched"] = 0
         row["hidden_calls"] = 0
         callers = [i for i in range(row_start(nsvc, s), row_end(nsvc, s))
@@ -527,7 +528,30 @@ def build_book(
             # no UI files (a Vite app with only .ts): the calling files are the screens
             screens = [{"f": c["f"], "g": c["g"], "via": c["fns"], "r": c["r"], "u": c["u"]} for c in clients]
         linked = sum(1 for c in clients if c["ui"] or is_ui_file(c["f"])) if s in has_ui else len(clients)
+        # the routes this service uses, one row per route: who in the code calls it.
+        # Screens come per route (a screen reaches the function that calls this
+        # route), never per client file: a file with five calls is not five uses.
+        uses: dict[int, dict[str, Any]] = {}
+        for c in clients:
+            for t, g in c["r"]:
+                row_u = uses.setdefault(t, {"r": t, "g": 1, "files": [], "ui": set()})
+                row_u["g"] = min(row_u["g"], g)
+                row_u["files"].append(c["f"])
+        if s in has_ui:
+            for sc in screens:
+                for t, _g in sc["r"]:
+                    if t in uses:
+                        uses[t]["ui"].add(sc["f"])
+        uses_rows = []
+        for t in sorted(uses, key=lambda t: (nsvc[t], labels[t].split(" ", 1)[-1].lower(), labels[t])):
+            u = uses[t]
+            uses_rows.append({"r": t, "g": u["g"], "s": (docs.get(t) or {}).get("sum", ""),
+                              "files": sorted(set(u["files"])), "ui": sorted(u["ui"])[:20], "nui": len(u["ui"])})
         chunks[cid] = {"screens": screens, "clients": clients, "fns": fns}
+        row["uses"] = len(uses_rows)
+        if uses_rows:  # its own chunk: the screens page does not parse it
+            chunks[f"x{s}"] = {"uses": uses_rows}
+            row["uses_chunk"] = f"x{s}"
         row["screens"] = len(screens)
         row["clients"] = len(clients)
         row["clients_linked"] = linked

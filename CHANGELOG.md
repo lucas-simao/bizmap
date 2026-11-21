@@ -4,6 +4,14 @@
 
 ### Added
 
+- Front-end pages list **the API routes they use** ("API routes web uses"),
+  by API and domain: method, path, summary, and the screens (or client files)
+  that call each one; likely links marked. The service page shows the count
+  per API. A route's screens are the ones that reach the function calling
+  that route, not every screen of its client file.
+- Screens page text has a singular ("1 screen calls the API…").
+- A comment that only restates the route ("List is GET /widgets.") is no
+  longer used as a summary.
 - **Front ends link to the API through their client modules.** The chain page
   → hook → client method → route now reaches the graph for the shapes React /
   Vite fronts use:
@@ -21,7 +29,9 @@
 - A client made by a factory keeps its argument's env:
   `createClientApi(import.meta.env.X ?? '')`, a base built in a local and
   passed as `axios.create({ baseURL })`, and an instance passed inline to
-  another factory. Those calls are no longer `base_unknown`.
+  another factory. Those calls are no longer `base_unknown`. A factory made
+  twice with two clients (the app's and a portal's) calls through both bases;
+  consts follow `as string | undefined` and `?? ''` to the env.
 - Fictional repro `tests/test_web_api_links.py` (two Go/echo APIs and a
   React/Vite front).
 

@@ -107,6 +107,9 @@ files counts.
 - **Calls with no route** lists the calls that matched no scanned route
   (`unresolved_http`), for every service, by reason, with what each reason
   means.
+- **API routes it uses** (on a front-end, or any service that calls an API):
+  every route of the scanned APIs its code calls, by API and domain, with the
+  summary and the screens (or client files) that call it.
 - Each API route lists **who consumes it**: the screens first, then the calling
   functions.
 - Links matched by heuristic (a path found in the code matched to a route by
