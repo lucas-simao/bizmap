@@ -8,7 +8,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from bizmap import dataflow, dbident, progress
+from bizmap import dataflow, dbident, fsapply, progress
 from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
 from bizmap.detect.js_lang import JsAnalysis, JsAnalyzer
 from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer
@@ -2446,11 +2446,40 @@ def _relink_queues_from_graph(graph: Graph, services: dict[str, str]) -> None:
                 )
 
 
-def _apply_dataflow(graph: Graph, root: Path, cfg: ScanConfig, files: list[Path]) -> None:
+def _warn_graph(graph: Graph, msg: str) -> None:
+    existing = list(graph.attrs.get("warnings") or [])
+    if msg not in existing:
+        existing.append(msg)
+    graph.attrs["warnings"] = existing
+
+
+def _apply_js_firestore(graph: Graph, root: Path, js_files: list[Path], analysis: JsAnalysis) -> dict[str, str]:
+    """Firestore reads / writes, triggers and Pub/Sub publishes in JS/TS (a
+    text pass over the files that use Firestore). Returns the texts read."""
+    if not js_files:
+        return {}
+    texts = source_texts(root, js_files)
+    try:
+        calls = [(c.caller, c.callee, c.file, c.line) for c in getattr(analysis, "calls", []) or []]
+        fsapply.apply_js_firestore(
+            graph, texts, dict(analysis.functions or {}), dict(getattr(analysis, "function_ends", {}) or {}), calls
+        )
+    except Exception as exc:  # noqa: BLE001 - never lose the scan over Firestore
+        _warn_graph(graph, f"JS Firestore pass failed ({type(exc).__name__}: {exc}); skipped")
+    return texts
+
+
+def _apply_dataflow(
+    graph: Graph, root: Path, cfg: ScanConfig, files: list[Path], known: dict[str, str] | None = None
+) -> None:
     """``db`` on tables and ``feeds`` between them (a text pass after the
     detectors; a failure there only adds a warning)."""
     try:
-        texts = source_texts(root, files)
+        known = known or {}
+        texts = {
+            **source_texts(root, [f for f in files if os.path.relpath(f, root).replace(os.sep, "/") not in known]),
+            **known,
+        }
         idx = dbident.build_index(texts, cfg.raw)
         dbident.assign_dbs(graph, texts, idx)
         dataflow.apply(graph, root, texts, firestore=idx.firestore or False)
@@ -2618,6 +2647,7 @@ def _scan_one(
     go_sql, go_prop = _apply_go(graph, go_analysis, schema, expand_star=expand)
     py_sql, py_prop = _apply_python(graph, py_analysis, schema, expand_star=expand)
     _apply_js(graph, js_analysis, schema)
+    js_texts = _apply_js_firestore(graph, root, js_files, js_analysis)
     timings.sql += go_sql + py_sql
     t_prop = time.perf_counter()
     _apply_sql_functions(graph, schema)
@@ -2756,6 +2786,10 @@ def _scan_one(
         )
         node.attrs["queue_events"] = bucket
     _link_firestore_triggers(graph)
+    try:
+        fsapply.apply_push_subscriptions(graph, root, cfg.raw)
+    except Exception as exc:  # noqa: BLE001 - a config hint never costs the scan
+        _warn_graph(graph, f"push subscriptions skipped ({type(exc).__name__}: {exc})")
     if cfg.path:
         apply_overrides(graph, cfg.path)
     span_cache: dict = {}
@@ -2763,7 +2797,7 @@ def _scan_one(
     split_factory_members(graph, root, span_cache)
     split_go_route_closures(graph, root, span_cache)  # its own edge index: after the JS moves
     split_js_inline_handlers(graph)
-    _apply_dataflow(graph, root, cfg, [*go_files, *py_files, *js_files])
+    _apply_dataflow(graph, root, cfg, [*go_files, *py_files, *js_files], js_texts)
     timings.propagate += go_prop + py_prop + (time.perf_counter() - t_prop)
     progress.done(f"{graph.repo}: graph", t_graph)
 
