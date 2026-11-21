@@ -35,7 +35,7 @@ NODE_TYPES = (
     "queue",
     "view",
 )
-EDGE_TYPES = ("calls", "reads", "writes", "triggers", "calls_http", "enqueues", "derives_from")
+EDGE_TYPES = ("calls", "reads", "writes", "triggers", "calls_http", "enqueues", "derives_from", "feeds")
 
 
 def parse_confidence(value: str | Confidence | None) -> Confidence:

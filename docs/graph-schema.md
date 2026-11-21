@@ -53,12 +53,12 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 | --- | --- | --- |
 | `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:<kind>:<key>` | `kind` (`http` \| `scheduled_job` \| `firestore` \| `celery_task` \| `worker` \| `pubsub` \| `cloud_task` \| `firebase_http` \| `firebase_call`), `method`, `path`, `symbol`, `why`, `evidence`, optional `confidence`, `candidates`, `unresolved` (const path not in the scan), optional `unresolved_calls`, optional `collection` / `event`, optional `dynamic_table` / `dynamic_table_unknown` (flag/count when a reachable origin writes `table:unknown`; never a reach edge) |
 | `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `end_line` (last line of the definition) and `start_line` (first line, when it differs from `evidence.line`; for an inline route handler `evidence.line` is where the registration call starts — in a chain like `new Hono().post(a).post(b)` or `router.route('/x').get(a)`, the chain's first line — and `start_line`/`end_line` are the handler function's own lines), optional `parent` (enclosing factory/function for members and route closures), optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http`, optional `route_literals` (JS/TS API-looking path strings `{path, method?, evidence}` kept for registry rematch) |
-| `table` | `table:<name>` | `name`; optional `external` (system catalogs / `storage.*` / `vault.*` / `auth.*`), `kind` (`external_relation` \| `unresolved_relation`), `dropped` (still referenced after `DROP TABLE`), `candidates` (dynamic/`unknown`), `rls`, `policies` |
+| `table` | `table:<name>` | `name`; optional `db` (database the code reaches it through, see [Data flow](#data-flow-between-tables-feeds)), `db_candidates`, `same_as`, `external` (system catalogs / `storage.*` / `vault.*` / `auth.*`), `kind` (`external_relation` \| `unresolved_relation`), `dropped` (still referenced after `DROP TABLE`), `candidates` (dynamic/`unknown`), `rls`, `policies` |
 | `view` | `view:<name>` | `name`, `kind` (`view` \| `unresolved_relation`), optional `materialized` |
 | `column` | `column:<table>.<column>` | `table`, `name`, `data_type`, `nullable`, optional `why` |
 | `db_trigger` | `db_trigger:<name>` | `name`, `table`, `timing`, `events`, `function`, `evidence` |
-| `collection` | `collection:<name>` | `name` (Firestore collection) |
-| `queue` | `queue:<kind>:<name>` | `kind` (`celery` \| `rq` \| `cloud_tasks` \| `pubsub` \| `firestore`), `name` |
+| `collection` | `collection:<name>` | `name` (Firestore collection); optional `db` (`firestore:<project\|default>`), `same_as` |
+| `queue` | `queue:<kind>:<name>` | `kind` (`celery` \| `rq` \| `cloud_tasks` \| `pubsub` \| `firestore` \| `topic`), `name` |
 
 On a merged registry graph, function / entrypoint / queue ids are prefixed
 with the repo (`catalog/function:db.create_order`). Table, column, view,
@@ -88,6 +88,7 @@ picking an arbitrary match.
 | `calls_http` | `function` | `entrypoint` | HTTP client URL matched a scanned route (same repo or via `services:` env/host/URL). |
 | `enqueues` | `function` | `queue` | Celery/RQ/Cloud Tasks/Pub/Sub produce site. |
 | `derives_from` | `view` | `table` or `view` | View (or materialized view) is defined from these base relations. |
+| `feeds` | `table` / `view` | `table` or `collection` | Values read from one table are written to the other (often in another database). See [Data flow](#data-flow-between-tables-feeds). |
 
 Column-level `reads`/`writes` are emitted only when the SQL names columns.
 `SELECT *` and INSERT without a column list are **table-level** (unless
@@ -168,6 +169,91 @@ and 5+ characters, not inside logging calls) counts as `via: sql_key`.
 These reads/writes are `inferred` and propagate to entrypoints like any other.
 They are skipped when the function already executes that SQL, or reaches a
 function that does through the call graph, so exact edges stay exact.
+
+## Data flow between tables (`feeds`)
+
+`feeds` says a function **copies values** from one table into another, for
+example a service that reads `pedidos` in the orders database and upserts
+`resumo_pedido` in the summary database. It is a text pass over the function
+bodies the detectors already located; it never changes their `reads` /
+`writes` edges, and a graph with no such copy is unchanged (apart from `db`).
+
+```json
+{
+  "id": "feeds:table:pedidos->table:resumo_pedido",
+  "type": "feeds",
+  "from": "table:pedidos",
+  "to": "table:resumo_pedido",
+  "confidence": "exact",
+  "evidence": { "file": "sync/orders.go", "line": 21, "symbol": "sync.SyncOrders" },
+  "via": [
+    { "path": ["function:sync.SyncOrders"], "confidence": "exact",
+      "evidence": { "file": "sync/orders.go", "line": 21, "symbol": "sync.SyncOrders" } }
+  ],
+  "via_total": 1,
+  "column_map": [
+    { "from": "pedidos.valor_centavos", "to": "resumo_pedido.total",
+      "fn": "function:sync.SyncOrders", "confidence": "exact",
+      "evidence": { "file": "sync/orders.go", "line": 21, "symbol": "sync.SyncOrders" } }
+  ]
+}
+```
+
+A `feeds` edge is only created when a value is **seen** going from the read
+to the write:
+
+| How | `confidence` |
+| --- | --- |
+| In one function: the rows of `SELECT id, valor FROM pedidos` (Go `rows.Scan(&a, &o.Total)`, `QueryRow(...).Scan`; JS/TS `const { rows } = await a.query(...)`, `for (const p of rows)`, `(await a.query(...)).rows[0]`; Python `cur.execute(...)` then `fetchone()` / `fetchall()` / `for row in cur`, `row["valor"]`, `row.valor`, `row[1]`) reach the arguments of an `INSERT` / `UPDATE` / upsert, a Firestore `set` / `update` / `add`, or an ORM write the detectors saw on that line (`upsert({ update: { total: p.valor } })`). Struct / object literals, assignments and lists (`append`, `push`) are followed. `INSERT … SELECT` and `UPDATE … FROM` map in one statement, also in a SQL function body (`CREATE FUNCTION`). | `exact` |
+| Through calls in the same service: a reader passes the value to a writer (`s.writeSummary(ctx, o)`), or a writer uses what a reader returns (`orders, _ := repo.ListPaid(ctx)`), up to 2 calls deep; Celery / RQ `task.delay(...)` to the task. | `heuristic` |
+| Through a queue: the producer publishes a message built from the source (`queue.publish('pedido-pago', { orderId: o.id })`), the consumer of the same topic (`subscribe` / `consume` / `process` / BullMQ `Worker`) writes the message's fields. Also across repos in a joint scan or `registry merge`. `emit` / `on` events only link inside one repo. | `heuristic` |
+
+- `via`: up to 5 paths (functions, and the queue for a queue hop), strongest
+  first; `via_total` counts every path.
+- `column_map`: `{from, to, fn, confidence, evidence}` per mapped column.
+  `exact` when the value goes through unchanged in one function;
+  `heuristic` otherwise. `transform: true` when an expression or function
+  is in between (`sum(valor)`, `date_trunc('month', criado_em)`,
+  `Math.round(p.valor * 100)`, `decimal.NewFromFloat(o.Valor)`); `path` for
+  a value that crossed calls or a queue; `field` for the message field of a
+  queue hop. `match: "name"` (heuristic) is used only when a row was copied
+  whole and no column path was seen: columns with the same name on both
+  sides (not `id` / `created_at` / `updated_at`).
+- Never invented: a column only in `WHERE` is not mapped; a function that
+  reads A and writes B with no value in common (a permission check, a
+  lookup) creates nothing; a copy into the same table, a flow made only of
+  identifiers into identifier columns (`users.id -> orders.user_id`), or only
+  into columns declared as foreign keys to the source, is a reference, not a
+  `feeds`.
+- Queue producers and consumers keep what they publish / write per message
+  field on the function node (`dataflow_out` / `dataflow_in`), so a
+  `registry merge` can link them across repos. When a topic has no queue
+  node yet, a `queue:topic:<name>` node (`kind: topic`) is added.
+
+### Database identity (`db`)
+
+Table ids do not change: `db` is an attribute. It is set on a table / view
+when the code says which connection reaches it, and left out otherwise (the
+table is in the repo's database, as before):
+
+- a connection built from a DSN env var or config field —
+  `sql.Open("pgx", os.Getenv("ORDERS_DATABASE_URL"))`,
+  `pgxpool.New(ctx, cfg.OrdersDatabaseURL)`,
+  `new Pool({ connectionString: process.env.SUMMARY_DATABASE_URL })`,
+  `create_engine(settings.ORDERS_DATABASE_URL)`, `psycopg2.connect(os.environ["X"])`
+  — is named after the variable (`ORDERS_DATABASE_URL` → `orders_db`; a bare
+  `DATABASE_URL` names nothing), or by `databases:` in `bizmap.yaml`;
+- each SQL edge's call (`src.QueryContext`, `b.query`, `cur.execute`, through
+  `cursor()` / `BeginTx` / `connect()` / `with … as` aliases) picks the
+  connection;
+- a repo with exactly one named connection puts all its tables on it;
+- a table reached through two connections gets `db_candidates` instead;
+- Firestore clients (`firestore.NewClient`, `getFirestore()`,
+  `firestore.client()`) put collections on `firestore:<project>` (a literal
+  project id) or `firestore:default`.
+
+In a merged graph, the same table name with the same `db` in two repos gets
+`same_as` (the other node ids) on each node; nodes are not merged.
 
 ## Confidence
 

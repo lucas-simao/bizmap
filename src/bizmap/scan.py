@@ -8,7 +8,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from bizmap import dbident, progress
+from bizmap import dataflow, dbident, progress
 from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
 from bizmap.detect.js_lang import JsAnalysis, JsAnalyzer
 from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer
@@ -2164,6 +2164,7 @@ def relink_merged_graph(graph: Graph, services: dict[str, str] | None = None) ->
     _relink_http_from_graph(graph, services)
     _link_route_literals(graph)
     _relink_queues_from_graph(graph, services)
+    dataflow.link_queue_flows(graph)
     dbident.link_same_tables(graph)
 
 
@@ -2396,15 +2397,16 @@ def _relink_queues_from_graph(graph: Graph, services: dict[str, str]) -> None:
 
 
 def _apply_dataflow(graph: Graph, root: Path, cfg: ScanConfig, files: list[Path]) -> None:
-    """``db`` on tables (a text pass after the detectors; a failure there
-    only adds a warning)."""
+    """``db`` on tables and ``feeds`` between them (a text pass after the
+    detectors; a failure there only adds a warning)."""
     try:
         texts = source_texts(root, files)
         idx = dbident.build_index(texts, cfg.raw)
         dbident.assign_dbs(graph, texts, idx)
+        dataflow.apply(graph, root, texts, firestore=idx.firestore or False)
     except Exception as exc:  # noqa: BLE001 - never lose the scan over data flow
         existing = list(graph.attrs.get("warnings") or [])
-        existing.append(f"data-flow pass failed ({type(exc).__name__}: {exc}); db skipped")
+        existing.append(f"data-flow pass failed ({type(exc).__name__}: {exc}); feeds skipped")
         graph.attrs["warnings"] = existing
 
 

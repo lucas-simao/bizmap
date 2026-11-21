@@ -65,6 +65,14 @@ def qualify_graph(graph: Graph, repo: str | None = None, *, share_data: bool = F
         frm = id_map.get(edge.from_id, _qualify_id(edge.from_id, repo, _is_shared_node(edge.from_id, share_data)))
         to = id_map.get(edge.to_id, _qualify_id(edge.to_id, repo, _is_shared_node(edge.to_id, share_data)))
         eid = edge_id(edge.type, frm, to)
+        attrs = dict(edge.attrs)
+        if edge.type == "feeds":
+            from bizmap.dataflow import qualify_feed_attrs
+
+            attrs = qualify_feed_attrs(
+                attrs,
+                lambda i: id_map.get(i) or _qualify_id(i, repo, _is_shared_node(i, share_data)),
+            )
         out.edges[eid] = Edge(
             id=eid,
             type=edge.type,
@@ -72,7 +80,7 @@ def qualify_graph(graph: Graph, repo: str | None = None, *, share_data: bool = F
             to_id=to,
             confidence=edge.confidence,
             evidence=edge.evidence,
-            attrs=dict(edge.attrs),
+            attrs=attrs,
         )
     return out
 
@@ -136,6 +144,14 @@ def merge_graphs(graphs: list[Graph], *, version: str | None = None) -> Graph:
                 continue
             merged.nodes[nid] = Node(id=nid, type=node.type, attrs=dict(node.attrs))
         for edge in qualified.edges.values():
+            if edge.type == "feeds" and edge.id in merged.edges:
+                from bizmap.dataflow import merge_feed_attrs
+
+                existing = merged.edges[edge.id]
+                merge_feed_attrs(existing.attrs, edge.attrs)
+                if edge.confidence.value == "exact":
+                    existing.confidence = edge.confidence
+                continue
             merged.add_edge(
                 edge.type,
                 edge.from_id,
