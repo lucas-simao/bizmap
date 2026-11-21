@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.13.0 — 2026-11-21
+
 ### Added
 
 - **`bizmap who-writes` / `bizmap who-reads ENTITY`**: every function that
