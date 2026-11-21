@@ -2431,7 +2431,7 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
 def _relink_queues_from_graph(graph: Graph, services: dict[str, str]) -> None:
     """Re-match Cloud Tasks / Pub/Sub producers to consumer entrypoints after merge."""
     hints = _queue_hints(graph.attrs.get("queues") or {})
-    for node in graph.nodes.values():
+    for node in list(graph.nodes.values()):  # the loop may add queue nodes
         for ev in node.attrs.get("queue_events") or []:
             if str(ev.get("role") or "") != "produce":
                 continue
@@ -2453,8 +2453,11 @@ def _relink_queues_from_graph(graph: Graph, services: dict[str, str]) -> None:
                 produce_qid = edge.to_id
                 break
             if produce_qid is None:
-                produce_qid = queue_id(kind, str(ev.get("name") or "queue"))
-                graph.add_node(produce_qid, "queue", kind=kind, name=ev.get("name"))
+                name = str(ev.get("name") or "")
+                if not valid_queue_name(name):
+                    continue  # no name (an env var, a parameter) or an expression: no node
+                produce_qid = queue_id(kind, name)
+                graph.add_node(produce_qid, "queue", kind=kind, name=name)
             evidence = Evidence.from_dict(ev.get("evidence")) if ev.get("evidence") else None
             for eid in consumers:
                 graph.add_edge(
