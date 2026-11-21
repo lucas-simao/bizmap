@@ -24,7 +24,7 @@ CONFIDENCE_RANK = {
 }
 
 
-GRAPH_VERSION = "0.5.1"
+GRAPH_VERSION = "0.5.2"
 NODE_TYPES = (
     "entrypoint",
     "function",
@@ -238,6 +238,8 @@ class Graph:
         skipped = self.attrs.get("skipped")
         if skipped:
             payload["skipped"] = dict(sorted(skipped.items()))
+        if self.attrs.get("in_process_http"):
+            payload["in_process_http"] = int(self.attrs["in_process_http"])
         for key in ("inferred_services", "service_hints", "external_envs"):
             if self.attrs.get(key):
                 payload[key] = list(self.attrs[key])
@@ -282,6 +284,7 @@ class Graph:
         graph.attrs["inferred_services"] = data.get("inferred_services") or []
         graph.attrs["service_hints"] = data.get("service_hints") or []
         graph.attrs["external_envs"] = data.get("external_envs") or []
+        graph.attrs["in_process_http"] = int(data.get("in_process_http") or 0)
         graph.attrs["queues"] = data.get("queues") or {}
         graph.attrs["unresolved_http"] = data.get("unresolved_http") or []
         for raw in data.get("nodes") or []:

@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4   # the base commit is fetched if missing; fetch-depth: 0 also works
-      - uses: lucas-simao/bizmap@v0.5.1
+      - uses: lucas-simao/bizmap@v0.5.2
         with:
           path: .
 ```
