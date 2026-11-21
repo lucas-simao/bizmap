@@ -135,10 +135,14 @@ def assign_services(
     default = str(data.get("repo") or DEFAULT_SERVICE)
     split = split or []
     out: dict[str, str | None] = {}
-    for node in data.get("nodes") or []:
+    nodes = data.get("nodes") or []
+    # a multi-repo graph: unprefixed queues (`queue:pubsub:<topic>`) are shared
+    # by the repos that publish and consume them, like shared data
+    multi = any(id_repo(n["id"]) for n in nodes)
+    for node in nodes:
         nid = node["id"]
         repo = id_repo(nid) or node.get("repo")
-        if repo is None and node.get("type") in DATA_TYPES:
+        if repo is None and (node.get("type") in DATA_TYPES or (multi and node.get("type") == "queue")):
             out[nid] = None
             continue
         repo = str(repo or default)
