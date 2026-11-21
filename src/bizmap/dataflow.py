@@ -776,6 +776,10 @@ class RepoContext:
         return None
 
     def columns(self, tid: str) -> list[str] | None:
+        """Columns of a ``table:`` / ``view:`` node from the schema. A collection
+        never takes the columns of a SQL table that happens to share its name."""
+        if not _bare(tid).startswith(("table:", "view:")):
+            return None
         name = tid.split(":", 1)[-1]
         spec = self.schema_lower.get(name)
         if not spec:
@@ -1492,6 +1496,11 @@ class Analyzer:
             e = e[1:].strip()
         if e.startswith("...") :
             e = e[3:]
+        if self.fn.lang == "go" and e.endswith(")"):
+            # a type assertion `x.(map[string]any)`: the value itself
+            ta = re.search(r"\.\(\s*(?!type\b)[\w.*\[\]{} ]+\)$", e)
+            if ta and match_close(e, ta.start() + 1) == len(e) - 1:
+                return self.eval(e[: ta.start()], depth + 1)
         lit = self.m.lit(e)
         if lit is not None:
             return Str(lit.value, lit.dynamic)
