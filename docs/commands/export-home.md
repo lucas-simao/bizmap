@@ -148,9 +148,10 @@ Confidence reads the same everywhere: **exact**, **inferred**, **heuristic**
 
 On a 70k-node graph the page still opens at once: the index read on open holds
 only the summary, the cards and one small record per table / collection.
-The graph the engine needs (~7 MB on 70k nodes) is parsed on the first
-question; columns, the map's graph and the findings' full lists are read on
-first use. Long answers show 100 lines at a time, the matrix 30 columns at a
+The graph the engine needs is parsed on the first question, from slices of
+at most a few MB (on a 107k-node / 628k-edge graph: ~14 MB in all, next to
+~32 MB for the rest of the page); copies no query reads are left out.
+Columns, the map's graph and the findings' full lists are read on first use. Long answers show 100 lines at a time, the matrix 30 columns at a
 time, suggestions 12. It is still one offline file with no external
 dependency. A test opens a 40k-node synthetic graph and checks that the start
 screen draws a bounded number of elements, that search and the matrix page,
