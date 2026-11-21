@@ -1015,6 +1015,7 @@ class JsAnalyzer:
         _LITERAL_TOP.clear()
         _SCOPE_BINDINGS.clear()
         _ENCLOSING_SYMBOL.clear()
+        _CLIENT_BASES.clear()
         clear_typed_walks()
         clear_parent_index()
         yaml_constants = constants or {}
@@ -1650,6 +1651,23 @@ class JsAnalyzer:
                 client_unknown=client_unknown,
             )
         )
+        if override is None and path_val and base and base == clients.get(recv):
+            # the same client parameter given another base elsewhere: the
+            # call goes out through that base too
+            for other in _other_client_bases(module, recv, base):
+                url = _normalize_http_url(_join_route(other, path_val))
+                if url != composed and _looks_like_http_path(url):
+                    analysis.http_calls.append(
+                        JsHttpCall(
+                            method=http_method,
+                            url=url,
+                            file=rel_file,
+                            line=line_of(node),
+                            symbol=enclosing,
+                            unresolved=path_unresolved or ("{" in url),
+                            client_unknown=False,
+                        )
+                    )
         return True
 
     def _handler_symbol(
@@ -2235,11 +2253,12 @@ def _collect_consts(tree: Node) -> dict[str, str]:
                 pval = pair.child_by_field_name("value")
                 if key is None or pval is None:
                     continue
-                v, _u = _resolve_js_string(pval, consts)
+                v, _u = _resolve_js_string(_unwrap_fallback(pval), consts)
                 if v is not None:
                     consts[f"{name}.{_unquote(text(key))}"] = v
             continue
-        val, unresolved = _resolve_js_string(value, consts)
+        # `import.meta.env.X as string | undefined`, `raw ?? ''`: the env
+        val, unresolved = _resolve_js_string(_unwrap_fallback(value), consts)
         if val is not None:
             consts[name] = val
             _ = unresolved
@@ -3104,6 +3123,48 @@ def _resolve_specs_through_barrels(
                 specs[local] = hit
 
 
+# (module, client name) -> every base it was given: one factory instantiated
+# with two clients (`createDelivery(clientApi)`, `createDelivery(portalApi)`)
+# calls through both. Reset per `analyze`.
+_CLIENT_BASES: dict[tuple[str, str], list[str]] = {}
+_PARAM_HOLE = re.compile(r"^\{[a-z_$][A-Za-z0-9_$]*\}")
+
+
+def _is_bound_base(base: str) -> bool:
+    """A base that says where it goes: not empty and not still a factory
+    parameter hole (`{baseUrl}/api`); env placeholders are fine."""
+    return bool(base) and not _PARAM_HOLE.match(base)
+
+
+def _note_client_base(module: str, clients: dict[str, str], key: str, base: str) -> bool:
+    """Record ``base`` for ``key`` in ``module``; ``clients[key]`` keeps the
+    first bound base (stable across rounds). True when anything changed."""
+    seen = _CLIENT_BASES.setdefault((module, key), [])
+    changed = False
+    if base not in seen:
+        # a later round may only complete a base (`{X}/api` -> `{X}/api/v1`):
+        # that is the same base, not a second one
+        grown = [b for b in seen if _is_bound_base(b) and base.startswith(b)]
+        for b in grown:
+            seen[seen.index(b)] = base
+        if not grown:
+            seen.append(base)
+        while seen.count(base) > 1:
+            seen.remove(base)
+        changed = True
+    bound = [b for b in seen if _is_bound_base(b)]
+    pick = bound[0] if bound else seen[0]
+    if clients.get(key) != pick:
+        clients[key] = pick
+        changed = True
+    return changed
+
+
+def _other_client_bases(module: str, recv: str, base: str) -> list[str]:
+    """The other bound bases ``recv`` was given besides ``base``."""
+    return [b for b in _CLIENT_BASES.get((module, recv), []) if _is_bound_base(b) and b != base]
+
+
 def _propagate_client_bases(
     clients_by_mod: dict[str, dict[str, str]],
     import_specs_by_mod: dict[str, dict[str, tuple[str, str]]],
@@ -3198,11 +3259,9 @@ def _propagate_client_bases(
                     continue
             pname = params[i]
             for key in (pname, f"this.{pname}", f"self.{pname}"):
-                if dest_clients.get(key) != base:
-                    dest_clients[key] = base
+                if _note_client_base(dest_mod, dest_clients, key, base):
                     changed = True
-                if clients.get(key) != base:
-                    clients[key] = base
+                if _note_client_base(module, clients, key, base):
                     changed = True
         return changed
 

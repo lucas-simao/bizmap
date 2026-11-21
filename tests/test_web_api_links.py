@@ -457,3 +457,40 @@ def test_factory_base_variants_keep_the_env(tmp_path: Path, variant: str) -> Non
     assert urls and all(u.startswith("{VITE_CLIENT_API_URL}/api/v1/client/sites/") for u in urls), urls
     edges = {e.to_id for e in graph.edges.values() if e.type == "calls_http" and e.from_id == node.id}
     assert edges == {"portal-api/entrypoint:http:GET:/api/v1/client/sites/:siteId"}, edges
+
+
+def test_one_factory_made_twice_with_two_bases_calls_through_both(tmp_path: Path) -> None:
+    """The delivery client is made once per base: the app's client API and a
+    portal's (its env behind `as string | undefined` and `?? ''`, in another
+    file). Each method's call goes to the route through both envs."""
+    roots = build(tmp_path)
+    web = roots[2]
+    _write(
+        web,
+        "src/portal/config.ts",
+        "const rawApiUrl = import.meta.env.VITE_PORTAL_CLIENT_API_URL as string | undefined;\n"
+        "export const PORTAL_CLIENT_API_URL = rawApiUrl ?? '';\n",
+    )
+    _write(
+        web,
+        "src/portal/api/portalClient.ts",
+        "import { createClientApi } from '../../api/clientApiFactory';\n"
+        "import { createDeliveryHttpClient } from '../../api/delivery/client';\n"
+        "import { PORTAL_CLIENT_API_URL } from '../config';\n\n"
+        "export const portalClientApi = createClientApi(PORTAL_CLIENT_API_URL);\n"
+        "export const portalDelivery = createDeliveryHttpClient(portalClientApi);\n",
+    )
+    _write(
+        tmp_path,
+        "bizmap.yaml",
+        YAML.replace("env: VITE_CLIENT_API_URL", "env: [VITE_CLIENT_API_URL, VITE_PORTAL_CLIENT_API_URL]"),
+    )
+    graph = scan_paths(roots, config=tmp_path / "bizmap.yaml", base=tmp_path)
+    unresolved = graph.attrs.get("unresolved_http") or []
+    assert not [u for u in unresolved if u.get("reason") == "base_unknown"], unresolved
+    node = graph.nodes[_w("src.api.delivery.client.createDeliveryHttpClient.getSite")]
+    urls = sorted({c.get("url") for c in node.attrs.get("http_calls") or []})
+    assert urls == ["{VITE_CLIENT_API_URL}/api/v1/client/sites/:siteId",
+                    "{VITE_PORTAL_CLIENT_API_URL}/api/v1/client/sites/:siteId"], urls
+    edges = {e.to_id for e in graph.edges.values() if e.type == "calls_http" and e.from_id == node.id}
+    assert edges == {"portal-api/entrypoint:http:GET:/api/v1/client/sites/:siteId"}, edges
