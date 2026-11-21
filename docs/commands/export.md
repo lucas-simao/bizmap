@@ -37,19 +37,34 @@ reads and writes itself and through the functions it calls, its HTTP calls, and
 Parameters come from the route path (`:id`, `{id}`, `<id>`, `[id]`). When the
 graph has `params` / `returns` on a function, the panel shows them too.
 
-### Front-ends
+### Front-ends and API calls
 
 A service whose code is mostly TS/JS/Vue/Svelte and that calls APIs
 (`calls_http` or `unresolved_http`) is listed as a **front-end** when it has UI
 files (`.tsx`, `.jsx`, `.vue`, `.svelte`, a `pages/`, `screens/` or
 `components/` folder) or no routes of its own — a Vite app made of `.ts`
-files counts. Its page lists the **screens**: each file whose
-functions call the API, grouped by folder (the folder after `pages/`,
-`screens/`, `app/`, `views/`, `routes/`, `components/` or `features/` when there
-is one, else its own folder: `src/api/orders.ts` → `src/api`), with the routes
-each screen uses. **Calls with no route** lists the
-calls that matched no scanned route (`unresolved_http`), by reason: target not
-scanned, base URL unknown, path built at runtime, client unknown.
+files counts.
+
+- **Screens** are the UI files that reach an API call through the calls the
+  scan follows: a page → a hook → the API client → the route. Each screen lists
+  the routes it uses and the client functions it goes through. In a front-end
+  with no UI files, the files that make the calls are the screens.
+- **API client code** lists the files whose functions call an API (the client
+  layer) — for every service, not only front-ends — with the routes each one
+  reaches and the screens that use it. A client file with no screen linked is
+  usually called through a function reference (a hook's `queryFn`), which the
+  call graph does not follow.
+- **Calls with no route** lists the calls that matched no scanned route
+  (`unresolved_http`), for every service, by reason, with what each reason
+  means.
+- Each API route lists **who consumes it**: the screens first, then the calling
+  functions.
+- Links matched by heuristic (a path found in the code matched to a route by
+  its end) are dashed and marked *likely*; links from a full URL are solid.
+- Tests, mocks, fixtures, type declarations (`.d.ts`) and generated code
+  (`generated/`) call APIs too, but they are not who uses a route: they are
+  left out of screens, client code, consumers and counts, and the page says
+  how many calls it left out.
 
 Search (top right) finds routes, functions, tables and columns; links can be
 shared (`#/r/…`, `#/t/…`) and the back button works. **Map** keeps the service

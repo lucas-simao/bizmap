@@ -276,14 +276,16 @@ def test_demo_book_levels_screens_and_unmatched_calls() -> None:
     tree = {names[c] for c in handler[3]}
     assert {"service.Projects.Archive", "validate.Projects.Archive", "audit.Log"} <= tree
     # consumers: the web page that calls it
-    assert [names[c] for c in archive["c"]] == ["src.pages.projects.ProjectBoard.archive"]
+    assert [[names[c], g] for c, g in archive["c"]] == [["src.pages.projects.ProjectBoard.archive", 0]]
+    assert [f for _s, f in archive["sc"]] == ["src/pages/projects/ProjectBoard.tsx"] and archive["nh"] == 0
     # web screens, with the calls that matched no route
     web = next(s for s in index["services"] if s["kind"] == "web")
     assert web["screens"] == 11 and web["unmatched"] == 3
     screens = chunks[web["screen_chunk"]]["screens"]
     board = next(s for s in screens if s["f"].endswith("ProjectBoard.tsx"))
     assert board["g"] == "src/pages/projects" and board["u"] == 1 and len(board["r"]) == 5
-    reasons = sorted(u[2] for sc in screens for f in sc["fns"] for u in chunks[web["screen_chunk"]]["fns"][str(f)][8])
+    clients = chunks[web["screen_chunk"]]["clients"]
+    reasons = sorted(u[2] for c in clients for f in c["fns"] for u in chunks[web["screen_chunk"]]["fns"][str(f)][8])
     assert reasons == ["base_unknown", "path_dynamic", "target_not_scanned"]
 
 
@@ -555,7 +557,7 @@ def test_ts_only_client_without_routes_is_a_front_end_with_screens() -> None:
     assert web["kind"] == "web" and web["screens"] == 1
     screen = chunks[web["screen_chunk"]]["screens"][0]
     assert screen["f"] == "src/api/orders.ts" and screen["g"] == "src/api"
-    assert [chunks["names"]["l"][r] for r in screen["r"]] == ["GET /orders/:id"]
+    assert [[chunks["names"]["l"][r], g] for r, g in screen["r"]] == [["GET /orders/:id", 0]]
     # its code is listed by folder too, so its page is never empty
     assert [f[0] for f in web["folders"]] == ["src", "src/api"]
 
@@ -591,3 +593,57 @@ def test_library_table_count_is_its_own_access() -> None:
     assert kit["kind"] == "lib" and kit["tables"] == 1  # derived edges do not count
     assert [f[0] for f in kit["folders"]] == ["pkg/db", "pkg/text"]
     assert kit["folders"][0][1:4] == [10, 0, 1]
+
+
+def react_graph() -> dict:
+    """A React front end: pages call hooks, hooks call the API client, the
+    client calls the API; tests and generated clients call it too."""
+    g = vite_graph()
+    g["nodes"] += [
+        _n("web/function:src.pages.Orders.OrderPage", "function", evidence={"file": "src/pages/Orders.tsx", "line": 1}),
+        _n("web/function:src.hooks.useOrder", "function", evidence={"file": "src/hooks/useOrder.ts", "line": 1}),
+        _n("web/function:src.api.__tests__.orders.test.module", "function",
+           evidence={"file": "src/api/__tests__/orders.test.ts", "line": 1}),
+        _n("api/function:contract.generated.client.module", "function",
+           evidence={"file": "contract/generated/client.ts", "line": 1}),
+        _n("web/function:src.api.users.getUser", "function", evidence={"file": "src/api/users.ts", "line": 1}),
+    ]
+    g["edges"] += [
+        _e("calls", "web/function:src.pages.Orders.OrderPage", "web/function:src.hooks.useOrder"),
+        _e("calls", "web/function:src.hooks.useOrder", "web/function:src.api.orders.getOrder"),
+        _e("calls_http", "web/function:src.api.__tests__.orders.test.module", "api/entrypoint:http:GET:/orders/:id", "heuristic"),
+        _e("calls_http", "api/function:contract.generated.client.module", "api/entrypoint:http:GET:/orders/:id", "inferred"),
+        _e("calls_http", "web/function:src.api.users.getUser", "api/entrypoint:http:GET:/orders/:id", "heuristic"),
+    ]
+    return g
+
+
+def test_screens_are_ui_files_reaching_the_api_client_and_tests_are_left_out() -> None:
+    index, chunks = _book(react_graph())
+    names = chunks["names"]["l"]
+    web = next(s for s in index["services"] if s["name"] == "web")
+    wc = chunks[web["screen_chunk"]]
+    # the page reaches the API through a hook and the client
+    assert [(s["f"], [names[r] for r, _g in s["r"]]) for s in wc["screens"]] == [("src/pages/Orders.tsx", ["GET /orders/:id"])]
+    assert [names[f] for f in wc["screens"][0]["via"]] == ["src.api.orders.getOrder"]
+    # the client layer: both client files, the test file is not there; users.ts has no screen
+    clients = {c["f"]: c for c in wc["clients"]}
+    assert set(clients) == {"src/api/orders.ts", "src/api/users.ts"}
+    assert clients["src/api/orders.ts"]["ui"] == ["src/pages/Orders.tsx"] and clients["src/api/users.ts"]["ui"] == []
+    assert clients["src/api/users.ts"]["r"][0][1] == 1  # heuristic match: "likely"
+    assert web["clients"] == 2 and web["clients_linked"] == 1 and web["hidden_calls"] == 1
+    # the route: consumers without tests or generated code, screens listed
+    api_dom = next(d for d in index["domains"] if index["services"][d["svc"]]["name"] == "api")
+    route = chunks[api_dom["chunk"]]["routes"][0]
+    assert sorted(names[c] for c, _g in route["c"]) == ["src.api.orders.getOrder", "src.api.users.getUser"]
+    assert route["nh"] == 2 and [f for _s, f in route["sc"]] == ["src/pages/Orders.tsx"]
+
+
+def test_module_level_functions_read_as_modules_and_unmatched_calls_on_any_service() -> None:
+    g = react_graph()
+    g["unresolved_http"] = [{"from": "api/function:main.getOrder", "method": "GET", "url": "/billing/x",
+                             "keys": [], "reason": "target_not_scanned"}]
+    index, chunks = _book(g)
+    assert "src.api.__tests__.orders.test (module)" in chunks["names"]["l"]
+    api = next(s for s in index["services"] if s["name"] == "api")
+    assert api["kind"] == "api" and api["unmatched"] == 1 and api["screen_chunk"]
