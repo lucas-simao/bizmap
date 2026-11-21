@@ -18,6 +18,22 @@
 - Service pages are shorter: domains with endpoint counts and data; screens,
   HTTP calls, tables and code fold under one "more" section.
 - Fictional example `examples/export/api/openapi.json`.
+- Request and response JSON shown like Swagger UI: an **Example** tab (a real,
+  colored JSON with sample values: enum's first value, `example`, dates,
+  numbers) and a **Fields** tab (field, type, required, description, nested
+  fields indented).
+
+### Fixed
+
+- Front-end ↔ API noise: `mocks/` (MSW), `test-utils/`, `testing/`,
+  `stories/`, `cypress/`, `playwright/` folders and `*.cy.*` / `*.mock.*`
+  files are left out like tests; a service calling its own routes from code
+  none of its routes reaches (a generated SDK kept in the API repo) is too.
+- A screen that reaches a route only through a likely (heuristic) link is
+  marked likely in "Consumed by".
+- Service links (system page, side panel, map) leave out tests, mocks and
+  generated code, so every count matches; "1 screen" / "1 file"; a front-end
+  without UI files no longer reads "0 of 1 client files linked".
 
 ### Changed
 

@@ -33,7 +33,8 @@
       nothing: "Nothing here.", noResults: "No match.", evidence: "Defined at", service: "service", other: "other",
       shared: "shared", mapLead: "Services and the HTTP links between them (number = links). Click a service to open it.",
       generated: "Graph", domainsTitle: "Domains", screensTitle: "Screens", dataTitle: "Tables it reads and writes",
-      apis: "APIs", workers: "Workers", libs: "Libraries", httpTitle: "HTTP calls it makes", files: "files",
+      apis: "APIs", workers: "Workers", libs: "Libraries", httpTitle: "HTTP calls it makes", files: "files", file1: "file",
+      screensLeadFiles: "{n} files call the API (no UI files: each calling file is a screen).", screensLeadOne: "1 file calls the API (no UI files: it is the screen).",
       clientTitle: "API client code", clientFile: "API client", clientLead: "Files whose functions call an API (the client layer). Tests, mocks and generated code are left out.",
       screensLead2: "{n} screens call the API through its client code; {l} of {c} client files are linked to a screen by the calls the scan follows.",
       linkedLead: "{n} of {t} client files are linked to a screen by the calls the scan follows (a function passed by reference, as to a hook, is not followed).",
@@ -48,9 +49,10 @@
       reasonHelp_client_unknown: "An HTTP client the scan does not recognise.",
       moreDetails: "Screens, HTTP calls, tables and code of this service",
       endpoint: "endpoint", endpoints: "endpoints", openEndpoint: "Open an endpoint to see what it receives, returns, who uses it and the data it touches.",
-      requestBody: "Request body (JSON)", responses: "Responses", noFields: "(fields: export with the API's swagger.json / openapi.json)",
+      requestBody: "Request body (JSON)", responses: "Responses", noFields: "The fields of this type come from the API's swagger.json / openapi.json: export with it (see --openapi).",
       noDocs: "No API docs for this route yet (swag annotations or an OpenAPI file add the parameters and the JSON it receives and returns).",
       required: "required", example: "example", or: "or", writesTo: "Writes", readsFrom: "Reads", dataTitleShort: "Data",
+      tabExample: "Example", tabFields: "Fields", colField: "Field", colType: "Type", colDesc: "Description", oneOf: "one of",
       seeCode: "See in code", hideCode: "Hide code", calledByN: "Called by {n} functions in other services (no screen linked).",
       foldersTitle: "Code by folder", foldersRest: "Code no route reaches, by folder", colFolder: "Folder", colHttp: "HTTP calls", showMore: "Show {n} more (of {t})",
     },
@@ -80,7 +82,8 @@
       nothing: "Nada aqui.", noResults: "Nada encontrado.", evidence: "Definido em", service: "serviço", other: "outros",
       shared: "compartilhada", mapLead: "Serviços e os links HTTP entre eles (número = links). Clique num serviço para abri-lo.",
       generated: "Grafo", domainsTitle: "Domínios", screensTitle: "Telas", dataTitle: "Tabelas que lê e escreve",
-      apis: "APIs", workers: "Workers", libs: "Bibliotecas", httpTitle: "Chamadas HTTP que faz", files: "arquivos",
+      apis: "APIs", workers: "Workers", libs: "Bibliotecas", httpTitle: "Chamadas HTTP que faz", files: "arquivos", file1: "arquivo",
+      screensLeadFiles: "{n} arquivos chamam a API (sem arquivos de UI: cada arquivo que chama é uma tela).", screensLeadOne: "1 arquivo chama a API (sem arquivos de UI: ele é a tela).",
       clientTitle: "Código cliente da API", clientFile: "cliente da API", clientLead: "Arquivos cujas funções chamam uma API (a camada cliente). Testes, mocks e código gerado ficam de fora.",
       screensLead2: "{n} telas chamam a API pelo código cliente; {l} de {c} arquivos cliente estão ligados a uma tela pelas chamadas que o scan segue.",
       linkedLead: "{n} de {t} arquivos cliente estão ligados a uma tela pelas chamadas que o scan segue (função passada por referência, como para um hook, não é seguida).",
@@ -95,9 +98,10 @@
       reasonHelp_client_unknown: "Um cliente HTTP que o scan não reconhece.",
       moreDetails: "Telas, chamadas HTTP, tabelas e código deste serviço",
       endpoint: "endpoint", endpoints: "endpoints", openEndpoint: "Abra um endpoint para ver o que ele recebe, o que devolve, quem usa e os dados que toca.",
-      requestBody: "Corpo da requisição (JSON)", responses: "Respostas", noFields: "(campos: exporte com o swagger.json / openapi.json da API)",
+      requestBody: "Corpo da requisição (JSON)", responses: "Respostas", noFields: "Os campos deste tipo vêm do swagger.json / openapi.json da API: exporte com ele (veja --openapi).",
       noDocs: "Esta rota ainda não tem documentação de API (anotações do swag ou um arquivo OpenAPI trazem os parâmetros e o JSON que ela recebe e devolve).",
       required: "obrigatório", example: "exemplo", or: "ou", writesTo: "Grava em", readsFrom: "Lê", dataTitleShort: "Dados",
+      tabExample: "Exemplo", tabFields: "Campos", colField: "Campo", colType: "Tipo", colDesc: "Descrição", oneOf: "um de",
       seeCode: "Ver no código", hideCode: "Esconder código", calledByN: "Chamada por {n} funções de outros serviços (sem tela ligada).",
       foldersTitle: "Código por pasta", foldersRest: "Código que nenhuma rota alcança, por pasta", colFolder: "Pasta", colHttp: "Chamadas HTTP", showMore: "Mostrar mais {n} (de {t})",
     },
@@ -227,7 +231,7 @@
         h += '<div class="card" data-href="' + href + '"><h3>' + (risk ? '<span class="risk">⚠</span>' : "") + esc(s.name) +
              ' <span class="kind">' + esc(L[s.kind] || s.kind) + '</span></h3><div class="stats">';
         if (s.routes + s.jobs) h += num(s.routes + s.jobs) + " " + esc(L.routes) + " · " + s.domains.length + " " + esc(s.domains.length === 1 ? L.domain1 : L.domains) + "<br>";
-        if (s.kind === "web") h += num(s.screens) + " " + esc(L.screens) + (s.unmatched ? ' · <span class="risk">' + num(s.unmatched) + " " + esc(L.unmatched) + "</span>" : "") + "<br>";
+        if (s.kind === "web") h += num(s.screens) + " " + esc(s.screens === 1 ? L.screen : L.screens) + (s.unmatched ? ' · <span class="risk">' + num(s.unmatched) + " " + esc(L.unmatched) + "</span>" : "") + "<br>";
         h += num(s.functions) + " " + esc(L.functions) + (s.tables ? " · " + num(s.tables) + " " + esc(L.tablesLc) : "") + "<br>";
         if (to.length) h += esc(L.callsTo) + ": " + esc(short(to)) + "<br>";
         if (from.length) h += esc(L.calledBy) + ": " + esc(short(from));
@@ -290,10 +294,10 @@
       }
       var targets = {};
       wc.clients.forEach(function (c) { c.r.forEach(function (p) { var t = getNames().s[p[0]]; targets[t] = (targets[t] || 0) + 1; }); });
-      h += "<h2>" + esc(L.httpTitle) + ' <span class="muted">· <a href="#/w/' + s + '">' + num(sv.clients) + " " + esc(L.files) + "</a>" +
+      h += "<h2>" + esc(L.httpTitle) + ' <span class="muted">· <a href="#/w/' + s + '">' + num(sv.clients) + " " + esc(sv.clients === 1 ? L.file1 : L.files) + "</a>" +
            (sv.unmatched ? ' · <a class="risk" href="#/u/' + s + '">' + num(sv.unmatched) + " " + esc(L.unmatched) + "</a>" : "") + "</span></h2><p>" +
            Object.keys(targets).map(function (t) { return '<a class="chip http" href="#/s/' + t + '">→ ' + esc(svcName(+t)) + " · " + targets[t] + "</a>"; }).join("") + "</p>";
-      if (sv.kind === "web" && sv.clients) h += '<p class="muted">' + esc(fmt(L.linkedLead, { n: num(sv.clients_linked), t: num(sv.clients) })) + "</p>";
+      if (sv.kind === "web" && sv.has_ui && sv.clients) h += '<p class="muted">' + esc(fmt(L.linkedLead, { n: num(sv.clients_linked), t: num(sv.clients) })) + "</p>";
       if (sv.hidden_calls) h += '<p class="muted">' + esc(fmt(L.hiddenCalls, { n: num(sv.hidden_calls) })) + "</p>";
     }
     if (sv.data.length) {
@@ -397,30 +401,105 @@
     if (sc.t === "array") return typeLabel(sc.i) + "[]";
     return sc.t || "any";
   }
-  // a schema as an indented JSON-like outline; refs resolved from the spec, nested levels open on click
-  function schemaHtml(sc, depth, seen) {
-    seen = seen || [];
-    if (!sc) return "";
-    var tbl = schemaTable();
+  // a schema shown like Swagger UI: an example JSON (default) and a table of fields
+  function resolveRef(sc) { return sc && sc.r ? schemaTable()[sc.r] || null : sc; }
+  function exampleOf(sc, seen, depth) {
+    seen = seen || []; depth = depth || 0;
+    if (!sc || depth > 7) return null;
     if (sc.r) {
-      var named = tbl[sc.r];
-      if (!named) return '<span class="ty">' + esc(sc.r) + '</span> <span class="muted">' + esc(L.noFields) + "</span>";
-      if (seen.indexOf(sc.r) >= 0) return '<span class="ty">' + esc(sc.r) + "</span> ↺";
-      return '<span class="ty">' + esc(sc.r) + "</span> " + schemaHtml(named, depth, seen.concat([sc.r]));
+      if (seen.indexOf(sc.r) >= 0) return {};
+      var named = schemaTable()[sc.r];
+      return named ? exampleOf(named, seen.concat([sc.r]), depth) : {};
     }
-    if (sc.t === "array") return '<span class="punct">[</span> ' + schemaHtml(sc.i, depth, seen) + ' <span class="punct">]</span>';
-    if (sc.o) return sc.o.map(function (x) { return schemaHtml(x, depth, seen); }).join(' <span class="muted">' + esc(L.or) + "</span> ");
-    if (sc.t === "object" && sc.f && sc.f.length) {
-      var open = depth < 2;
-      return '<span class="obj' + (open ? " open" : "") + '"><span class="punct tog-obj">{' + (open ? "" : " … }") + '</span><span class="fields">' + sc.f.map(function (f) {
-        return '<div class="fld"><span class="fname">' + esc(f[0]) + "</span>" + (f[2] ? '<span class="req" title="' + esc(L.required) + '">*</span>' : "") +
-          ': <span class="fval">' + schemaHtml(f[1], depth + 1, seen) + "</span>" + (f[3] ? ' <span class="fdesc">' + esc(f[3]) + "</span>" : "") + "</div>";
-      }).join("") + '</span><span class="punct close">}</span></span>';
+    if (sc.o) return exampleOf(sc.o[0], seen, depth);
+    if (sc.x !== undefined) {
+      var t0 = sc.t || "";
+      if (/^(integer|number)/.test(t0) && !isNaN(+sc.x)) return +sc.x;
+      if (/^boolean/.test(t0)) return sc.x === "true";
+      return sc.x;
     }
-    var t = '<span class="ty">' + esc(sc.t || "any") + "</span>";
-    if (sc.e) t += ' <span class="muted">' + esc(sc.e.join(" | ")) + "</span>";
-    if (sc.x) t += ' <span class="muted">' + esc(L.example) + ": " + esc(sc.x) + "</span>";
-    return t;
+    if (sc.e && sc.e.length) return sc.e[0];
+    if (sc.t === "array") return [exampleOf(sc.i, seen, depth + 1)];
+    if (sc.t === "object") {
+      var o = {};
+      (sc.f || []).forEach(function (f) { o[f[0]] = exampleOf(f[1], seen, depth + 1); });
+      if (!sc.f || !sc.f.length) { if (sc.m) o.key = exampleOf(sc.m, seen, depth + 1); }
+      return o;
+    }
+    var t = sc.t || "any";
+    if (/date-time/.test(t)) return "2026-01-31T12:00:00Z";
+    if (/\(date\)/.test(t)) return "2026-01-31";
+    if (/uuid/.test(t)) return "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+    if (/email/.test(t)) return "user@example.com";
+    if (/^(integer|number)/.test(t)) return 0;
+    if (/^boolean/.test(t)) return true;
+    if (/^string/.test(t)) return "string";
+    return null;
+  }
+  function jsonHtml(v, ind) {
+    ind = ind || "";
+    var pad = ind + "  ";
+    if (v === null) return '<span class="jn">null</span>';
+    if (Array.isArray(v)) {
+      if (!v.length) return '<span class="jp">[]</span>';
+      return '<span class="jp">[</span>\n' + v.map(function (x) { return pad + jsonHtml(x, pad); }).join('<span class="jp">,</span>\n') + "\n" + ind + '<span class="jp">]</span>';
+    }
+    if (typeof v === "object") {
+      var keys = Object.keys(v);
+      if (!keys.length) return '<span class="jp">{}</span>';
+      return '<span class="jp">{</span>\n' + keys.map(function (k) {
+        return pad + '<span class="jk">"' + esc(k) + '"</span><span class="jp">: </span>' + jsonHtml(v[k], pad);
+      }).join('<span class="jp">,</span>\n') + "\n" + ind + '<span class="jp">}</span>';
+    }
+    if (typeof v === "string") return '<span class="js">"' + esc(v) + '"</span>';
+    if (typeof v === "boolean") return '<span class="jb">' + v + "</span>";
+    return '<span class="jnum">' + esc(String(v)) + "</span>";
+  }
+  function typeName(sc) {
+    if (!sc) return "";
+    if (sc.r) return sc.r.split(".").pop();
+    if (sc.t === "array") return typeName(sc.i) + "[]";
+    if (sc.o) return sc.o.map(typeName).join(" | ");
+    return sc.t || "any";
+  }
+  function fieldRows(sc, prefix, depth, seen, rows) {
+    rows = rows || []; seen = seen || [];
+    if (depth > 5) return rows;
+    if (sc && sc.r) {
+      if (seen.indexOf(sc.r) >= 0) return rows;
+      seen = seen.concat([sc.r]);
+    }
+    var obj = resolveRef(sc);
+    if (obj && obj.t === "array") return fieldRows(obj.i, prefix + "[]", depth, seen, rows);
+    if (!obj || obj.t !== "object") return rows;
+    (obj.f || []).forEach(function (f) {
+      var name = (prefix ? prefix + "." : "") + f[0];
+      var inner = resolveRef(f[1]);
+      var notes = [];
+      if (f[3]) notes.push(esc(f[3]));
+      if (inner && inner.e) notes.push('<span class="muted">' + esc(L.oneOf) + ":</span> " + inner.e.map(function (x) { return "<code>" + esc(x) + "</code>"; }).join(" "));
+      if (inner && inner.x !== undefined) notes.push('<span class="muted">' + esc(L.example) + ":</span> <code>" + esc(inner.x) + "</code>");
+      rows.push('<tr><td class="fname" style="padding-left:' + (8 + depth * 14) + 'px">' + esc(name.split(".").pop()) + (f[2] ? '<span class="req" title="' + esc(L.required) + '">*</span>' : "") +
+        '</td><td class="ftype">' + esc(typeName(f[1])) + "</td><td>" + notes.join("<br>") + "</td></tr>");
+      fieldRows(f[1], name, depth + 1, seen, rows);
+    });
+    return rows;
+  }
+  var schemaSeq = 0;
+  function schemaHtml(sc) {
+    if (!sc) return "";
+    var named = sc.r ? schemaTable()[sc.r] : null;
+    if (sc.r && !named) return '<div class="schema-box"><div class="schema-name">' + esc(sc.r) + '</div><p class="muted small">' + esc(L.noFields) + "</p></div>";
+    var id = "sch" + (schemaSeq++);
+    var rows = fieldRows(sc, "", 0, []);
+    var ex = exampleOf(sc);
+    var title = typeName(sc);
+    return '<div class="schema-box" id="' + id + '"><div class="schema-tabs"><span class="schema-name">' + esc(title) + "</span>" +
+      '<button class="stab on" data-tab="ex" data-box="' + id + '">' + esc(L.tabExample) + "</button>" +
+      (rows.length ? '<button class="stab" data-tab="fields" data-box="' + id + '">' + esc(L.tabFields) + "</button>" : "") + "</div>" +
+      '<pre class="json" data-pane="ex">' + jsonHtml(ex) + "</pre>" +
+      (rows.length ? '<table class="fields" data-pane="fields" hidden><thead><tr><th>' + esc(L.colField) + "</th><th>" + esc(L.colType) + "</th><th>" + esc(L.colDesc) +
+                     "</th></tr></thead><tbody>" + rows.join("") + "</tbody></table>" : "") + "</div>";
   }
   function dataSentence(list) {
     var w = list.filter(function (p) { return p[1] & W; }).map(function (p) { return '<a href="#/t/' + p[0] + '">' + esc(IX.tableNames[p[0]] || label(p[0])) + "</a>"; });
@@ -442,19 +521,19 @@
         return '<tr><td class="pname">' + esc(p[0]) + (p[3] ? '<span class="req">*</span>' : "") + '</td><td class="muted">' + esc(p[1]) + (p[2] ? " · " + esc(p[2]) : "") + "</td><td>" + esc(p[4] || "") + "</td></tr>";
       }).join("") + "</tbody></table>";
     }
-    if (doc.body) h += "<h4>" + esc(L.requestBody) + '</h4><div class="schema">' + schemaHtml(doc.body, 0) + "</div>";
+    if (doc.body) h += "<h4>" + esc(L.requestBody) + "</h4>" + schemaHtml(doc.body);
     if (doc.resp && doc.resp.length) {
       h += "<h4>" + esc(L.responses) + "</h4>" + doc.resp.map(function (x) {
         var ok = /^2/.test(x[0]);
         return '<div class="resp"><span class="rcode ' + (ok ? "ok" : /^[45]/.test(x[0]) ? "bad" : "") + '">' + esc(x[0]) + "</span> " + esc(x[1] || "") +
-               (x[2] && (ok || x[2].r) ? '<div class="schema">' + schemaHtml(x[2], 0) + "</div>" : "") + "</div>";
+               (x[2] && (ok || x[2].r) && (x[2].r || x[2].f || x[2].i) ? schemaHtml(x[2]) : "") + "</div>";
       }).join("");
     }
     if (!doc.src || doc.src === "comment") h += '<p class="muted small">' + esc(L.noDocs) + "</p>";
     // who uses it: screens by a human name
     if (r.sc.length) {
       h += "<h4>" + esc(L.usedOnScreens) + "</h4><div>" + r.sc.map(function (p) {
-        return '<span class="chip screen" title="' + esc(p[1]) + '">' + esc(humanFile(p[1])) + ' <span class="muted">' + esc(svcName(p[0])) + "</span></span>";
+        return '<span class="chip screen' + (p[2] ? " guess" : "") + '" title="' + esc(p[1] + (p[2] ? " — " + L.guess : "")) + '">' + esc(humanFile(p[1])) + ' <span class="muted">' + esc(svcName(p[0])) + "</span>" + (p[2] ? " · " + esc(L.guess) : "") + "</span>";
       }).join("") + "</div>";
     } else if (r.nc) {
       h += "<h4>" + esc(L.consumers) + '</h4><p class="muted">' + esc(fmt(L.calledByN, { n: num(r.nc) })) + "</p>";
@@ -467,7 +546,13 @@
     var body = $("ep-" + r.i);
     body.onclick = function (ev) {
       var t = ev.target;
-      if (t.classList.contains("tog-obj")) { t.parentNode.classList.toggle("open"); t.textContent = t.parentNode.classList.contains("open") ? "{" : "{ … }"; ev.stopPropagation(); return; }
+      if (t.classList.contains("stab")) {
+        var box = $(t.dataset.box);
+        Array.prototype.forEach.call(box.querySelectorAll(".stab"), function (b) { b.classList.toggle("on", b === t); });
+        Array.prototype.forEach.call(box.querySelectorAll("[data-pane]"), function (p) { p.hidden = p.dataset.pane !== t.dataset.tab; });
+        ev.stopPropagation();
+        return;
+      }
       if (t.dataset && t.dataset.code) {
         var box = $("code-" + r.i);
         box.hidden = !box.hidden;
@@ -566,7 +651,7 @@
       var nm = getNames();
       if (r.sc.length) {
         h += '<p class="muted">' + esc(L.onScreens) + "</p><ul>" + r.sc.map(function (p) {
-          return '<li>🖥 <span class="mono">' + esc(p[1].split("/").pop()) + '</span> <span class="muted">' + esc(svcName(p[0])) + '</span><div class="ev">' + esc(p[1]) + "</div></li>";
+          return '<li>🖥 <span class="mono">' + esc(p[1].split("/").pop()) + '</span> <span class="muted">' + esc(svcName(p[0])) + "</span>" + (p[2] ? ' <span class="chip guess">' + esc(L.guess) + "</span>" : "") + '<div class="ev">' + esc(p[1]) + "</div></li>";
         }).join("") + "</ul>";
       }
       h += '<p class="muted">' + esc(L.byFunctions) + "</p><ul>" + r.c.map(function (p) {
@@ -710,12 +795,13 @@
     crumbs(['<a href="#/s/' + s + '">' + esc(sv.name) + "</a>", esc(sv.kind === "web" ? L.screensTitle : L.httpTitle)]); toc("w" + s);
     var h = "<h1>" + esc(sv.name) + ' <span class="kind">' + esc(L[sv.kind] || sv.kind) + "</span></h1>";
     if (sv.kind === "web") {
-      h += '<p class="lead">' + esc(fmt(L.screensLead2, { n: num(sv.screens), c: num(sv.clients), l: num(sv.clients_linked) })) + "</p>";
+      h += '<p class="lead">' + esc(sv.has_ui ? fmt(L.screensLead2, { n: num(sv.screens), c: num(sv.clients), l: num(sv.clients_linked) })
+                                          : fmt(sv.screens === 1 ? L.screensLeadOne : L.screensLeadFiles, { n: num(sv.screens) })) + "</p>";
       h += "<h2>" + esc(L.screensTitle) + "</h2>" + (ch.screens.length ? fileTable(ch.screens, "screen", L.usedByScreens, function (sc) { return routeChips(sc.r); }) : '<p class="muted">' + esc(L.noScreens) + "</p>");
     }
     h += "<h2>" + esc(L.clientTitle) + '</h2><p class="muted">' + esc(L.clientLead) + "</p>";
     h += fileTable(ch.clients, "client", L.usedByScreens, function (c) {
-      return routeChips(c.r) + (sv.kind === "web" && !c.ui.length && !/\.(tsx|jsx|vue|svelte)$/.test(c.f) ? ' <span class="chip">' + esc(L.noScreen) + "</span>" : "");
+      return routeChips(c.r) + (sv.kind === "web" && sv.has_ui && !c.ui.length && !/\.(tsx|jsx|vue|svelte)$/.test(c.f) ? ' <span class="chip">' + esc(L.noScreen) + "</span>" : "");
     });
     if (sv.hidden_calls) h += '<p class="muted">' + esc(fmt(L.hiddenCalls, { n: num(sv.hidden_calls) })) + "</p>";
     read(h);
@@ -741,7 +827,7 @@
       h += "<h3>" + esc(L.throughClient) + " (" + sc.via.length + ")</h3><ul>" + sc.via.map(function (f) { var rec = ch.fns[f]; return "<li>" + fnLink(f) + (rec ? '<div class="ev">' + esc(rec[1]) + "</div>" : "") + unmatchedHtml(rec) + "</li>"; }).join("") + "</ul>";
     } else {
       if (sc.ui.length) h += "<h3>" + esc(L.usedOnScreens) + " (" + sc.ui.length + ")</h3><ul>" + sc.ui.map(function (f) { return '<li class="ev">' + esc(f) + "</li>"; }).join("") + "</ul>";
-      else if (SV[s].kind === "web") h += '<p class="muted">' + esc(L.noScreenLong) + "</p>";
+      else if (SV[s].kind === "web" && SV[s].has_ui) h += '<p class="muted">' + esc(L.noScreenLong) + "</p>";
       h += "<h3>" + esc(L.functions) + " (" + sc.fns.length + ")</h3><ul>" + sc.fns.map(function (f) { return "<li>" + fnLink(f) + unmatchedHtml(ch.fns[f]) + "</li>"; }).join("") + "</ul>";
     }
     detail(h);
