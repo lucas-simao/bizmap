@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from bizmap.graph import function_id
 from bizmap.scan import scan_paths
 
@@ -383,3 +385,59 @@ def test_export_lists_four_screens_and_per_route_consumers(tmp_path: Path) -> No
     assert uses["PATCH /api/v1/widgets/:widgetId"] == ["src/pages/WidgetDetailPage.tsx"]
     assert uses["GET /api/v1/client/sites/:siteId"] == ["src/pages/SitePage.tsx"]
     assert uses["DELETE /api/v1/teams/:teamId/members/:userId"] == []
+
+
+FACTORY_VARIANTS = {
+    "fallback": (
+        "export function createClientApi(baseUrl: string) {\n"
+        "  return axios.create({ baseURL: `${baseUrl}/api/v1/client` });\n}\n",
+        "export const clientApi = createClientApi(import.meta.env.VITE_CLIENT_API_URL ?? '');\n",
+    ),
+    "const_arg": (
+        "export function createClientApi(baseUrl: string) {\n"
+        "  return axios.create({ baseURL: `${baseUrl}/api/v1/client` });\n}\n",
+        "const CLIENT_API_URL = import.meta.env.VITE_CLIENT_API_URL;\n"
+        "export const clientApi = createClientApi(CLIENT_API_URL);\n",
+    ),
+    "shorthand_base": (
+        "export const createClientApi = (baseUrl: string) => {\n"
+        "  const baseURL = `${baseUrl}/api/v1/client`;\n"
+        "  const instance = axios.create({ baseURL, timeout: 10000 });\n"
+        "  instance.interceptors.request.use((c) => c);\n"
+        "  return instance;\n};\n",
+        "export const clientApi = createClientApi(import.meta.env.VITE_CLIENT_API_URL);\n",
+    ),
+    "nested": (
+        "export function createClientApi(baseUrl: string) {\n"
+        "  return axios.create({ baseURL: `${baseUrl}/api/v1/client` });\n}\n",
+        None,
+    ),
+}
+
+
+
+@pytest.mark.parametrize("variant", sorted(FACTORY_VARIANTS))
+def test_factory_base_variants_keep_the_env(tmp_path: Path, variant: str) -> None:
+    factory, instance = FACTORY_VARIANTS[variant]
+    roots = build(tmp_path)
+    web = roots[2]
+    _write(web, "src/api/clientApiFactory.ts", "import axios from 'axios';\n\n" + factory)
+    if instance is None:
+        # the instance is made inline, as the factory client's argument
+        (web / "src/api/clientApi.ts").unlink()
+        _write(
+            web,
+            "src/api/delivery/index.ts",
+            "import { createClientApi } from '../clientApiFactory';\n"
+            "import { createDeliveryHttpClient } from './client';\n\n"
+            "export const deliveryHttpClient = createDeliveryHttpClient(\n"
+            "  createClientApi(import.meta.env.VITE_CLIENT_API_URL),\n);\n",
+        )
+    else:
+        _write(web, "src/api/clientApi.ts", "import { createClientApi } from './clientApiFactory';\n\n" + instance)
+    graph = scan_paths(roots, config=tmp_path / "bizmap.yaml", base=tmp_path)
+    node = graph.nodes[_w("src.api.delivery.client.createDeliveryHttpClient.getSite")]
+    urls = [c.get("url") for c in node.attrs.get("http_calls") or []]
+    assert urls and all(u.startswith("{VITE_CLIENT_API_URL}/api/v1/client/sites/") for u in urls), urls
+    edges = {e.to_id for e in graph.edges.values() if e.type == "calls_http" and e.from_id == node.id}
+    assert edges == {"portal-api/entrypoint:http:GET:/api/v1/client/sites/:siteId"}, edges
