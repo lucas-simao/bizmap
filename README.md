@@ -160,14 +160,24 @@ Tools (`search`, `call_graph`, `function_data`, `table_usage`, `impact`,
 bizmap export --graph bizmap.graph.json --format html --out bizmap.html   # --lang pt-BR
 ```
 
-One self-contained, offline HTML file that reads the system like a book: services,
+One self-contained, offline HTML file. It opens on the question you came with —
+**who writes / reads `orders.status`?** — answered like `bizmap who-writes` (entrypoint →
+via N functions → the writer, confidence, `file:line`, and what could change the answer),
+then a summary strip, findings (an unexpected writer, tables written by several services,
+names built at runtime, orphan functions), a services × tables matrix and a map around
+the entity you pick.
+
+![The HTML start screen: who writes orders.status?](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/img/home-answer.png)
+
+Below that, it reads the system like a book: services,
 then domains (routes grouped by path), then a route's call tree down to the tables and
 columns it reads and writes. Front-ends list their screens, the routes each one uses
 and the calls that matched no route. Search finds any route, function, table or column.
 
 ![bizmap export --format html: system, a domain, a route's call tree, screens](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/img/export-html.gif)
 
-Details: [export](https://lucas-simao.github.io/bizmap/commands/export/).
+Details: [export](https://lucas-simao.github.io/bizmap/commands/export/) ·
+[the start screen](https://lucas-simao.github.io/bizmap/commands/export-home/).
 
 ## Documentation
 

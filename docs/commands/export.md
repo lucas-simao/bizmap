@@ -10,6 +10,10 @@ bizmap export --graph bizmap.graph.json --format html --out bizmap.html
 bizmap export --format html --lang pt-BR         # page in Brazilian Portuguese
 ```
 
+The page opens on **the question first** — *who writes / reads X?* — with a
+summary strip, findings cards, a services × tables matrix and a map around
+one entity: see [the start screen](export-home.md).
+
 `--format html` writes **one self-contained file**: the graph and every library
 are inside it. It opens with a double click, works offline, and can be attached
 to an e-mail or a ticket. Nothing is fetched from a CDN or a server.

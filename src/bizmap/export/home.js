@@ -30,7 +30,7 @@
       topicLead: "Who publishes {q}, who consumes it and what they write.", noConsumers: "No scanned consumer.", findLead: "{n} items", epsTitle: "Entrypoints",
       unresTitle: "Unresolved links", unresLead: "What the graph could not resolve: these can change answers.", file: "file", detail: "detail",
       inService: "service", noEntity: "Nothing to center on.", empty: "No tables or collections in this graph.", ask2: "Ask another",
-      allTables: "All tables", R: "R", W: "W", RW: "RW",
+      allTables: "All tables", R: "R", W: "W", RW: "RW", pubEdge: "publishes", subEdge: "triggers",
     },
     "pt-BR": {
       home: "Início", servicesPage: "Serviços", ask: "Quem escreve / lê…?", askPh: "uma tabela, coleção, coluna (orders.status), rota, tópico, serviço ou função",
@@ -59,7 +59,7 @@
       topicLead: "Quem publica {q}, quem consome e o que escreve.", noConsumers: "Nenhum consumidor escaneado.", findLead: "{n} itens", epsTitle: "Pontos de entrada",
       unresTitle: "Ligações não resolvidas", unresLead: "O que o grafo não conseguiu resolver: isto pode mudar as respostas.", file: "arquivo", detail: "detalhe",
       inService: "serviço", noEntity: "Nada para centrar.", empty: "Nenhuma tabela ou coleção neste grafo.", ask2: "Perguntar outra",
-      allTables: "Todas as tabelas", R: "L", W: "E", RW: "LE",
+      allTables: "Todas as tabelas", R: "L", W: "E", RW: "LE", pubEdge: "publica", subEdge: "dispara",
     },
   };
   var H = HT[IX.lang] || HT.en;
@@ -656,7 +656,7 @@
       var lbl = n[0] === "e" ? n[2] + "\n" + mapKind(n) : n[0] === "q" ? n[2] + "\n" + H.kindTopic : n[2];
       return { data: { id: "n" + k, label: lbl, kind: n[0], center: k === center ? 1 : 0, level: hops + 1 - dist[k] } };
     });
-    var relLabel = { feeds: H.feeds, pub: "pub", sub: "→", http: "HTTP" };
+    var relLabel = { feeds: H.feeds, pub: H.pubEdge, sub: H.subEdge, http: "HTTP" };
     G.e.forEach(function (e, k) {
       if (!keepSet[e[0]] || !keepSet[e[1]] || (e[5] && !DET.t)) return;
       var lab = e[2] === "rw" ? (e[3] === 3 ? H.RW : e[3] & 2 ? H.W : H.R) : relLabel[e[2]] || e[2];
