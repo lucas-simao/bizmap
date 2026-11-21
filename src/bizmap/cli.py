@@ -457,6 +457,80 @@ def why_cmd(column: str, graph_path: Path) -> None:
         sys.exit(1)
 
 
+def _query_options(fn):
+    fn = click.option(
+        "--lang", type=click.Choice(["en", "pt-BR"]), default="en", show_default=True, help="Language of the text / md output."
+    )(fn)
+    fn = click.option(
+        "--format", "fmt", type=click.Choice(["text", "json", "md"]), default="text", show_default=True,
+        help="text for the terminal, json for tools (schema bizmap.query/v1), md to paste in a PR.",
+    )(fn)
+    fn = click.option(
+        "--graph", "graph_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+        default=Path("bizmap.graph.json"), show_default=True, help="Graph JSON produced by `bizmap scan`.",
+    )(fn)
+    return fn
+
+
+def _run_query(graph_path: Path, fmt: str, lang: str, run, show_path: bool = False) -> None:
+    from bizmap.query import Index, QueryError, render, render_error
+
+    try:
+        ix = Index.load(graph_path)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    try:
+        result = run(ix)
+    except QueryError as err:
+        click.echo(render_error(err, fmt, lang), nl=False, err=fmt != "json")
+        sys.exit(err.code)
+    click.echo(render(result, fmt, lang, show_path=show_path), nl=False)
+
+
+@main.command("who-writes")
+@click.argument("entity")
+@_query_options
+@click.option("--path", "show_path", is_flag=True, help="Show every function between the entrypoint and the writer.")
+def who_writes_cmd(entity: str, graph_path: Path, fmt: str, lang: str, show_path: bool) -> None:
+    """Who writes ENTITY (a table, collection, view or TABLE.COLUMN), from which entrypoints.
+
+    ENTITY: `orders`, `table:orders`, `collection:orders`, `orders-api/table:orders`,
+    `orders.status`. A name that matches different things (a collection and a table)
+    lists them and exits with code 2; no match exits with 1."""
+    from bizmap.query import who
+
+    _run_query(graph_path, fmt, lang, lambda ix: who(ix, entity, "writes"), show_path)
+
+
+@main.command("who-reads")
+@click.argument("entity")
+@_query_options
+@click.option("--path", "show_path", is_flag=True, help="Show every function between the entrypoint and the reader.")
+def who_reads_cmd(entity: str, graph_path: Path, fmt: str, lang: str, show_path: bool) -> None:
+    """Who reads ENTITY (a table, collection, view or TABLE.COLUMN), from which entrypoints.
+
+    Same ENTITY forms and exit codes as `who-writes`."""
+    from bizmap.query import who
+
+    _run_query(graph_path, fmt, lang, lambda ix: who(ix, entity, "reads"), show_path)
+
+
+@main.command("trace")
+@click.argument("entity")
+@_query_options
+@click.option("--depth", type=click.IntRange(min=1, max=10), default=2, show_default=True, help="Hops to follow.")
+@click.option(
+    "--direction", type=click.Choice(["up", "down", "both"]), default="both", show_default=True,
+    help="up: where the data comes from; down: where it goes.",
+)
+def trace_cmd(entity: str, graph_path: Path, fmt: str, lang: str, depth: int, direction: str) -> None:
+    """Where ENTITY's data comes from and where it goes: feeds between tables /
+    collections, queues (publishers → consumers) and HTTP calls between services."""
+    from bizmap.query import trace
+
+    _run_query(graph_path, fmt, lang, lambda ix: trace(ix, entity, depth=depth, direction=direction))
+
+
 @main.command("report")
 @click.argument("path", nargs=-1, type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(

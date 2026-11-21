@@ -93,6 +93,7 @@ nav:
       - scan: commands/scan.md
       - scan --discover: discover.md
       - why: commands/why.md
+      - who-writes / who-reads / trace: commands/query.md
       - report: commands/report.md
       - impact: commands/impact.md
       - registry: commands/registry.md

@@ -34,6 +34,8 @@ pipx install bizmap        # or: pip install bizmap   (Python 3.11+)
 ```bash
 bizmap scan . --mermaid    # writes bizmap.graph.json (+ bizmap.graph.mmd)
 bizmap why orders.status   # writers, readers, what triggers them, who calls in
+bizmap who-writes table:orders   # every writer, from the route / consumer / job that runs it
+bizmap trace collection:orders   # where its data comes from and goes (feeds, queues, HTTP)
 bizmap report              # how much of the code BizMap understood
 bizmap export --format html --out bizmap.html   # one offline page to browse the graph
 ```
@@ -63,6 +65,30 @@ bizmap scan . && bizmap why orders.status
 Every answer points at `file:line` and carries a confidence (`exact`,
 `inferred`, `unknown`). What BizMap cannot see — dynamic SQL, a URL built at
 runtime, a service that was not scanned — is reported as such, not guessed.
+
+## Ask from the terminal
+
+```text
+$ bizmap who-writes table:orders
+Who writes orders (table · Postgres · billing-worker, orders-api)
+
+billing-worker
+  pubsub order-created → consumer.handle_order_created → repo.mark_billed  writes orders (status)  [exact]
+      billing/repo.py:24
+
+orders-api
+  PATCH /orders/{id}/status → OrdersHandler.UpdateStatus → Repo.SetStatus  writes orders (status)  [exact]
+      internal/orders/repo.go:33
+
+Could change this answer:
+  1 write(s) with a table name built at runtime in orders-api could not be resolved: Repo.BulkFix
+```
+
+`bizmap who-reads` does the same for readers and `bizmap trace` follows the
+data across tables, queues and services. A name that matches different things
+(a Firestore collection and a Postgres table called `orders`) is listed, never
+guessed. `--format json` (stable, `bizmap.query/v1`) for tools, `--format md`
+for a PR, `--lang pt-BR`. See [the docs](https://lucas-simao.github.io/bizmap/commands/query/).
 
 ## What it finds
 
@@ -149,7 +175,7 @@ Details: [export](https://lucas-simao.github.io/bizmap/commands/export/).
 | --- | --- |
 | [Getting started](https://lucas-simao.github.io/bizmap/getting-started/) | Install and walk through the demo |
 | [Configuration](https://lucas-simao.github.io/bizmap/configuration/) | `bizmap.yaml`: `services:`, `database:`, `repos:`, excludes, overrides |
-| [Commands](https://lucas-simao.github.io/bizmap/commands/) | `scan`, `why`, `report`, `impact`, `registry`, `mcp`, `export` |
+| [Commands](https://lucas-simao.github.io/bizmap/commands/) | `scan`, `why`, `who-writes`, `who-reads`, `trace`, `report`, `impact`, `registry`, `mcp`, `export` |
 | [MCP server](https://lucas-simao.github.io/bizmap/mcp/) | Let Claude Code, Cursor or any MCP client query the graph |
 | [GitHub Action](https://lucas-simao.github.io/bizmap/github-action/) | The PR comment |
 | [Graph format](https://lucas-simao.github.io/bizmap/graph-schema/) | `bizmap.graph.json`, node and edge types, confidence |
