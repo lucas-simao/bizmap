@@ -1,6 +1,6 @@
 [project]
 name = "bizmap"
-version = "0.8.0"
+version = "0.9.0"
 description = "Deterministic business-rule and data-lineage mapper for codebases. No AI, no tokens, no accounts."
 readme = "README.md"
 license = "MIT"

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.0 — 2026-11-21
+
 ### Added
 
 - **gin routes** (`rules/gin.yaml`): `GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS`,
