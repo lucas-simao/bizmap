@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.11.0 — 2026-11-21
+
 ### Added
 
 - **Firestore in Go**: `Collection("x").Doc(id).Get / Set / Update / Delete /
