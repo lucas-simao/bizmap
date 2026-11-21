@@ -325,11 +325,7 @@ def test_signature_fields_are_shown_when_the_graph_has_them() -> None:
     index, chunks = _book(data)
     rec = next(ch["fns"][k] for ch in chunks.values() for k in (ch.get("fns") or {})
                if ch["fns"][k][0] == "handlers.Projects.Archive")
-    assert rec[9] == {"params": data_params(), "returns": "error"}
-
-
-def data_params() -> list[dict]:
-    return [{"name": "ctx", "type": "context.Context"}, {"name": "id", "type": "string"}]
+    assert rec[9] == ["ctx: context.Context, id: string", "error"]
 
 
 def test_screen_group_prefers_ui_folders() -> None:
@@ -959,3 +955,18 @@ def test_a_type_without_fields_keeps_the_box_header() -> None:
     js = (Path(__file__).resolve().parents[1] / "src/bizmap/export/book.js").read_text()
     line = next(x for x in js.splitlines() if "L.noFields" in x and "schema-box" in x)
     assert 'class="schema-tabs"' in line and "schema-note" in line  # name in the padded bar, note padded
+
+
+def test_function_records_carry_the_signature() -> None:
+    g = react_graph()
+    fn = next(n for n in g["nodes"] if n["id"] == "web/function:src.api.orders.getOrder")
+    fn["params"] = [{"name": "id", "type": "string"}]
+    fn["returns"] = "Promise<Order>"
+    bare = next(n for n in g["nodes"] if n["id"] == "web/function:src.hooks.useOrder")
+    bare["params"] = []
+    index, chunks = _book(g)
+    names = chunks["names"]["l"]
+    recs = {names[int(k)]: rec for c in chunks.values() if isinstance(c, dict) and "fns" in c for k, rec in c["fns"].items()}
+    assert recs["src.api.orders.getOrder"][9] == ["id: string", "Promise<Order>"]
+    assert recs["src.hooks.useOrder"][9] == ["", ""]  # no parameters, no return type
+    assert len(recs["src.pages.Orders.OrderPage"]) == 9  # nothing in the graph: no signature slot

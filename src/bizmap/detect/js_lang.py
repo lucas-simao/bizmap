@@ -12,6 +12,7 @@ from pathlib import Path
 from tree_sitter import Language, Node, Parser
 
 from bizmap import progress
+from bizmap.detect.signatures import ts_signature
 from bizmap.detect.tsutil import (
     JS_TYPED_WALK_TYPES as JS_TYPES,
 )
@@ -1009,6 +1010,7 @@ class JsAnalysis:
     rpc_calls: list[JsRpcCall] = field(default_factory=list)
     functions: dict[str, tuple[str, int]] = field(default_factory=dict)
     function_ends: dict[str, int] = field(default_factory=dict)
+    function_sigs: dict[str, dict] = field(default_factory=dict)  # params / returns
     function_why: dict[str, str] = field(default_factory=dict)
     accesses: list[JsAccess] = field(default_factory=list)
     table_accesses: list[JsTableAccess] = field(default_factory=list)
@@ -1338,6 +1340,7 @@ class JsAnalyzer:
         _resolve_route_handlers(analysis, import_specs_by_mod, exports_by_mod, set(trees_by_mod), fn_nodes)
         _attribute_inline_handler_sites(analysis)
         _bind_param_bases(analysis, fn_nodes)
+        analysis.function_sigs = {q: ts_signature(fn_nodes[q]) for q in analysis.functions if q in fn_nodes}
         return analysis
 
     def _scan_file(
