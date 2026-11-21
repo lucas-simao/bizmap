@@ -4210,6 +4210,8 @@ def _collect_route_literals(
             and parent_of(node).type not in {"variable_declarator", "import_specifier", "export_specifier"}
             and _looks_like_http_path(consts.get(text(node)))
             and not _enclosing_symbol(node, module).endswith(".module")
+            # `return redirectUri`: a navigation target, not a request
+            and not any(w in text(node).lower().replace("_", "") for w in _NAV_VAR_WORDS)
         ):
             # `get(window.base + REPORT)`: a path const used inside a function
             # starts a literal there (the expression may hold no string node)
