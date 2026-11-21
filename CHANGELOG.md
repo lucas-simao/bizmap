@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.12.0 — 2026-11-21
+
 ### Added
 
 - **HTML: a central "Data flow" page** (`#/flow`) listing every `feeds` edge:
