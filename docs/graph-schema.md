@@ -52,7 +52,7 @@ Every node has `id` and `type`. Extra fields depend on `type`.
 | `type` | `id` pattern | Extra fields |
 | --- | --- | --- |
 | `entrypoint` | `entrypoint:http:METHOD:/path` or `entrypoint:<kind>:<key>` | `kind` (`http` \| `scheduled_job` \| `firestore` \| `celery_task` \| `worker` \| `pubsub` \| `cloud_task` \| `firebase_http` \| `firebase_call`), `method`, `path`, `symbol`, `why`, `evidence`, optional `confidence`, `candidates`, `unresolved` (const path not in the scan), optional `unresolved_calls`, optional `collection` / `event`, optional `dynamic_table` / `dynamic_table_unknown` (flag/count when a reachable origin writes `table:unknown`; never a reach edge) |
-| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `end_line` (last line of the definition) and `start_line` (first line, when it differs from `evidence.line`; for an inline route handler `evidence.line` is where the registration call starts — in a chain like `new Hono().post(a).post(b)` or `router.route('/x').get(a)`, the chain's first line — and `start_line`/`end_line` are the handler function's own lines), optional `parent` (enclosing factory/function for members and route closures), optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_queues` (a publish whose topic is an env var without a value, see [Queue names](#queue-and-topic-names)), optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http`, optional `route_literals` (JS/TS API-looking path strings `{path, method?, evidence}` kept for registry rematch), optional `params` (the parameters in order: `[{name, type?, optional?}]`, `[]` when there are none) and `returns` (the return type's text) — see below |
+| `function` | `function:<qualname>` | `name`, `package`, optional `import_path`, `language`, `why`, `evidence`, optional `end_line` (last line of the definition) and `start_line` (first line, when it differs from `evidence.line`; for an inline route handler `evidence.line` is where the registration call starts — in a chain like `new Hono().post(a).post(b)` or `router.route('/x').get(a)`, the chain's first line — and `start_line`/`end_line` are the handler function's own lines), optional `parent` (enclosing factory/function for members and route closures), optional `role` (`schema` for Alembic/migrations), optional `http_calls` (stashed client URLs for registry rematch), optional `queue_events`, optional `unresolved_queues` (a publish whose topic is an env var without a value — `{kind, env, evidence}` — or one of several Go publisher instances — `{kind, candidates, evidence}`; see [Queue names](#queue-and-topic-names)), optional `unresolved_calls` (interface/protocol with no scanned implementer), optional `unresolved_http`, optional `route_literals` (JS/TS API-looking path strings `{path, method?, evidence}` kept for registry rematch), optional `params` (the parameters in order: `[{name, type?, optional?}]`, `[]` when there are none) and `returns` (the return type's text) — see below |
 | `table` | `table:<name>` | `name`; optional `db` (database the code reaches it through, see [Data flow](#data-flow-between-tables-feeds)), `db_candidates`, `same_as`, `external` (system catalogs / `storage.*` / `vault.*` / `auth.*`), `kind` (`external_relation` \| `unresolved_relation`), `dropped` (still referenced after `DROP TABLE`), `candidates` (dynamic/`unknown`), `rls`, `policies` |
 | `view` | `view:<name>` | `name`, `kind` (`view` \| `unresolved_relation`), optional `materialized` |
 | `column` | `column:<table>.<column>` | `table`, `name`, `data_type`, `nullable`, optional `why` |
@@ -338,24 +338,49 @@ each call:
   variable, `tx.Get(ref)` / `tx.Set(ref, …)` → `reads` / `writes
   collection:x` (writes with `fields`). `snap.DataTo(&d)` makes `d` the
   document: its struct's `firestore:"…"` tags name the fields, so
-  `d.CustomerID` is the document field `customerId` in `feeds`.
+  `d.CustomerID` is the document field `customerId` in `feeds`. References
+  built in a loop (`refs[i] = c.Collection("x").Doc(id)`, then
+  `c.GetAll(ctx, refs)` or `batch.Update(refs[i], …)`) count, and the
+  collection can be a struct field set once in its constructor
+  (`Collection(r.collection)` with `&Repo{collection: "customers"}`). A
+  document read in one function and written to SQL in another (a Firestore
+  repository returning the struct, a Postgres repository writing it) still
+  gives `feeds` (`heuristic`, as SQL → SQL across calls); the id the caller
+  passes to `Doc(id)` maps as `__id__`.
 - Pub/Sub, direct: `client.Topic(t).Publish(ctx, &pubsub.Message{Data: b})`
   and v2 `client.Publisher(t).Publish(…)` → `enqueues queue:pubsub:<t>`.
 - Pub/Sub through a **wrapper**: a constructor that passes its parameter (or
   each element of a slice parameter) to `.Publisher(x)` / `.Topic(x)`
-  (`NewPublisher(ctx, project, []string{cfg.OrderTopic})`) publishes to the
-  topics its callers pass; a function that calls `x.Publish(ctx, data, …)`
-  with a non-`Message` payload — usually through an injected interface —
-  gets `enqueues` to those topics with `via: <wrapper type>`. With more than
-  one topic the edge lists `candidates` (`confidence: inferred`) and the
-  message is not linked to a consumer.
+  (`NewPublisher(ctx, project, []string{cfg.OrderTopic})`). Each call of the
+  constructor is an **instance** with its own topics. bizmap follows the
+  instance from where it is built through assignments, `pubs[k] = p`, struct
+  literals (`&Announcer{pub: pub}`), `s.pub = pub` and call arguments into
+  the callee's parameters, so `a.pub.Publish(…)` in `Announcer` publishes only
+  to the topics of the instance given to `NewAnnouncer`, and
+  `Send(ctx, pub, payload)` to those of the instances its callers pass.
+  Publishers built in a loop from a map (`topics := map[Kind]string{…}`,
+  `NewPublisher(…, []string{topics[k]})`, `pubs[k] = p`) are one instance per
+  key; `pubs[KindOrder]` picks one.
+- Only a call with the wrapper's own `Publish` signature counts
+  (`Publish(ctx, []byte, map[string]string)`: same number of arguments, the
+  payload not a `Message`), on a value that holds an instance or whose type is
+  the wrapper or an interface declaring that signature. `store.Publish(ctx,
+  id)` (a domain verb) adds nothing. A wrapper built with several topics
+  publishes to all of them (one edge each). When the receiver could be any of
+  several instances (an unknown map key, a publisher interface no instance
+  reaches), no `enqueues` edge is added: the function lists the topics in
+  `unresolved_queues` (`{kind: pubsub, candidates: [...]}`).
 - The topic comes from a literal, a package constant, or a config field filled
   by `getEnv("X", "def")`, `os.Getenv("X")` or an `env:"X" envDefault:"y"`
-  tag; the queue node then has `env: X`.
+  tag; the queue node then has `env: X`. `os.Getenv("X")` without a default
+  takes the default the same variable has elsewhere in the repo (the config
+  package), then `env:` in `bizmap.yaml`.
 - `fields` of the enqueue are the message's: the `json:"…"` tags of the struct
   passed to `json.Marshal`, or a map literal's keys. The dataflow follows the
   struct back through helpers (`build(id, d)`), a `Scan(&row.ID, …)` of a SQL
-  read, or a Firestore document, so a Go publisher and a push route in another
+  read, or a Firestore document, also into a `[]byte` field of another struct
+  passed to `Publish` in another function (`Build(row)` → `Send(ctx, pub,
+  payload)`), so a Go publisher and a push route in another
   repo give `feeds` (`collection:orders -> table:order_summary`, or
   `orders_mirror -> order_summary` when Go re-reads its own table).
 
@@ -375,6 +400,7 @@ each call:
   `default`); the edge has `task` (the function or dotted path enqueued). Any
   other `.enqueue(…)` / `.publish(…)` (a parameter, a repository method,
   `self.publish` of a class that is not a client) adds nothing.
+- A queue node is never created without a name (`queue:pubsub:queue`).
 - A name from an env var with no default and no value in `bizmap.yaml`
   [`env:`](configuration.md#env) gives no node: the function lists it in
   `unresolved_queues` (`[{kind, env, evidence}]`).

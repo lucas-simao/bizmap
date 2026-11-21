@@ -12,13 +12,24 @@
 - **Pub/Sub publish in Go**: direct (`client.Topic(t)` / v2
   `client.Publisher(t)`) and through a wrapper constructor
   (`NewPublisher(ctx, project, []string{cfg.OrderTopic})`) used via an
-  injected interface. Topic from a literal, a package constant or a config
-  field (`getEnv("X","def")`, `os.Getenv`, `env:"X"` tags), with `env` on the
-  queue node, `candidates` when the wrapper has several topics, and the
-  message `fields` from the `json:"…"` tags. The dataflow follows the message
-  to a push route in another repo (`feeds collection:orders ->
+  injected interface. Each constructor call is an instance followed through
+  assignments, struct fields, map keys (`pubs[k] = p` from a topic map) and
+  call arguments, so every caller publishes only to its instance's topics;
+  only calls with the wrapper's `Publish` signature count (a domain
+  `store.Publish(ctx, id)` adds nothing), and an unknown instance gives
+  `unresolved_queues` with `candidates` instead of edges. Topic from a
+  literal, a package constant or a config field (`getEnv("X","def")`,
+  `os.Getenv` — with the default the same variable has in the config
+  package —, `env:"X"` tags), with `env` on the queue node and the message
+  `fields` from the `json:"…"` tags. The dataflow follows the message to a
+  push route in another repo (`feeds collection:orders ->
   table:order_summary`, or `orders_mirror -> order_summary` when Go re-reads
-  its table).
+  its table, also through `Build(row)` / `Send(ctx, pub, payload)` in other
+  packages).
+- Go Firestore: references built in a loop (`refs[i] = …Doc(id)` then
+  `GetAll(ctx, refs)` / `batch.Update(refs[i], …)`) and a collection held in
+  a struct field set in its constructor. A document read by one repository
+  and written to SQL by another gives `feeds` through the calls.
 - `env:` in `bizmap.yaml` gives values to env vars that name a queue or topic;
   without one the function lists the publish in `unresolved_queues`.
 
@@ -33,9 +44,12 @@
 
 ### Fixed
 
-- No queue node named after an expression (`queue:pubsub:{live[:10]}`), and
-  nothing for `.enqueue` / `.publish` on parameters, repositories or plain
-  methods.
+- No queue node named after an expression (`queue:pubsub:{live[:10]}`) or
+  without a name (`queue:pubsub:queue`), and nothing for `.enqueue` /
+  `.publish` on parameters, repositories or plain methods. Python topic
+  lookups stay in the function (or class / module) they belong to.
+- Joint scans no longer fail with "dictionary changed size during iteration"
+  when the queue relink adds a node.
 
 ## 0.10.0 — 2026-11-21
 
