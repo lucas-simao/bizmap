@@ -879,3 +879,21 @@ def test_spec_without_description_takes_the_handler_comment_and_query_enums() ->
     ops = {(o["m"], o["p"]): o for o in operations_from_spec(_demo_spec(), SchemaTable())}
     assert ops[("GET", "/api/v1/orders")]["params"][0][4] == "Only orders in this status · one of: pending, paid, cancelled"
     assert comment_text("ListProducts godoc @Summary x @Router /p [get]") == ""
+
+
+def test_a_comment_that_only_restates_the_route_is_not_a_summary() -> None:
+    from bizmap.export.openapi import plain_summary
+
+    assert plain_summary("List is GET /widgets.") == ""
+    assert plain_summary("GetSettings handles GET /api/v1/shop/settings") == ""
+    assert plain_summary("Get handles GET /x. Returns the cart of the signed-in user.") == "Returns the cart of the signed-in user."
+
+
+def test_front_end_lists_the_api_routes_it_uses() -> None:
+    index, chunks = _book(react_graph())
+    names = chunks["names"]["l"]
+    web = next(s for s in index["services"] if s["name"] == "web")
+    uses = chunks[web["screen_chunk"]]["uses"]
+    assert web["uses"] == 1 and [names[u["r"]] for u in uses] == ["GET /orders/:id"]
+    u = uses[0]
+    assert u["files"] == ["src/api/orders.ts", "src/api/users.ts"] and u["ui"] == ["src/pages/Orders.tsx"] and u["g"] == 0

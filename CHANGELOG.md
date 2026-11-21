@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Front-end pages list **the API routes they use** ("API routes web uses"),
+  by API and domain: method, path, summary, and the screens (or client files)
+  that call each one; likely links marked. The service page shows the count
+  per API.
+- A comment that only restates the route ("List is GET /widgets.") is no
+  longer used as a summary.
+
 ## 0.7.0 — 2026-11-20
 
 ### Added

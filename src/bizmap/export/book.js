@@ -53,6 +53,9 @@
       requestBody: "Request body (JSON)", responses: "Responses", noFields: "The fields of this type come from the API's swagger.json / openapi.json: export with it (see --openapi).",
       noDocs: "No API docs for this route yet (swag annotations or an OpenAPI file add the parameters and the JSON it receives and returns).",
       required: "required", example: "example", or: "or", writesTo: "Writes", readsFrom: "Reads", dataTitleShort: "Data",
+      usesTitle: "API routes it uses", usesHeading: "API routes {s} uses", usesSummary: "{n} routes",
+      usesLead: "{n} routes of the scanned APIs are called from this code, grouped by API and domain.", usesLead1: "1 route of the scanned APIs is called from this code.",
+      calledFromFiles: "called from", unmatchedMore: "{n} more calls matched no scanned route", unmatchedMore1: "1 more call matched no scanned route",
       tabExample: "Example", tabFields: "Fields", colField: "Field", colType: "Type", colDesc: "Description", oneOf: "one of",
       seeCode: "See in code", hideCode: "Hide code", calledByN: "Called by {n} functions in other services (no screen linked).",
       calledByN1: "Called by 1 function in another service (no screen linked).",
@@ -104,6 +107,9 @@
       requestBody: "Corpo da requisição (JSON)", responses: "Respostas", noFields: "Os campos deste tipo vêm do swagger.json / openapi.json da API: exporte com ele (veja --openapi).",
       noDocs: "Esta rota ainda não tem documentação de API (anotações do swag ou um arquivo OpenAPI trazem os parâmetros e o JSON que ela recebe e devolve).",
       required: "obrigatório", example: "exemplo", or: "ou", writesTo: "Grava em", readsFrom: "Lê", dataTitleShort: "Dados",
+      usesTitle: "Rotas da API que usa", usesHeading: "Rotas da API que {s} usa", usesSummary: "{n} rotas",
+      usesLead: "{n} rotas das APIs escaneadas são chamadas por este código, agrupadas por API e domínio.", usesLead1: "1 rota das APIs escaneadas é chamada por este código.",
+      calledFromFiles: "chamada em", unmatchedMore: "Mais {n} chamadas não ligaram em nenhuma rota escaneada", unmatchedMore1: "Mais 1 chamada não ligou em nenhuma rota escaneada",
       tabExample: "Exemplo", tabFields: "Campos", colField: "Campo", colType: "Tipo", colDesc: "Descrição", oneOf: "um de",
       seeCode: "Ver no código", hideCode: "Esconder código", calledByN: "Chamada por {n} funções de outros serviços (sem tela ligada).",
       calledByN1: "Chamada por 1 função de outro serviço (sem tela ligada).",
@@ -197,7 +203,7 @@
       h += "<h4>" + esc(g[1]) + "</h4>";
       list.forEach(function (p) {
         var sv = p[0], i = p[1];
-        var mine = active === "s" + i || active === "w" + i || active === "u" + i || dsvc === i;
+        var mine = active === "s" + i || active === "w" + i || active === "u" + i || active === "x" + i || dsvc === i;
         var n = sv.routes + sv.jobs ? num(sv.routes + sv.jobs) : sv.kind === "web" ? num(sv.screens) + " " + esc(sv.screens === 1 ? L.screen : L.screens) : num(sv.functions);
         h += '<a href="#/s/' + i + '" class="' + (active === "s" + i ? "on" : "") + '"><span>' + esc(sv.name) + '</span><span class="n">' + n + "</span></a>";
         if (!mine) return;
@@ -206,6 +212,7 @@
                '</span><span class="n">' + DOM[d].routes + "</span></a>";
         });
         if (sv.screen_chunk) h += '<a class="sub ' + (active === "w" + i ? "on" : "") + '" href="#/w/' + i + '"><span>' + esc(sv.kind === "web" ? L.screensTitle : L.httpTitle) + '</span><span class="n">' + num(sv.kind === "web" ? sv.screens : sv.clients) + "</span></a>";
+        if (sv.uses) h += '<a class="sub ' + (active === "x" + i ? "on" : "") + '" href="#/x/' + i + '"><span>' + esc(L.usesTitle) + '</span><span class="n">' + num(sv.uses) + "</span></a>";
         if (sv.unmatched) h += '<a class="sub warn ' + (active === "u" + i ? "on" : "") + '" href="#/u/' + i + '"><span>⚠ ' + esc(L.unmatched) + '</span><span class="n">' + num(sv.unmatched) + "</span></a>";
       });
     });
@@ -277,6 +284,12 @@
       });
       h += "</tbody></table>";
       h += '<details class="more"><summary>' + esc(L.moreDetails) + "</summary>";
+    }
+    if (sv.uses) {
+      var usesBy = {};
+      chunk(sv.screen_chunk).uses.forEach(function (u) { var t = getNames().s[u.r]; usesBy[t] = (usesBy[t] || 0) + 1; });
+      h += "<h2>" + esc(L.usesTitle) + '</h2><p><a href="#/x/' + s + '">' + esc(fmt(L.usesSummary, { n: num(sv.uses) })) + "</a> " +
+           Object.keys(usesBy).map(function (t) { return '<a class="chip http" href="#/x/' + s + '">' + esc(svcName(+t)) + " · " + usesBy[t] + "</a>"; }).join("") + "</p>";
     }
     if (sv.screen_chunk) {
       var wc = chunk(sv.screen_chunk);
@@ -839,6 +852,35 @@
     }
     detail(h);
   }
+  // the API routes a service uses, by API and domain: "web uses these routes of api"
+  function pageUses(s) {
+    var sv = SV[s], ch = chunk(sv.screen_chunk), nm = getNames();
+    crumbs(['<a href="#/s/' + s + '">' + esc(sv.name) + "</a>", esc(L.usesTitle)]); toc("x" + s);
+    var h = "<h1>" + esc(fmt(L.usesHeading, { s: sv.name })) + '</h1><p class="lead">' + esc(plural("usesLead", ch.uses.length)) + "</p>";
+    var bySvc = {};
+    ch.uses.forEach(function (u) { var t = nm.s[u.r]; (bySvc[t] = bySvc[t] || []).push(u); });
+    Object.keys(bySvc).sort(function (a, b) { return bySvc[b].length - bySvc[a].length; }).forEach(function (t) {
+      var rows = bySvc[t], byDom = {};
+      rows.forEach(function (u) { var d = IX.routeDomain[u.r]; (byDom[d] = byDom[d] || []).push(u); });
+      h += '<h2><a href="#/s/' + t + '">' + esc(svcName(+t)) + '</a> <span class="muted">· ' + rows.length + " " + esc(rows.length === 1 ? L.endpoint : L.endpoints) + "</span></h2>";
+      h += '<div class="eps">';
+      Object.keys(byDom).sort(function (a, b) { return (DOM[a] ? DOM[a].name : "").localeCompare(DOM[b] ? DOM[b].name : ""); }).forEach(function (d) {
+        var dname = DOM[d] ? (DOM[d].name === "other" ? L.other : DOM[d].name) : "";
+        h += '<div class="ep-group"><a href="#/d/' + d + '">' + esc(dname) + "</a></div>";
+        byDom[d].forEach(function (u) {
+          var lbl = nm.l[u.r], k = lbl.indexOf(" ");
+          var who = u.ui.length ? u.ui.map(function (f) { return '<span class="chip screen" title="' + esc(f) + '">' + esc(humanFile(f)) + "</span>"; }).join("") +
+                    (u.nui > u.ui.length ? '<span class="chip">+' + (u.nui - u.ui.length) + "</span>" : "")
+                  : u.files.map(function (f) { return '<span class="chip" title="' + esc(f) + '">' + esc(f.split("/").slice(-2).join("/")) + "</span>"; }).join("");
+          h += '<div class="ep use' + (u.g ? " guess" : "") + '"><div class="ep-head" data-href="#/r/' + u.r + '">' + (k > 0 ? methodHtml(lbl.slice(0, k)) + '<span class="ep-path">' + pathHtml(lbl.slice(k + 1)) + "</span>" : esc(lbl)) +
+               '<span class="ep-sum">' + esc(u.s) + (u.g ? ' <span class="chip guess">' + esc(L.guess) + "</span>" : "") + '</span></div><div class="ep-who"><span class="muted">' + esc(u.ui.length ? L.usedOnScreens : L.calledFromFiles) + ":</span> " + who + "</div></div>";
+        });
+      });
+      h += "</div>";
+    });
+    if (ch.clients.some(function (c) { return c.u; })) h += '<p class="muted" style="margin-top:16px"><a href="#/u/' + s + '">' + esc(plural("unmatchedMore", sv.unmatched)) + "</a></p>";
+    read(h); detail('<p class="muted">' + esc(L.guessHint) + "</p>");
+  }
   function pageUnmatched(s) {
     var sv = SV[s], ch = chunk(sv.screen_chunk);
     crumbs(['<a href="#/s/' + s + '">' + esc(sv.name) + "</a>", esc(L.unmatched)]); toc("u" + s);
@@ -962,6 +1004,7 @@
       else if (h[0] === "w" && SV[+h[1]] && SV[+h[1]].screen_chunk) pageScreens(+h[1]);
       else if (h[0] === "u" && SV[+h[1]] && SV[+h[1]].screen_chunk) pageUnmatched(+h[1]);
       else if (h[0] === "p" && SV[+h[1]]) pageFolder(+h[1], +h[2]);
+      else if (h[0] === "x" && SV[+h[1]] && SV[+h[1]].screen_chunk) pageUses(+h[1]);
       else if (h[0] === "map") pageMap();
       else pageSystem();
     } catch (err) {
