@@ -2715,17 +2715,25 @@ def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, J
             return
         params = _fn_param_names(fn_node)
         local_bases: dict[str, str] = {}
+        # strings built in the body (`const baseURL = `${baseUrl}/api/v1``):
+        # `axios.create({ baseURL })` reads them; parameters stay `{param}` holes
+        scope = dict(consts)
         for node in typed_walk(fn_node, frozenset({"variable_declarator"}), JS_TYPES):
             dname = _declarator_name(node)
             value = node.child_by_field_name("value")
             if not dname or value is None:
                 continue
-            base = _create_call_base(value, consts)
+            if value.type in {"template_string", "string", "binary_expression"}:
+                built, _u = _resolve_js_string(value, scope)
+                if built:
+                    scope[dname] = built
+                continue
+            base = _create_call_base(value, scope)
             if base is not None:
                 local_bases[dname] = base
         body = fn_node.child_by_field_name("body")
         if body is not None:
-            implicit = _create_call_base(body, consts)
+            implicit = _create_call_base(body, scope)
             if implicit:
                 factories[name] = JsClientFactory(base=implicit, params=params)
                 return
@@ -2737,7 +2745,7 @@ def _collect_client_factories(tree: Node, consts: dict[str, str]) -> dict[str, J
             if expr is None:
                 continue
             expr = unwrap_callee_expr(expr) or expr
-            base = _create_call_base(expr, consts)
+            base = _create_call_base(expr, scope)
             if base:
                 factories[name] = JsClientFactory(base=base, params=params)
                 return
@@ -3162,10 +3170,18 @@ def _propagate_client_bases(
         for i, arg in enumerate(args):
             if i >= len(params):
                 continue
+            inline = None
+            if arg.type == "call_expression":
+                inline = (factories_by_mod.get(module) or {}).get(call_callee_name(arg))
             if arg.type == "call_expression" and call_callee_name(arg) == "create":
                 # createShopClient(axios.create({ baseURL: ... }))
                 base = _create_call_base(arg, consts_by_mod.get(module) or {})
                 if base is None:
+                    continue
+            elif inline is not None:
+                # createDeliveryHttpClient(createClientApi(import.meta.env.X))
+                base = _instantiate_factory(inline, arg, consts_by_mod.get(module) or {})
+                if not base:
                     continue
             elif arg.type != "identifier":
                 continue
@@ -3582,6 +3598,22 @@ def _ts_path_aliases(root: Path) -> list[tuple[str, list[str], str]]:
     return aliases
 
 
+def _unwrap_fallback(node: Node) -> Node:
+    """`X ?? ''` / `X || 'http://localhost'` / `(X as string)` -> `X`: the value
+    a factory gets when the env var is set."""
+    while True:
+        if node.type in {"parenthesized_expression", "as_expression", "non_null_expression"} and node.named_children:
+            node = node.named_children[0]
+            continue
+        if node.type == "binary_expression":
+            op = node.child_by_field_name("operator")
+            left = node.child_by_field_name("left")
+            if op is not None and text(op) in {"??", "||"} and left is not None:
+                node = left
+                continue
+        return node
+
+
 def _instantiate_factory(
     factory: JsClientFactory,
     call: Node,
@@ -3593,7 +3625,7 @@ def _instantiate_factory(
     for i, pname in enumerate(factory.params):
         if i >= len(args):
             break
-        val, _u = _resolve_js_string(args[i], consts)
+        val, _u = _resolve_js_string(_unwrap_fallback(args[i]), consts)
         if not val:
             continue
         hole = "{" + pname + "}"
