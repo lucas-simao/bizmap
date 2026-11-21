@@ -29,6 +29,13 @@
 - Go: publishers built in `if p, err := NewPublisher(…); … else { x = p }` (also
   into a topic map) keep their topics; `candidates` only list topics of the
   constructors that build the receiver's type.
+- Go wrapper instances through setters with tuple assignment, fields of fields,
+  maps copied into a field, aliased imports and a package `var Topics =
+  []string{…}`; a receiver no instance reaches gets `unresolved_queues`
+  `reason: instance_unknown` instead of other instances' topics.
+- Data flow: a collection no longer takes the columns of a SQL table with the
+  same name (the Firestore → Postgres mirror `collection:orders ->
+  table:orders` was dropped), and a Go type assertion keeps its value.
 - Go SQL: a function returning `"INSERT INTO t (" + …` passed to
   `pgx.Batch.Queue` / `Exec` is `writes table:t` (table level), a literal write
   in `batch.Queue(…)` too, and a call on a closure parameter typed with an

@@ -376,9 +376,16 @@ each call:
   publishes to all of them (one edge each). When the receiver could be any of
   several instances (an unknown map key, a publisher interface no instance
   reaches), no `enqueues` edge is added: the function lists the topics in
-  `unresolved_queues` (`{kind: pubsub, candidates: [...]}`), only those of the
-  constructors that build that type (the wrapper itself, or one whose
-  `Publish` matches the interface).
+  `unresolved_queues` (`{kind: pubsub, candidates: [...]}`): only topics of
+  instances that reach that receiver (the topic map's values for
+  `r.f.pubs[k]`). A publisher-typed receiver no instance reaches gets
+  `{kind: pubsub, reason: instance_unknown}`, never the topics of other
+  instances.
+- The instance is followed through setters (`a.refunds, a.refundPub = r, pub`),
+  struct fields of fields (`r.f.pubs[k]`), maps copied into a field
+  (`f.pubs[k] = p`), packages imported under an alias (`invoicesint.New(p)`),
+  and a package variable holding the topics (`var Topics = []string{…}`
+  passed as `reports.Topics`: one edge per topic).
 - The topic comes from a literal, a package constant, or a config field filled
   by `getEnv("X", "def")`, `os.Getenv("X")` or an `env:"X" envDefault:"y"`
   tag; the queue node then has `env: X`. `os.Getenv("X")` without a default
@@ -401,6 +408,10 @@ each call:
   `Query`… is `writes table:orders_mirror` (`confidence: inferred`, `via:
   <builder>`), table level since the columns are built at run time. A
   literal write passed to `batch.Queue(…)` is a write as well.
+- A collection never takes the schema columns of a SQL table with the same
+  name (`collection:orders` and `table:orders`), so a document id
+  (`__id__`) or field is never dropped as "not a column". A type assertion
+  (`normalize(snap.Data()).(map[string]any)`) keeps the value.
 - `x.M(…)` on a closure parameter whose type is an interface
   (`func(ctx context.Context, tx models.OrderMirrorTx) error { … }`) gets
   `calls` to the one type that implements every method of that interface
