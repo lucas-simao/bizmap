@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from bizmap.scan import scan_path
 
 
@@ -236,3 +238,42 @@ def test_url_builders_templates_and_menus_never_link(tmp_path: Path) -> None:
     assert nav == [], nav
     assert _links_from(graph, "loadWidgets") == {"GET:/widgets"}
     assert _links_from(graph, "sendReport") == {"POST:/reports"}
+
+
+# Follow-up: the config wrapper spreads the caller's config into a new object
+# (`{ ...config, validateStatus }`), arrow and `async function` forms.
+_SPREAD_ARROW = """import { api } from './api';
+
+export const requestWithStatus = <T>(config: object, errs: object) =>
+  api.request<T>({ ...config, validateStatus: () => true }).then((r) => r.data);
+"""
+_SPREAD_ASYNC = """import type { AxiosRequestConfig } from 'axios';
+import { api } from './api';
+
+export async function requestWithStatus<T>(config: AxiosRequestConfig, errs: object): Promise<T> {
+  let res;
+  try {
+    res = await api.request<T>({ ...config, validateStatus: () => true });
+  } catch (e) {
+    throw e;
+  }
+  return res.data as T;
+}
+"""
+
+
+@pytest.mark.parametrize("wrapper", [_SPREAD_ARROW, _SPREAD_ASYNC], ids=["arrow", "async"])
+def test_v2_base_through_a_spreading_config_wrapper(tmp_path: Path, wrapper: str) -> None:
+    files = dict(CROSS_MODULE_V2)
+    files["src/api/statusRequest.ts"] = wrapper
+    _workspace(tmp_path, files)
+    graph = scan_path(tmp_path)
+    assert _links_from(graph, "getFlow") == set(), _links_from(graph, "getFlow")
+    assert "{VITE_API_URL}/api/v2/reports/flow" in _unresolved_from(graph, "getFlow"), (
+        graph.attrs.get("unresolved_http")
+    )
+    # the wrapper's own call takes its method from the config: never POST
+    own = [
+        u for u in graph.attrs.get("unresolved_http") or [] if str(u.get("from", "")).endswith("requestWithStatus")
+    ]
+    assert all(u["method"] != "POST" for u in own), own
