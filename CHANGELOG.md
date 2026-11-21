@@ -9,6 +9,13 @@
   **yes**, **no** (with the reason: no matching event in the writes, or the
   `UPDATE OF` columns are not set) or **unknown** (the trigger's function was
   not scanned or has no known effect).
+- **GitHub Action `html` input:** also writes the offline graph page
+  (`bizmap export --format html`) to a path, with an `html` output; on `push`
+  events it only scans and writes the page, to publish on GitHub Pages
+  (example workflow in docs/action.md). Without the input nothing changes.
+- **Graph example on the docs site:** https://lucas-simao.github.io/bizmap/graph/
+  (`examples/checkout`), rebuilt with the docs on every push to `main`; the
+  PR `docs-site` artifact includes `graph/index.html`.
 - Graph: `db_trigger` nodes have an optional `columns` list (the
   `UPDATE OF col, …` columns), only when the trigger has that clause; every
   other node is unchanged.

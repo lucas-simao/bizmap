@@ -569,3 +569,11 @@ def test_trigger_update_of_end_to_end(tmp_path: Path, case: str, unscanned: bool
     md = render_markdown(g, compute_impact(g, _diff(("store/store.go", line))))
     row = next(ln for ln in md.splitlines() if ln.startswith(f"| ⚡ `{name}`"))
     assert "| AFTER UPDATE OF status |" in row and f"| {fired} |" in row, row
+
+
+def test_footer_version_comes_from_the_package() -> None:
+    g = checkout_graph()
+    md = render_markdown(g, checkout_impact(g))
+    assert f"docs/action.md) {__version__} ·" in md
+    short = render_markdown(Graph(), Impact(functions=[], unmapped_files=[]))
+    assert f"docs/action.md) {__version__} ·" in short

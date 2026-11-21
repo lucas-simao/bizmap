@@ -28,6 +28,9 @@ inputs:
   risk-threshold:
     description: "Fail the job when the risk is at least this level: low, medium or high. Empty (default) never fails; the comment is posted first."
     default: ""
+  html:
+    description: "Also write the offline graph page (`bizmap export --format html`) to this path, relative to the workspace. Also works on push events (then only the page is produced). Empty (default): no page."
+    default: ""
   fail-on-error:
     description: Fail the job when BizMap itself fails (the check is advisory by default; the comment always says it failed).
     default: "false"
@@ -47,6 +50,9 @@ outputs:
   risk:
     description: none, low, medium or high (empty when BizMap did not produce a report).
     value: ${{ steps.impact.outputs.risk }}
+  html:
+    description: Absolute path of the graph page written for the `html` input (empty without it).
+    value: ${{ steps.impact.outputs.html }}
 runs:
   using: composite
   steps:
@@ -61,6 +67,7 @@ runs:
         CONFIG: ${{ inputs.config }}
         MAX_ROWS: ${{ inputs.max-rows }}
         MERMAID: ${{ inputs.mermaid }}
+        HTML: ${{ inputs.html }}
         SHARED: ${{ inputs.shared-services }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -93,7 +100,32 @@ runs:
           echo "::error::could not install BizMap"
           finish failed "Failed: BizMap could not be installed."
         fi
+        scan_graph() {
+          args=()
+          if [ -n "$CONFIG" ]; then args+=(--config "$CONFIG"); fi
+          if ! bizmap scan "$SCAN_PATH" "${args[@]}" --out "$out/graph.json"; then
+            echo "::error::bizmap scan failed"
+            finish failed "Failed: \`bizmap scan\` did not finish."
+          fi
+        }
+        export_html() {  # only with the `html` input
+          [ -n "$HTML" ] || return 0
+          ecfg=()
+          if [ -n "$CONFIG" ]; then ecfg=(--config "$CONFIG")
+          elif [ -f "$SCAN_PATH/bizmap.yaml" ]; then ecfg=(--config "$SCAN_PATH/bizmap.yaml"); fi
+          mkdir -p "$(dirname "$HTML")"
+          if ! bizmap export --graph "$out/graph.json" --format html --out "$HTML" "${ecfg[@]}"; then
+            echo "::error::bizmap export failed"
+            finish failed "Failed: \`bizmap export --format html\` did not finish."
+          fi
+          echo "html=$(realpath "$HTML")" >> "$GITHUB_OUTPUT"
+        }
         if [ -z "${BASE_SHA:-}" ]; then
+          if [ -n "$HTML" ]; then  # e.g. on push to main, to publish the page
+            scan_graph
+            export_html
+            finish skipped "Skipped the impact (not a pull_request event); wrote the graph page to \`$HTML\`."
+          fi
           echo "::warning::bizmap-impact only runs on pull_request events (no base commit here)."
           finish skipped "Skipped: not a pull_request event."
         fi
@@ -138,12 +170,8 @@ runs:
             link_sha="$HEAD_SHA"
           fi
         fi
-        args=()
-        if [ -n "$CONFIG" ]; then args+=(--config "$CONFIG"); fi
-        if ! bizmap scan "$SCAN_PATH" "${args[@]}" --out "$out/graph.json"; then
-          echo "::error::bizmap scan failed"
-          finish failed "Failed: \`bizmap scan\` did not finish."
-        fi
+        scan_graph
+        export_html
         common=(--graph "$out/graph.json" --diff "$out/pr.diff" --prefix "$SCAN_PATH" --repo-root .
           --blob-url "$REPO_URL/blob/$link_sha" --shared-services "$SHARED")
         if [ "$MERMAID" = false ]; then common+=(--no-mermaid); fi
