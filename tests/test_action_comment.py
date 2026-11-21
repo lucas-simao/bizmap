@@ -309,11 +309,12 @@ def test_trigger_that_does_not_fire_is_not_a_risk() -> None:
     g = checkout_graph()
     g.add_node("db_trigger:orders_touch", "db_trigger", name="orders_touch", table="orders", timing="AFTER",
                events=["UPDATE"], function="touch", evidence={"file": "db/schema.sql", "line": 60})
+    # its function `touch()` is not in the scanned schema: still "no", an INSERT never fires it
     imp = compute_impact(g, _diff(("api/repository/orders.go", 15)))  # InsertOrder only
     md = render_markdown(g, imp, shared_services=9)
     assert "fires trigger `orders_audit`" in md and "orders_touch`" not in md.split("<details")[0]
     row = next(ln for ln in md.splitlines() if ln.startswith("| ⚡ `orders_touch`"))
-    assert "no (the writes don't match its events)" in row
+    assert "no (no UPDATE in these writes (INSERT only))" in row, row
     assert "orders_touch" not in render_mermaid(g, imp, triggers={"table:orders": ["db_trigger:orders_audit"]})
     diagram = md.split("```mermaid", 1)[1].split("```", 1)[0]
     assert "orders_audit" in diagram and "orders_touch" not in diagram
@@ -382,3 +383,197 @@ def test_cli_full_out_from_one_impact(tmp_path: Path) -> None:
     text = full.read_text(encoding="utf-8")
     assert "more function(s) with impact not shown" not in text and "Orders.Cancel" in text
     assert "```mermaid" not in text and f"{BLOB}/api/handlers/orders.go#L25-L48" in text
+
+
+def test_trigger_without_known_effect_is_unknown_not_no() -> None:
+    """Its function is not in the scanned schema: the scan can't record a firing."""
+    g = checkout_graph()
+    g.add_node("db_trigger:orders_stamp", "db_trigger", name="orders_stamp", table="orders", timing="AFTER",
+               events=["UPDATE"], function="stamp", evidence={"file": "db/schema.sql", "line": 70})
+    g.add_edge("triggers", "db_trigger:orders_stamp", "table:orders")  # what the scan does without the function
+    md = render_markdown(g, compute_impact(g, _diff(("api/repository/orders.go", 35))))  # SetStatus: UPDATE
+    row = next(ln for ln in md.splitlines() if ln.startswith("| ⚡ `orders_stamp`"))
+    assert "unknown (its function was not scanned or has no known effect)" in row, row
+    assert "orders_stamp" not in md.split("<details")[0]  # not a risk reason
+
+
+def test_norm_matches_posix_paths() -> None:
+    from pathlib import PurePosixPath
+
+    from bizmap.impact import _norm
+
+    for p in ["//a/b", "///a", "", ".", "./a/b.go", "a//b/./c.py", "a/b/", "/abs/x.ts", "a\\b\\c.go", "./", "a/./", "x"]:
+        want = PurePosixPath(p.replace("\\", "/")).as_posix()
+        want = "" if want == "." else want.removeprefix("./")
+        assert _norm(p) == want, (p, _norm(p), want)
+
+
+@pytest.mark.perf
+def test_render_is_linear_in_edges() -> None:
+    """Folding used to scan every edge of the graph for each changed caller."""
+    import time
+
+    g = Graph()
+    g.attrs["repo_roots"] = {"x": "."}
+    diff = []
+    for i in range(2000):
+        a = _fn(g, "", f"pkg.h{i}", f"h{i}.py", 1, 9)
+        b = _fn(g, "", f"pkg.s{i}", f"s{i}.py", 1, 9)
+        g.add_edge("calls", a, b)
+        g.add_edge("writes", b, _col(g, f"t{i % 40}", "c"), evidence=_ev(f"s{i}.py", 3))
+        diff += [(f"h{i}.py", 2), (f"s{i}.py", 2)]
+    for i in range(60000):  # unrelated edges elsewhere in the graph
+        g.add_edge("reads", f"function:other.f{i}", f"column:u{i % 99}.c", evidence=_ev("o.py", 1))
+    imp = compute_impact(g, _diff(*diff))
+    t = time.perf_counter()
+    render_markdown(g, imp, details_url=RUN)
+    render_markdown(g, imp, max_rows=100_000, max_chars=1_000_000, max_bytes=1_000_000)
+    assert time.perf_counter() - t < 2, time.perf_counter() - t  # was ~5.8 s before the index
+
+
+def test_trigger_with_effect_and_matching_event_but_not_fired_is_no() -> None:
+    """Known effect, an UPDATE in the change, yet no firing: the `UPDATE OF` columns did not match."""
+    g = checkout_graph()
+    g.add_node("db_trigger:orders_paid", "db_trigger", name="orders_paid", table="orders", timing="AFTER",
+               events=["UPDATE"], function="paid", evidence={"file": "db/schema.sql", "line": 80})
+    g.add_node("function:sql.paid", "function", name="paid")
+    g.add_edge("triggers", "db_trigger:orders_paid", "function:sql.paid")
+    g.add_edge("writes", "function:sql.paid", "table:audit_log")
+    md = render_markdown(g, compute_impact(g, _diff(("api/repository/orders.go", 35))))  # SetStatus: UPDATE
+    row = next(ln for ln in md.splitlines() if ln.startswith("| ⚡ `orders_paid`"))
+    assert "no (the scan saw no write matching its events or `UPDATE OF` columns)" in row, row
+
+
+def test_sample_names_are_alphabetical() -> None:
+    from bizmap.impact import _first_labels
+
+    g = Graph()
+    ids = [_fn(g, "", f"pkg.{n}", "a.py", 1, 2) for n in ("zeta", "alpha", "mid", "beta")]
+    assert _first_labels(g, set(ids), 2)[:2] == ["pkg.alpha", "pkg.beta"]
+    assert len(_first_labels(g, set(ids), 2)) == 4
+
+
+# ── triggers with `UPDATE OF` columns: the four cases of the brief ──────────
+
+
+def _orders_trigger_graph(*, unscanned: bool) -> Graph:
+    """orders(id, status, note); AFTER UPDATE OF status → audit_status() writes
+    order_audit (as the scan records it), or a trigger whose function is not
+    in the scanned schema."""
+    g = Graph()
+    g.repo = "shop"
+    g.attrs["repo_roots"] = {"shop": "."}
+    set_status = _fn(g, "", "store.Store.SetStatus", "store/store.go", 10, 13)
+    set_note = _fn(g, "", "store.Store.SetNote", "store/store.go", 15, 18)
+    create = _fn(g, "", "store.Store.Create", "store/store.go", 20, 23)
+    for fid, ep, path in [(set_status, "PATCH:/orders/:id/status", "/orders/:id/status"),
+                          (set_note, "PATCH:/orders/:id/note", "/orders/:id/note"),
+                          (create, "POST:/orders", "/orders")]:
+        method, _sep, _p = ep.partition(":")
+        g.add_edge("triggers", _ep(g, "", "http", ep, "main.go", 5, method=method, path=path), fid)
+    g.add_edge("writes", set_status, _col(g, "orders", "status"), ops=["UPDATE"], evidence=_ev("store/store.go", 11))
+    g.add_edge("writes", set_note, _col(g, "orders", "note"), ops=["UPDATE"], evidence=_ev("store/store.go", 16))
+    for c in ("id", "status"):
+        g.add_edge("writes", create, _col(g, "orders", c), ops=["INSERT"], evidence=_ev("store/store.go", 21))
+    name, fn = ("orders_stamp", "stamp") if unscanned else ("orders_audit", "audit_status")
+    tid = f"db_trigger:{name}"
+    g.add_node(tid, "db_trigger", name=name, table="orders", timing="AFTER", events=["UPDATE"],
+               function=fn, columns=["status"], evidence={"file": "schema.sql", "line": 4})
+    if unscanned:
+        g.add_edge("triggers", tid, "table:orders")
+    else:
+        g.add_node("function:sql.audit_status", "function", name="sql.audit_status")
+        g.add_edge("triggers", tid, "function:sql.audit_status")
+        g.add_node("table:order_audit", "table", name="order_audit")
+        g.add_edge("writes", "function:sql.audit_status", "table:order_audit")
+        g.add_edge("writes", set_status, "table:order_audit", via=f"db_trigger:{name}", evidence=_ev("store/store.go", 11))
+    return g
+
+
+_TRIGGER_CASES = [
+    ("status", False, 11, "**yes**"),
+    ("note", False, 16, "no (`UPDATE OF status`; these writes set note only)"),
+    ("insert", False, 21, "no (no UPDATE in these writes (INSERT only))"),
+    ("unscanned", True, 11, "unknown (its function was not scanned or has no known effect)"),
+]
+
+
+@pytest.mark.parametrize(("case", "unscanned", "line", "fired"), _TRIGGER_CASES, ids=[c[0] for c in _TRIGGER_CASES])
+def test_snapshot_trigger_update_of(case: str, unscanned: bool, line: int, fired: str) -> None:
+    g = _orders_trigger_graph(unscanned=unscanned)
+    md = render_markdown(g, compute_impact(g, _diff(("store/store.go", line))), blob_url=BLOB)
+    _snapshot(f"trigger_{case}", md)
+    name = "orders_stamp" if unscanned else "orders_audit"
+    row = next(ln for ln in md.splitlines() if ln.startswith(f"| ⚡ `{name}`"))
+    assert "| AFTER UPDATE OF status |" in row and f"| {fired} |" in row, row
+    assert ("fires trigger" in md.split("<details")[0]) == (fired == "**yes**")
+
+
+TRIGGER_OF_SCHEMA = """
+CREATE TABLE orders (id uuid PRIMARY KEY, status text, note text);
+CREATE TABLE order_audit (order_id uuid, status text);
+CREATE FUNCTION audit_status() RETURNS trigger AS $$ BEGIN
+  INSERT INTO order_audit(order_id, status) VALUES (NEW.id, NEW.status); RETURN NEW; END $$ LANGUAGE plpgsql;
+CREATE TRIGGER orders_audit AFTER UPDATE OF status ON orders
+  FOR EACH ROW EXECUTE FUNCTION audit_status();
+CREATE TRIGGER orders_any AFTER INSERT ON orders
+  FOR EACH ROW EXECUTE FUNCTION audit_status();
+"""
+
+TRIGGER_OF_UNSCANNED = """
+CREATE TABLE orders (id uuid PRIMARY KEY, status text, note text);
+CREATE TRIGGER orders_stamp AFTER UPDATE OF status ON orders
+  FOR EACH ROW EXECUTE FUNCTION stamp();
+"""
+
+TRIGGER_OF_GO = """package store
+
+import (
+	"context"
+	"database/sql"
+)
+
+type Store struct{ db *sql.DB }
+
+func (s *Store) SetStatus(ctx context.Context, id, status string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE orders SET status = $2 WHERE id = $1", id, status)
+	return err
+}
+
+func (s *Store) SetNote(ctx context.Context, id, note string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE orders SET note = $2 WHERE id = $1", id, note)
+	return err
+}
+
+func (s *Store) Create(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "INSERT INTO orders (id, status) VALUES ($1, 'new')", id)
+	return err
+}
+"""
+
+
+@pytest.mark.parametrize(("case", "unscanned", "line", "fired"), _TRIGGER_CASES, ids=[c[0] for c in _TRIGGER_CASES])
+def test_trigger_update_of_end_to_end(tmp_path: Path, case: str, unscanned: bool, line: int, fired: str) -> None:
+    """Real scan of the brief's repro: `columns` on the node, and the four answers."""
+    from bizmap.scan import scan_path
+
+    (tmp_path / "store").mkdir()
+    (tmp_path / "go.mod").write_text("module example.com/shop\n\ngo 1.22\n", encoding="utf-8")
+    (tmp_path / "schema.sql").write_text(TRIGGER_OF_UNSCANNED if unscanned else TRIGGER_OF_SCHEMA, encoding="utf-8")
+    (tmp_path / "store" / "store.go").write_text(TRIGGER_OF_GO, encoding="utf-8")
+    g = scan_path(tmp_path)
+    name = "orders_stamp" if unscanned else "orders_audit"
+    assert g.nodes[f"db_trigger:{name}"].attrs["columns"] == ["status"]
+    if not unscanned:
+        assert "columns" not in g.nodes["db_trigger:orders_any"].attrs  # no OF clause: unchanged node
+    md = render_markdown(g, compute_impact(g, _diff(("store/store.go", line))))
+    row = next(ln for ln in md.splitlines() if ln.startswith(f"| ⚡ `{name}`"))
+    assert "| AFTER UPDATE OF status |" in row and f"| {fired} |" in row, row
+
+
+def test_footer_version_comes_from_the_package() -> None:
+    g = checkout_graph()
+    md = render_markdown(g, checkout_impact(g))
+    assert f"docs/action.md) {__version__} ·" in md
+    short = render_markdown(Graph(), Impact(functions=[], unmapped_files=[]))
+    assert f"docs/action.md) {__version__} ·" in short

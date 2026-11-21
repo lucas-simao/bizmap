@@ -1,14 +1,22 @@
 # Documentation site → GitHub Pages (https://lucas-simao.github.io/bizmap/).
 # Pull requests: build with --strict (broken links fail) and upload the site as
 # an artifact to download and open locally. Pushes to main: build and deploy.
+# The site also carries the graph page of the example (examples/checkout) at
+# /graph/, built from this checkout: every push to main redeploys, so the page
+# follows the code (a Pages site is one artifact per repository).
 # One-time setup: Settings → Pages → Build and deployment → Source: GitHub Actions.
 name: Docs
 on:
   push:
     branches: [main]
-    paths: ["docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
   pull_request:
-    paths: ["docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+      - "src/**"
+      - "examples/**"
+      - "pyproject.toml"
   workflow_dispatch:
 permissions:
   contents: read
@@ -27,6 +35,18 @@ jobs:
           cache-dependency-path: docs/requirements.txt
       - run: pip install -r docs/requirements.txt
       - run: mkdocs build --strict
+      - name: Graph page of the example (site/graph/)
+        run: |
+          set -euo pipefail
+          pip install --quiet .
+          cd examples/checkout   # web → api → billing, one bizmap.yaml with `repos:`
+          bizmap scan . --out "$RUNNER_TEMP/checkout.graph.json"
+          bizmap export --graph "$RUNNER_TEMP/checkout.graph.json" --format html \
+            --out "$GITHUB_WORKSPACE/site/graph/index.html"
+          page="$GITHUB_WORKSPACE/site/graph/index.html"
+          test -s "$page" && grep -q '<html' "$page"
+          for service in web api billing; do grep -q "$service" "$page"; done
+          echo "graph page: $(wc -c < "$page") bytes" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload site (pull requests)
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
