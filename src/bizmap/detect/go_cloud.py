@@ -91,12 +91,32 @@ class GoPublish:
 
 
 @dataclass
+class GoSqlWrite:
+    symbol: str
+    file: str
+    line: int
+    table: str
+    via: str | None = None  # the function that builds the SQL text
+
+
+@dataclass
+class GoCall:
+    symbol: str
+    target: str
+    file: str
+    line: int
+
+
+@dataclass
 class GoCloudResult:
     accesses: list[FsAccess] = field(default_factory=list)
     publishes: list[GoPublish] = field(default_factory=list)
     json_tags: dict[str, dict[str, str]] = field(default_factory=dict)  # struct -> Go field -> json name
     fs_tags: dict[str, dict[str, str]] = field(default_factory=dict)  # struct -> Go field -> firestore name
     func_returns: dict[str, str] = field(default_factory=dict)  # func name -> returned type
+    sql_writes: list[GoSqlWrite] = field(default_factory=list)
+    sql_builders: dict[str, str] = field(default_factory=dict)  # func returning write SQL -> table
+    calls: list[GoCall] = field(default_factory=list)  # interface calls resolved to their implementation
 
 
 @dataclass
@@ -344,7 +364,8 @@ def scan_go(
     """``functions``: (qualname, file, start line, end line) of the Go functions."""
     res = GoCloudResult()
     go_texts = {rel: t for rel, t in texts.items() if rel.endswith(".go") and not rel.endswith("_test.go")}
-    if not any(FS_IMPORT.search(t) or PS_IMPORT.search(t) for t in go_texts.values()):
+    cloud = any(FS_IMPORT.search(t) or PS_IMPORT.search(t) for t in go_texts.values())
+    if not cloud and not any(_SQL_HINT.search(t) for t in go_texts.values()):
         return res
     by_file: dict[str, list[_Fn]] = {}
     for qual, file, start, end in functions:
@@ -353,11 +374,119 @@ def scan_go(
     files = {rel: _GoFile(rel, t, by_file.get(rel, [])) for rel, t in go_texts.items()}
     idx = _Index(files, env_values or {})
     res.json_tags, res.fs_tags, res.func_returns = idx.json_tags, idx.fs_tags, idx.returns
+    infos = _fn_infos(files)
+    _sql_builders(files, infos, res)
+    _closure_calls(files, infos, res)
+    if not cloud:
+        return res
+    # a package that imports Firestore in one file uses its client in the others too
+    fs_dirs = {_dir(rel) for rel, t in go_texts.items() if FS_IMPORT.search(t)}
+    helpers: dict[str, list[_FnInfo]] = {}
+    for f in infos:
+        helpers.setdefault(f.name, []).append(f)
     for rel, gf in files.items():
-        if FS_IMPORT.search(go_texts[rel]):
-            _firestore(gf, idx, res)
-    _pubsub(files, go_texts, idx, res)
+        if _dir(rel) in fs_dirs:
+            _firestore(gf, idx, res, helpers)
+    _pubsub(files, go_texts, idx, res, infos)
     return res
+
+
+def _dir(rel: str) -> str:
+    return rel.rsplit("/", 1)[0] if "/" in rel else ""
+
+
+# ---------------------------------------------------------------- SQL text built by a function ----
+
+_SQL_HINT = re.compile(r"(?i)\b(?:insert\s+into|update\s|delete\s+from|merge\s+into)")
+_WRITE_SQL = re.compile(r'(?is)^\s*(?:insert\s+into|update|delete\s+from|merge\s+into|replace\s+into)\s+((?:"?[\w]+"?\.)?"?[\w]+"?)')
+_SQL_METHODS = {"Queue", "Exec", "ExecContext", "Query", "QueryContext", "QueryRow", "QueryRowContext", "Prepare"}
+
+
+def _write_table(sql: str) -> str | None:
+    m = _WRITE_SQL.match(sql or "")
+    if not m:
+        return None
+    name = m.group(1).replace('"', "").lower()
+    return name if name not in ("set", "only") else None
+
+
+def _sql_builders(files: dict[str, _GoFile], infos: list[_FnInfo], res: GoCloudResult) -> None:
+    """`func upsertSQL(cols) string { return "INSERT INTO t (" + … }` passed to `b.Queue(upsertSQL(c), …)`
+    / `db.Exec(ctx, upsertSQL(c), …)`: a write of ``t`` (table level: the columns are built at run
+    time). Also a literal write passed to `pgx.Batch.Queue`."""
+    builders: dict[str, str] = {}
+    for f in infos:
+        for mm in re.finditer(r"\breturn\s+(?:fmt\.Sprintf\(\s*)?(\x00\d+\x00)", f.body):
+            lit = f.gf.m.lit(mm.group(1))
+            table = _write_table(lit.value if lit is not None else "")
+            if table:
+                builders[f.name] = table
+    res.sql_builders = builders
+    for f in infos:
+        for mm in re.finditer(rf"\.\s*({'|'.join(sorted(_SQL_METHODS))})\s*\(", f.body):
+            args = _publish_args(f.body, mm.end() - 1)
+            line = f.fn.start + f.body.count("\n", 0, mm.start())
+            for k, a in enumerate(args[:2]):
+                a = a.strip()
+                bm = re.match(rf"^(?:{_IDENT}\.)?({_IDENT})\s*\(", a)
+                if bm and bm.group(1) in builders and bm.group(1) != f.name:
+                    res.sql_writes.append(GoSqlWrite(f.fn.qual, f.gf.rel, line, builders[bm.group(1)], bm.group(1)))
+                    break
+                if k == 0 and mm.group(1) == "Queue":
+                    lit = _lit(f.gf.m, a)
+                    table = _write_table(lit or "")
+                    if table:
+                        res.sql_writes.append(GoSqlWrite(f.fn.qual, f.gf.rel, line, table))
+                        break
+
+
+# ---------------------------------------------------------------- interface calls in closures ----
+
+
+def _iface_methods(files: dict[str, _GoFile]) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for gf in files.values():
+        for mm in _IFACE.finditer(gf.text):
+            close = match_close(gf.text, mm.end() - 1)
+            out[mm.group(1)] = set(re.findall(rf"(?m)^\s*({_IDENT})\s*\(", gf.text[mm.end() : close]))
+    return out
+
+
+def _closure_params(f: _FnInfo) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    first = _HEADER.search(f.body)
+    for mm in re.finditer(r"\bfunc\s*\(", f.body):
+        if first is not None and mm.start() == first.start():
+            continue
+        close = match_close(f.body, mm.end() - 1)
+        out += _params(f.body[mm.end() : close])
+    return out
+
+
+def _closure_calls(files: dict[str, _GoFile], infos: list[_FnInfo], res: GoCloudResult) -> None:
+    """`store.WithLock(ctx, id, func(ctx context.Context, tx models.OrderTx) error { return tx.Write(…) })`:
+    ``tx.Write`` is the one type implementing the interface ``OrderTx``."""
+    ifaces = _iface_methods(files)
+    if not ifaces:
+        return
+    methods: dict[str, dict[str, _FnInfo]] = {}
+    for f in infos:
+        if f.recv_type:
+            methods.setdefault(f.recv_type, {})[f.name] = f
+    for f in infos:
+        cps = {n: _norm_type(t) for n, t in _closure_params(f) if n != "_"}
+        if not cps:
+            continue
+        for mm in re.finditer(rf"(?<![\w.])({_IDENT})\s*\.\s*({_IDENT})\s*\(", f.body):
+            iface = cps.get(mm.group(1))
+            need = ifaces.get(iface or "")
+            if not need or mm.group(2) not in need:
+                continue
+            impls = [ms[mm.group(2)] for ms in methods.values() if need <= set(ms)]
+            if len(impls) != 1:
+                continue
+            line = f.fn.start + f.body.count("\n", 0, mm.start())
+            res.calls.append(GoCall(f.fn.qual, impls[0].fn.qual, f.gf.rel, line))
 
 
 # ---------------------------------------------------------------- Firestore ----
@@ -420,8 +549,70 @@ def _write_fields(gf: _GoFile, idx: _Index, args: list[str], body: str) -> list[
     return []
 
 
-def _firestore(gf: _GoFile, idx: _Index, res: GoCloudResult) -> None:
+def _enclosing_call(t: str, pos: int) -> tuple[str, int] | None:
+    """(callee, argument index) of the call whose argument list contains ``pos``."""
+    depth = 0
+    commas = 0
+    i = pos - 1
+    while i >= 0:
+        c = t[i]
+        if c in ")]}":
+            depth += 1
+        elif c in "([{":
+            if depth == 0:
+                if c != "(":
+                    return None
+                cm = re.search(rf"({_IDENT}(?:\.{_IDENT})*)\s*$", t[max(0, i - 120) : i])
+                return (cm.group(1), commas) if cm else None
+            depth -= 1
+        elif c == "," and depth == 0:
+            commas += 1
+        elif c in "\n;" and depth == 0:
+            return None
+        i -= 1
+    return None
+
+
+def _helper_op(gf: _GoFile, idx: _Index, helpers: dict[str, list[_FnInfo]], callee: str, k: int,
+               colls: list[str]) -> str | None:
+    """What a local helper does with the reference passed as its ``k``-th argument."""
+    name = callee.split(".")[-1]
+    if name in _CHAIN_READ | _CHAIN_WRITE | _CHAIN_PASS or name in ("append", "make", "len"):
+        return None
+    cands = [h for h in helpers.get(name, []) if _dir(h.gf.rel) == _dir(gf.rel)]
+    if len(cands) != 1:
+        return "read" if not cands and name[:1].islower() else None
+    h = cands[0]
+    if k >= len(h.params):
+        return None
+    p = h.params[k][0]
+    ops: set[str] = set()
+    for mm in re.finditer(rf"(?<![\w.]){re.escape(p)}\s*(?=\.)", h.body):
+        rest = h.body[mm.end() :]
+        cm = re.match(r"(?:\s*\.\s*[A-Z]\w*\s*\([^()]*(?:\([^()]*\))*[^()]*\))*?\s*\.\s*([A-Z]\w*)\s*\(", rest)
+        while cm:
+            meth = cm.group(1)
+            if meth in _CHAIN_WRITE:
+                ops.add("write")
+                break
+            if meth in _CHAIN_READ:
+                ops.add("read")
+                break
+            if meth not in _CHAIN_PASS:
+                break
+            j = match_close(rest, cm.end() - 1)
+            rest = rest[j + 1 :]
+            cm = re.match(r"\s*\.\s*([A-Z]\w*)\s*\(", rest)
+    for mm in re.finditer(rf"\.\s*(Get|Set|Update|Delete|Create|GetAll)\s*\([^()]*?(?<![\w.]){re.escape(p)}\b", h.body):
+        ops.add("read" if mm.group(1) in ("Get", "GetAll") else "write")
+    if "write" in ops:
+        return "write"
+    return "read"  # at least the caller reads it
+
+
+def _firestore(gf: _GoFile, idx: _Index, res: GoCloudResult, helpers: dict[str, list[_FnInfo]] | None = None) -> None:
     t = gf.text
+    helpers = helpers or {}
     sites: list[tuple[str, list[str], int, list[str]]] = []
     used: set[int] = set()
     for mm in re.finditer(r"\.\s*Collection\s*\(", t):
@@ -432,12 +623,19 @@ def _firestore(gf: _GoFile, idx: _Index, res: GoCloudResult) -> None:
             used.add(mm.start() + sub.start())
         if colls and op:
             sites.append((op, colls, mm.start(), last))
+        elif colls and re.match(r"\s*[,)]", t[end:]):
+            # `updateFields(ctx, r.client.Collection("c").Doc(id), f)`: what the helper does with it
+            call = _enclosing_call(t, mm.start())
+            if call is not None:
+                hop = _helper_op(gf, idx, helpers, call[0], call[1], colls)
+                if hop:
+                    sites.append((hop, colls, mm.start(), []))
     # references kept in a variable (or a slice element), per function
     spans = [(gf.lines_at[f.start - 1], gf.lines_at[f.end] if f.end < len(gf.lines_at) else len(t)) for f in gf.fns] or [(0, len(t))]
     for a, b in spans:
         body = t[a:b]
         refs: dict[str, list[str]] = {}
-        for mm in re.finditer(rf"\b({_IDENT})(?:\s*\[[^\]\n]*\])?\s*(?:,\s*{_IDENT}\s*)?:?=\s*[\w.()\[\]]*?(?=\.\s*Collection\s*\()", body):
+        for mm in re.finditer(rf"\b({_IDENT})(?:\s*\[[^\]\n]*\])?\s*(?:,\s*{_IDENT}\s*)?:?=\s*(?:append\(\s*\1\s*,\s*)?[\w.()\[\]]*?(?=\.\s*Collection\s*\()", body):
             colls, _end, op, _ = _chain(gf, idx, a + mm.end(), None)
             if colls and op is None:
                 refs[mm.group(1)] = colls
@@ -446,6 +644,13 @@ def _firestore(gf: _GoFile, idx: _Index, res: GoCloudResult) -> None:
                 got, _end, op, last = _chain(gf, idx, a + mm.end(), colls)
                 if got and op:
                     sites.append((op, got, a + mm.start(), last))
+            # arrayUpdate(ctx, ref, "tags", …): what the helper does with it
+            for mm in re.finditer(rf"[(,]\s*{re.escape(name)}\s*(?=[,)])", body):
+                call = _enclosing_call(t, a + mm.start() + 1)
+                if call is not None and call[0].split(".")[-1] not in ("Get", "Set", "Update", "Delete", "Create", "GetAll"):
+                    hop = _helper_op(gf, idx, helpers, call[0], call[1], colls)
+                    if hop:
+                        sites.append((hop, colls, a + mm.start(), []))
             # client.GetAll(ctx, refs): the references built above (in a loop)
             for mm in re.finditer(rf"\.\s*GetAll\s*\(\s*{_IDENT}\s*,\s*{re.escape(name)}\b", body):
                 sites.append(("read", colls, a + mm.start(), []))
@@ -477,7 +682,7 @@ _BUILTIN_TYPES = {"string", "bool", "int", "int64", "int32", "float64", "float32
 
 # An instance of a publisher wrapper: the map key it was built for (``None``
 # when it was not built in a keyed loop) and the topics it publishes to.
-_Inst = tuple[str | None, tuple[GoTopic, ...]]
+_Inst = tuple[str | None, tuple[GoTopic, ...], str]  # (map key, topics, constructor)
 
 
 def _publish_args(t: str, open_paren: int) -> list[str]:
@@ -554,6 +759,8 @@ class _Flow:
         self.ctors = ctors  # constructor name -> topic parameter index
         self.files = files
         self.vals: dict[tuple, frozenset[_Inst]] = {}
+        self._def_cache: dict[str, dict[str, list[int]]] = {}
+        self._pos = 1 << 30  # where in the function the expression being read is
         self.by_name: dict[str, list[_FnInfo]] = {}
         for f in fns:
             self.by_name.setdefault(f.name, []).append(f)
@@ -590,11 +797,31 @@ class _Flow:
             return True
         return False
 
+    def _defs(self, f: _FnInfo) -> dict[str, list[int]]:
+        """Where each local is declared (`x :=`, `if p, err :=`, `var x T`): scopes
+        are told apart by declaration, so two `if p, err := …` blocks are two `p`."""
+        got = self._def_cache.get(f.fn.qual)
+        if got is None:
+            got = {}
+            for mm in re.finditer(rf"(?:^|[\n;{{(]|\b(?:for|if|switch)\s)\s*({_IDENT}(?:\s*,\s*{_IDENT})*)\s*:=", f.body):
+                for nm in re.finditer(_IDENT, mm.group(1)):
+                    got.setdefault(nm.group(0), []).append(mm.start(1))
+            for mm in re.finditer(rf"\bvar\s+({_IDENT})\b", f.body):
+                got.setdefault(mm.group(1), []).append(mm.start(1))
+            for v in got.values():
+                v.sort()
+            self._def_cache[f.fn.qual] = got
+        return got
+
     def _local_key(self, f: _FnInfo, name: str) -> tuple | None:
+        defs = self._defs(f).get(name)
+        if defs:
+            before = [d for d in defs if d <= self._pos]
+            return ("var", f.fn.qual, name, before[-1] if before else defs[0])
         for k, (pn, _) in enumerate(f.params):
             if pn == name:
                 return ("param", f.fn.qual, k)
-        return ("var", f.fn.qual, name)
+        return ("var", f.fn.qual, name, -1)
 
     def _built(self, f: _FnInfo, ctor: str, args: list[str]) -> frozenset[_Inst]:
         index = self.ctors[ctor]
@@ -622,8 +849,8 @@ class _Flow:
                 return frozenset()
             fixed += got
         if keyed is not None:
-            return frozenset((k, tuple(_uniq(fixed + v))) for k, v in keyed)
-        return frozenset({(None, tuple(_uniq(fixed)))}) if fixed else frozenset()
+            return frozenset((k, tuple(_uniq(fixed + v)), ctor) for k, v in keyed)
+        return frozenset({(None, tuple(_uniq(fixed)), ctor)}) if fixed else frozenset()
 
     def _map_literal(self, f: _FnInfo, name: str) -> list[tuple[str, list[GoTopic]]] | None:
         mm = re.search(rf"\b{re.escape(name)}\s*:?=\s*map\[[^\]]*\]\s*\w*\s*\{{", f.body)
@@ -717,8 +944,9 @@ class _Flow:
         body = f.body
         changed = False
         # x := <expr> / x, err := <expr> / x = <expr> / m[k] = <expr> / s.f = <expr>
-        for mm in re.finditer(rf"(?:^|[\n;{{]|\bfor\s)\s*((?:{_IDENT}(?:\.{_IDENT})?(?:\[[^\]\n]*\])?)(?:\s*,\s*{_IDENT})*)\s*:?=(?!=)\s*", body):
+        for mm in re.finditer(rf"(?:^|[\n;{{]|\b(?:for|if|switch)\s)\s*((?:{_IDENT}(?:\.{_IDENT})?(?:\[[^\]\n]*\])?)(?:\s*,\s*{_IDENT})*)\s*:?=(?!=)\s*", body):
             lhs = mm.group(1).split(",")[0].strip()
+            self._pos = mm.start(1)
             rhs = _expr_at(body, mm.end())
             insts = self.value(f, rhs)
             if not insts:
@@ -727,7 +955,7 @@ class _Flow:
             if km:
                 key = _lit(f.gf.m, km.group(2)) or km.group(2).split(".")[-1]
                 if all(i[0] is None for i in insts):
-                    insts = frozenset((key, i[1]) for i in insts)
+                    insts = frozenset((key, i[1], i[2]) for i in insts)
                 target = self._local_key(f, km.group(1))
             elif "." in lhs:
                 v, fld = lhs.split(".", 1)
@@ -746,6 +974,7 @@ class _Flow:
                 continue  # `func New(…) *Service {`: a result type, not a literal
             close = match_close(body, mm.end() - 1)
             parts = split_top(body[mm.end() : close])
+            self._pos = mm.start()
             for k, part in enumerate(parts):
                 kv = re.match(rf"^\s*({_IDENT})\s*:\s*(.+?)\s*$", part, re.S)
                 fname, expr = (kv.group(1), kv.group(2)) if kv else (
@@ -759,6 +988,7 @@ class _Flow:
             if callee in ("func", "if", "for", "switch", "return") or mm.start() == 0:
                 continue
             args = _publish_args(body, mm.end() - 1)
+            self._pos = mm.start()
             vals = [self.value(f, a) for a in args]
             if not any(vals):
                 continue
@@ -794,8 +1024,9 @@ def _iface_sigs(files: dict[str, _GoFile]) -> dict[str, tuple[str, ...]]:
     return out
 
 
-def _pubsub(files: dict[str, _GoFile], texts: dict[str, str], idx: _Index, res: GoCloudResult) -> None:
-    infos = _fn_infos(files)
+def _pubsub(files: dict[str, _GoFile], texts: dict[str, str], idx: _Index, res: GoCloudResult,
+            infos: list[_FnInfo] | None = None) -> None:
+    infos = infos if infos is not None else _fn_infos(files)
     ctors: dict[str, int] = {}  # wrapper constructor -> topic parameter index
     wrappers: dict[str, str] = {}  # wrapper type -> constructor
     wrapper_fns: set[str] = set()
@@ -843,7 +1074,8 @@ def _pubsub(files: dict[str, _GoFile], texts: dict[str, str], idx: _Index, res: 
     # the wrapper's own Publish method: the signature a caller must match
     sigs = {f.recv_type: _publish_sig(f) for f in infos if f.name == "Publish" and f.recv_type in wrappers}
     wrapper_sigs = set(sigs.values())
-    ifaces = {name for name, sig in _iface_sigs(files).items() if sig in wrapper_sigs}
+    iface_sig = _iface_sigs(files)
+    ifaces = {name for name, sig in iface_sig.items() if sig in wrapper_sigs}
     flow = _Flow(idx, infos, ctors, files)
     flow.propagate()
     all_insts: set[_Inst] = set()
@@ -862,15 +1094,23 @@ def _pubsub(files: dict[str, _GoFile], texts: dict[str, str], idx: _Index, res: 
                 continue
             if not any(len(args) == len(sig) for sig in wrapper_sigs):
                 continue  # `store.Publish(ctx, id)`: another Publish
+            flow._pos = mm.start()
             insts = flow.value(f, recv)
             stype = flow.static_type(f, re.sub(r"\[[^\]]*\]$", "", recv))
-            if stype is not None and stype not in ifaces and stype not in wrappers:
+            if stype is not None and stype not in ifaces and stype not in wrappers and stype != "interface":
                 continue  # a receiver of another type
             confidence = "exact"
             if not insts:
-                if stype is None or not all_insts:
+                # a publisher type, instance unknown: the instances of the constructors that
+                # build a value of that type (the wrapper itself, or one whose Publish matches)
+                if stype is None:
                     continue  # nothing says it is a publisher
-                insts = frozenset(all_insts)  # a publisher interface, instance unknown
+                ok_ctors = {wrappers[stype]} if stype in wrappers else {
+                    wrappers[w] for w, sig in sigs.items() if sig == iface_sig.get(stype)
+                }
+                insts = frozenset(i for i in all_insts if i[2] in ok_ctors)
+                if not insts:
+                    continue
                 confidence = "inferred"
             line = f.fn.start + body.count("\n", 0, mm.start())
             fields = _fields_of_data(f.gf, idx, args[1], body)
