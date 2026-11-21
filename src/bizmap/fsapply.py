@@ -31,6 +31,7 @@ from bizmap.graph import (
     entrypoint_id,
     function_id,
     queue_id,
+    table_id,
 )
 
 
@@ -131,6 +132,20 @@ def apply_go_cloud(
         if ev.get("file") and isinstance(start, int) and isinstance(end, int):
             fns.append((str(node.attrs.get("name") or node.id.split(":", 1)[1]), str(ev["file"]), start, end))
     res = scan_go(texts, fns, env_values)
+    for c in res.calls:
+        fid, tid = function_id(c.symbol), function_id(c.target)
+        if fid in graph.nodes and tid in graph.nodes and fid != tid:
+            graph.add_edge("calls", fid, tid, confidence=Confidence.INFERRED, evidence=Evidence(c.file, c.line, c.symbol),
+                           via="interface")
+    for w in res.sql_writes:
+        fid = function_id(w.symbol)
+        if fid not in graph.nodes:
+            continue
+        tid = table_id(w.table)
+        if tid not in graph.nodes:
+            graph.add_node(tid, "table", name=w.table)
+        attrs: dict[str, Any] = {"via": w.via} if w.via else {}
+        graph.add_edge("writes", fid, tid, confidence=Confidence.INFERRED, evidence=Evidence(w.file, w.line, w.symbol), **attrs)
     if not res.accesses and not res.publishes:
         return res
     direct: list[tuple[str, str, str]] = []
