@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from bizmap.detect.go_cloud import GoCloudResult, scan_go, valid_topic
 from bizmap.detect.js_firestore import FS_FILE, FsResult, scan_files
 from bizmap.graph import (
     Confidence,
@@ -112,6 +113,67 @@ def apply_js_firestore(
         edge = graph.add_edge("enqueues", fid, qid, confidence=Confidence.EXACT, evidence=Evidence(p.file, p.line, p.symbol))
         if p.fields:
             edge.attrs["fields"] = sorted(set(edge.attrs.get("fields") or []) | set(p.fields))
+    _propagate(graph, direct)
+    return res
+
+
+def apply_go_cloud(
+    graph: Graph, texts: dict[str, str], env_values: dict[str, str] | None = None
+) -> GoCloudResult | None:
+    """Firestore accesses and Pub/Sub publishes in Go (see ``detect/go_cloud``)."""
+    fns: list[tuple[str, str, int, int]] = []
+    for node in graph.nodes.values():
+        if node.type != "function" or node.attrs.get("language") != "go":
+            continue
+        ev = node.attrs.get("evidence") or {}
+        start = node.attrs.get("start_line") or ev.get("line")
+        end = node.attrs.get("end_line")
+        if ev.get("file") and isinstance(start, int) and isinstance(end, int):
+            fns.append((str(node.attrs.get("name") or node.id.split(":", 1)[1]), str(ev["file"]), start, end))
+    res = scan_go(texts, fns, env_values)
+    if not res.accesses and not res.publishes:
+        return res
+    direct: list[tuple[str, str, str]] = []
+    for a in res.accesses:
+        fid = function_id(a.symbol)
+        if fid not in graph.nodes:
+            continue
+        cid = _ensure_coll(graph, a.collection, a.path)
+        etype = "writes" if a.kind == "write" else "reads"
+        edge = graph.add_edge(etype, fid, cid, confidence=Confidence.EXACT, evidence=Evidence(a.file, a.line, a.symbol))
+        if a.fields:
+            edge.attrs["fields"] = sorted(set(edge.attrs.get("fields") or []) | set(a.fields))
+        direct.append((etype, fid, cid))
+    for p in res.publishes:
+        fid = function_id(p.symbol)
+        node = graph.nodes.get(fid)
+        if node is None:
+            continue
+        named = [t for t in p.topics if t.name and valid_topic(t.name)]
+        dynamic = [t for t in p.topics if not t.name]
+        for t in dynamic:
+            bucket = list(node.attrs.get("unresolved_queues") or [])
+            item = {"kind": "pubsub", "env": t.env, "evidence": Evidence(p.file, p.line, p.symbol).to_dict()}
+            if item not in bucket:
+                bucket.append(item)
+            node.attrs["unresolved_queues"] = bucket
+        names = sorted({t.name for t in named if t.name})
+        for t in named:
+            qid = queue_id("pubsub", str(t.name))
+            graph.add_node(qid, "queue", kind="pubsub", name=t.name)
+            if t.env:
+                graph.nodes[qid].attrs["env"] = t.env
+            attrs: dict[str, Any] = {}
+            if p.via:
+                attrs["via"] = p.via
+            if len(names) > 1:
+                attrs["candidates"] = names
+            edge = graph.add_edge(
+                "enqueues", fid, qid, confidence=Confidence.EXACT if len(names) == 1 else Confidence.INFERRED,
+                evidence=Evidence(p.file, p.line, p.symbol), **attrs,
+            )
+            if p.fields:
+                edge.attrs["fields"] = sorted(set(edge.attrs.get("fields") or []) | set(p.fields))
     _propagate(graph, direct)
     return res
 
