@@ -1029,6 +1029,8 @@ class JsAnalyzer:
             parsed.append((path, rel_file, module, tree, source))
         _KNOWN_MODULES.clear()
         _KNOWN_MODULES.update(_path_to_module(p[1]) for p in parsed)
+        _MODULE_DIRS.clear()
+        _MODULE_DIRS.update({p[2]: tuple(b for b in p[1].split("/")[:-1] if b and b != ".") for p in parsed})
 
         consts_by_mod: dict[str, dict[str, str]] = {}
         routers_by_mod: dict[str, dict[str, str]] = {}
@@ -3182,6 +3184,10 @@ def _propagate_client_bases(
 
 
 
+# module -> its file's directory parts (set per `analyze`)
+_MODULE_DIRS: dict[str, tuple[str, ...]] = {}
+
+
 def _spec_to_module(
     spec: str,
     current: str,
@@ -3189,7 +3195,11 @@ def _spec_to_module(
 ) -> str:
     spec = spec.strip()
     if spec.startswith("."):
-        parts = current.split(".")
+        # the importing file's real directory: a dotted file name
+        # (`widgets.queries.ts` -> module `...widgets.widgets.queries`) is not
+        # a folder per dot
+        known_dir = _MODULE_DIRS.get(current)
+        parts = [*known_dir, "_"] if known_dir is not None else current.split(".")
         rest = spec
         while rest.startswith("../"):
             parts = parts[:-1]
