@@ -1,4 +1,4 @@
-# BizMap graph schema (v0.5.1)
+# BizMap graph schema (v0.5.2)
 
 `bizmap scan` writes `bizmap.graph.json`. The graph is fully deterministic: every
 node and edge is produced from source text (SQL, tree-sitter ASTs, comments, or
@@ -11,7 +11,7 @@ values except `generated_at`.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | string | Graph format version (`"0.5.1"`). |
+| `version` | string | Graph format version (`"0.5.2"`). |
 | `generated_at` | string | UTC timestamp. |
 | `schema` | object | Reconstructed database schema (`schema.tables`). |
 | `nodes` | array | Graph nodes (see below). |
