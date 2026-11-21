@@ -32,6 +32,17 @@ data links: direct (exact 41, inferred 11), copied to callers/entrypoints 58, vi
 unresolved calls: 0
 ```
 
+When the graph has [`feeds`](../graph-schema.md#data-flow-between-tables-feeds)
+edges, a **data flow between databases** section follows: how many `feeds`,
+how many have columns mapped, the exact / heuristic share, and one line per
+database pair:
+
+```text
+data flow between databases: 2 feeds, 2 with columns mapped, 6 column mappings (exact 4, heuristic 2, 67% exact)
+  orders_db -> orders_db: 1 table, 2 columns (exact 0, heuristic 2)
+  orders_db -> summary_db: 1 table, 4 columns (exact 4, heuristic 0)
+```
+
 Use it on a new codebase before trusting `why` or the PR comment: a low
 "reaching a table" share or many unresolved HTTP calls usually means a
 missing [`services:`](../configuration.md#services) entry, a service that

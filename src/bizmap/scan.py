@@ -8,7 +8,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from bizmap import progress
+from bizmap import dataflow, dbident, progress
 from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
 from bizmap.detect.js_lang import JsAnalysis, JsAnalyzer
 from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer
@@ -63,6 +63,7 @@ from bizmap.sql_analyze import (
     is_external_table,
     is_skipped_table_name,
 )
+from bizmap.srctext import source_texts
 
 
 @dataclass
@@ -2168,6 +2169,8 @@ def relink_merged_graph(graph: Graph, services: dict[str, str] | None = None) ->
     _relink_http_from_graph(graph, services)
     _link_route_literals(graph)
     _relink_queues_from_graph(graph, services)
+    dataflow.link_queue_flows(graph)
+    dbident.link_same_tables(graph)
 
 
 def _warn_unscanned_services(graph: Graph, services: dict) -> None:
@@ -2396,6 +2399,20 @@ def _relink_queues_from_graph(graph: Graph, services: dict[str, str]) -> None:
                     confidence=Confidence.INFERRED,
                     evidence=evidence,
                 )
+
+
+def _apply_dataflow(graph: Graph, root: Path, cfg: ScanConfig, files: list[Path]) -> None:
+    """``db`` on tables and ``feeds`` between them (a text pass after the
+    detectors; a failure there only adds a warning)."""
+    try:
+        texts = source_texts(root, files)
+        idx = dbident.build_index(texts, cfg.raw)
+        dbident.assign_dbs(graph, texts, idx)
+        dataflow.apply(graph, root, texts, firestore=idx.firestore or False)
+    except Exception as exc:  # noqa: BLE001 - never lose the scan over data flow
+        existing = list(graph.attrs.get("warnings") or [])
+        existing.append(f"data-flow pass failed ({type(exc).__name__}: {exc}); feeds skipped")
+        graph.attrs["warnings"] = existing
 
 
 def _git_toplevel(path: Path) -> Path | None:
@@ -2697,6 +2714,7 @@ def _scan_one(
     split_factory_members(graph, root, span_cache)
     split_go_route_closures(graph, root, span_cache)  # its own edge index: after the JS moves
     split_js_inline_handlers(graph)
+    _apply_dataflow(graph, root, cfg, [*go_files, *py_files, *js_files])
     timings.propagate += go_prop + py_prop + (time.perf_counter() - t_prop)
     progress.done(f"{graph.repo}: graph", t_graph)
 

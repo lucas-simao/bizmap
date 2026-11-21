@@ -35,7 +35,7 @@ NODE_TYPES = (
     "queue",
     "view",
 )
-EDGE_TYPES = ("calls", "reads", "writes", "triggers", "calls_http", "enqueues", "derives_from")
+EDGE_TYPES = ("calls", "reads", "writes", "triggers", "calls_http", "enqueues", "derives_from", "feeds")
 
 
 def parse_confidence(value: str | Confidence | None) -> Confidence:
@@ -74,8 +74,16 @@ def sort_list_attrs(value: Any) -> Any:
         except TypeError:
             return items
     if isinstance(value, dict):
-        return {k: sort_list_attrs(v) for k, v in value.items()}
+        return {
+            k: [sort_list_attrs(x) for x in v] if k in ORDERED_LIST_KEYS and isinstance(v, list) else sort_list_attrs(v)
+            for k, v in value.items()
+        }
     return value
+
+
+# lists whose order means something (a `feeds` path: producer → queue → consumer;
+# `via`: strongest path first) — built deterministically, kept as they are
+ORDERED_LIST_KEYS = frozenset({"path", "via"})
 
 
 @dataclass

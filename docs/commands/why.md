@@ -46,5 +46,29 @@ How to read it:
 - **`why:`** under the column name — from
   [`overrides.columns`](../configuration.md#overrides) in `bizmap.yaml`.
 
+### Where a value comes from and goes to
+
+When the graph has [`feeds`](../graph-schema.md#data-flow-between-tables-feeds)
+edges — a function copies values from one table into another, often in
+another database — `why` adds two sections, followed up to 3 steps:
+
+```text
+$ bizmap why resumo_pedido.total
+column: resumo_pedido.total (bigint)
+…
+comes from (data flow):
+  ← orders_db.pedidos.valor_centavos via sync.SyncOrders (exact, sync/orders.go:21)
+
+$ bizmap why pedidos.valor_centavos
+…
+goes to (data flow):
+  → orders_db.resumo_mensal.receita via sync.RollupMonthly (heuristic, transform, sync/orders.go:28)
+  → summary_db.resumo_pedido.total via sync.SyncOrders (exact, sync/orders.go:21)
+```
+
+For a table (`bizmap why pedidos`) each line is a table it feeds or is fed
+from, with the number of columns mapped. `transform` means an expression or
+function is in between; `same name` that only the column names agree.
+
 An unknown column prints `unknown column: …` and exits with status 1.
 The MCP tool [`why_column`](../mcp.md#why_column) returns the same report.

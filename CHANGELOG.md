@@ -4,6 +4,33 @@
 
 ### Added
 
+- **Data flow between databases.** A new `feeds` edge says a function copies
+  values from one table into another, often in another database
+  (`pedidos -> resumo_pedido`), with a `column_map`
+  (`pedidos.valor_centavos -> resumo_pedido.total`, the function, `exact` /
+  `heuristic`, `file:line`). Only created when a value is seen going from
+  the read to the write: in one function (Go `Scan` targets and struct
+  literals, JS/TS `rows` / `rows[0]` / `for…of`, Python cursors and row
+  access, `INSERT … SELECT`, `UPDATE … FROM`, upserts, Firestore
+  `set` / `update` / `add`, ORM writes), through calls in the same service,
+  and through a queue (producer → topic → consumer, also across repos in a
+  joint scan or `registry merge`). Columns that are not in the table's
+  schema (plpgsql variables, parameters) are never mapped. Expressions in between give
+  `transform: true`; a lookup or a permission check gives nothing; ids
+  copied only into id / foreign-key columns are references, not `feeds`.
+- **`db` on tables**: the database the code reaches a table through, from
+  the connection's DSN env var or config field (`ORDERS_DATABASE_URL` →
+  `orders_db`; `DB_SCHEMA` / `DB_HOST` name nothing) or `databases:` in
+  `bizmap.yaml`, only on tables the code reads or writes; Firestore collections get
+  `firestore:<project|default>`. Table ids do not change; in a merged graph
+  the same table with the same `db` in two repos gets `same_as`.
+- `bizmap why` shows where a column **comes from** and **goes to** through
+  `feeds` (up to 3 steps); `bizmap report` has a "data flow between
+  databases" section; `bizmap impact` lists the **downstream** tables and
+  columns fed from a changed sync function or a changed write of a source
+  column (JSON `downstream`, a Markdown section).
+- HTML export: a table's page has a **Data flow** section — diagram,
+  column correspondence both ways, and the diagram as Mermaid text.
 - **Function signatures.** Function nodes carry `params` (in order:
   `[{name, type?, optional?}]`, `[]` when there are none) and `returns` (the
   return type's text) for Go, Python and TypeScript (plain JavaScript: names

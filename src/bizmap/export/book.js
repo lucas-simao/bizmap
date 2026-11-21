@@ -761,6 +761,108 @@
     $("tfilter").oninput = function (e) { fill(e.target.value); };
     detail("");
   }
+  // ── data flow between tables (feeds edges): who fills this table, what it fills ──
+  var FLOW_TXT = {
+    en: { title: "Data flow", lead: "Values copied between tables, seen in the code: a function reads one table and writes the other (directly, through a call, or a queue).",
+          fedBy: "Fed from", feeds: "Feeds", colFrom: "Source", colTo: "Destination", colFn: "Function", colConf: "Confidence",
+          transform: "transformed", sameName: "same name only", tableLevel: "table (no column mapped)", mermaid: "Mermaid source (flowchart LR)", more: "+{n} more" },
+    "pt-BR": { title: "Fluxo de dados", lead: "Valores copiados entre tabelas, vistos no código: uma função lê uma tabela e grava na outra (direto, por chamada ou por fila).",
+          fedBy: "É alimentada por", feeds: "Alimenta", colFrom: "Origem", colTo: "Destino", colFn: "Função", colConf: "Confiança",
+          transform: "transformado", sameName: "só pelo nome", tableLevel: "tabela (nenhuma coluna mapeada)", mermaid: "Código Mermaid (flowchart LR)", more: "+{n} a mais" },
+  };
+  var FLOW_MAX_NODES = 30;
+  function tableName(i) { return IX.tableNames[i] || label(i); }
+  function tableDbName(i) { var r = tableRow[i]; return (r && r.db ? r.db + "." : "") + tableName(i); }
+  function tableLink(i) {
+    var r = tableRow[i], db = r && r.db ? '<span class="muted">' + esc(r.db) + ".</span>" : "";
+    return r ? db + '<a href="#/t/' + i + '">' + esc(tableName(i)) + "</a>" : esc(tableName(i));
+  }
+  function flowPath(p) {
+    return p.map(function (i) { return i < 0 ? "?" : (getNames().t[i] === T_F ? fnLink(i) : esc(label(i))); }).join(" → ");
+  }
+  function flowRows(t, list, dir, col, FT) {
+    var h = "";
+    list.forEach(function (f) {
+      var other = f[0], cols = f[2];
+      var src = dir === "in" ? other : t, dst = dir === "in" ? t : other;
+      if (!cols.length) {
+        h += "<tr><td>" + tableLink(src) + '</td><td>' + tableLink(dst) + ' <span class="muted">' + esc(FT.tableLevel) + "</span></td><td>" + flowPath(f[3]) +
+             (f[4] > 1 ? ' <span class="muted">' + esc(fmt(FT.more, { n: f[4] - 1 })) + "</span>" : "") + '</td><td><span class="kind">' + esc(f[1]) + "</span></td></tr>";
+        return;
+      }
+      cols.forEach(function (c) {
+        var mine = dir === "in" ? c[1] : c[0];
+        var hit = col && mine === col;
+        var flags = (c[4] ? ' <span class="muted">' + esc(FT.transform) + "</span>" : "") + (c[5] ? ' <span class="muted">' + esc(FT.sameName) + "</span>" : "");
+        h += '<tr class="' + (hit ? "on" : "") + '"><td>' + tableLink(src) + '<span class="mono">.' + esc(c[0]) + "</span></td><td>" + tableLink(dst) +
+             '<span class="mono">.' + esc(c[1]) + "</span></td><td>" + (c[6] && c[6].length > 1 ? flowPath(c[6]) : c[2] >= 0 ? fnLink(c[2]) : flowPath(f[3])) +
+             '</td><td><span class="kind">' + esc(c[3]) + "</span>" + flags + "</td></tr>";
+      });
+    });
+    return h;
+  }
+  function flowGraph(t, flow) {
+    // nodes: sources → functions → this table → functions → destinations (at most FLOW_MAX_NODES)
+    var cols = [[], [], [t], [], []], seen = {}, edges = [], budget = FLOW_MAX_NODES - 1, cut = 0;
+    function put(k, id) {
+      var key = k + ":" + id;
+      if (seen[key] !== undefined) return seen[key];
+      if (budget <= 0) { cut++; return null; }
+      budget--; cols[k].push(id); seen[key] = id; return id;
+    }
+    function fnOf(f) { var p = f[3].filter(function (i) { return i >= 0; }); return p.length ? p[p.length - 1] : -1; }
+    (flow.in || []).forEach(function (f) {
+      var a = put(0, f[0]), fn = fnOf(f), m = fn >= 0 ? put(1, fn) : null;
+      if (a === null) return;
+      if (m !== null) { edges.push([0, f[0], 1, fn]); edges.push([1, fn, 2, t]); } else edges.push([0, f[0], 2, t]);
+    });
+    (flow.out || []).forEach(function (f) {
+      var fn = fnOf(f), m = fn >= 0 ? put(3, fn) : null, b = put(4, f[0]);
+      if (b === null) return;
+      if (m !== null) { edges.push([2, t, 3, fn]); edges.push([3, fn, 4, f[0]]); } else edges.push([2, t, 4, f[0]]);
+    });
+    var used = cols.map(function (c, k) { return c.length ? k : -1; }).filter(function (k) { return k >= 0; });
+    var colX = {}, W = 200, GAP = 40, RH = 34;
+    used.forEach(function (k, n) { colX[k] = n * (W + GAP); });
+    var rows = Math.max.apply(null, cols.map(function (c) { return c.length; })) + (cut ? 1 : 0);
+    var width = used.length * (W + GAP) - GAP, height = rows * RH + 8;
+    function y(k, id) { return cols[k].indexOf(id) * RH + 4; }
+    function name(k, id) { return k === 1 || k === 3 ? label(id).split(".").pop() : tableDbName(id); }
+    var svg = '<svg class="flowsvg" width="' + width + '" height="' + height + '" viewBox="0 0 ' + width + " " + height + '" role="img">';
+    edges.forEach(function (e) {
+      var x1 = colX[e[0]] + W, y1 = y(e[0], e[1]) + 13, x2 = colX[e[2]], y2 = y(e[2], e[3]) + 13;
+      svg += '<path d="M' + x1 + " " + y1 + " C" + (x1 + GAP / 2) + " " + y1 + " " + (x2 - GAP / 2) + " " + y2 + " " + x2 + " " + y2 + '" fill="none" stroke="#8c959f" stroke-width="1.2"/>';
+    });
+    used.forEach(function (k) {
+      cols[k].forEach(function (id) {
+        var fn = k === 1 || k === 3, yy = y(k, id), txt = name(k, id);
+        if (txt.length > 28) txt = "…" + txt.slice(txt.length - 27);
+        svg += '<g><rect x="' + colX[k] + '" y="' + yy + '" width="' + W + '" height="26" rx="' + (fn ? 13 : 4) + '" fill="' + (k === 2 ? "#fff8c5" : fn ? "#f6f8fa" : "#ddf4ff") +
+               '" stroke="#8c959f"/><text x="' + (colX[k] + 8) + '" y="' + (yy + 17) + '" font-size="12">' + esc(txt) + "</text><title>" + esc(fn ? label(id) : tableDbName(id)) + "</title></g>";
+      });
+    });
+    if (cut) svg += '<text x="0" y="' + (height - 8) + '" font-size="12" fill="#57606a">' + esc("+" + cut) + "</text>";
+    svg += "</svg>";
+    // the same picture as Mermaid text, to paste into a doc or a PR
+    var ids = {}, mm = ["flowchart LR"], k2 = 0;
+    function mid(k, id) { var key = k + ":" + id; if (!ids[key]) { ids[key] = "n" + (k2++); var lbl = String(name(k, id)).replace(/"/g, "#quot;"); mm.push("  " + ids[key] + (k === 1 || k === 3 ? '(["' + lbl + '"])' : '["' + lbl + '"]')); } return ids[key]; }
+    used.forEach(function (k) { cols[k].forEach(function (id) { mid(k, id); }); });
+    edges.forEach(function (e) { mm.push("  " + mid(e[0], e[1]) + " --> " + mid(e[2], e[3])); });
+    if (cut) mm.push('  more["+' + cut + '"]');
+    return { svg: svg, mermaid: mm.join("\n") };
+  }
+  function flowSection(t, flow, col) {
+    var FT = FLOW_TXT[IX.lang] || FLOW_TXT.en;
+    var nIn = (flow.in || []).length, nOut = (flow.out || []).length;
+    if (!nIn && !nOut) return "";
+    var g = flowGraph(t, flow);
+    var head = '<thead><tr><th>' + esc(FT.colFrom) + "</th><th>" + esc(FT.colTo) + "</th><th>" + esc(FT.colFn) + "</th><th>" + esc(FT.colConf) + "</th></tr></thead>";
+    var h = "<h2>" + esc(FT.title) + '</h2><p class="muted">' + esc(FT.lead) + '</p><div class="flowwrap" style="overflow-x:auto">' + g.svg + "</div>";
+    if (nIn) h += "<h3>" + esc(FT.fedBy) + " (" + nIn + ')</h3><table class="list">' + head + "<tbody>" + flowRows(t, flow.in, "in", col, FT) + "</tbody></table>";
+    if (nOut) h += "<h3>" + esc(FT.feeds) + " (" + nOut + ')</h3><table class="list">' + head + "<tbody>" + flowRows(t, flow.out, "out", col, FT) + "</tbody></table>";
+    h += '<details><summary class="muted">' + esc(FT.mermaid) + '</summary><pre class="mono">' + esc(g.mermaid) + "</pre></details>";
+    return h;
+  }
   function pageTable(t, col) {
     var row = tableRow[t];
     if (!row) return pageTables();
@@ -781,6 +883,7 @@
         return "<tr><td>" + routeLink(r[0]) + "</td><td>" + rwChip(t, r[1]) + "</td></tr>";
       }).join("") + "</tbody></table>";
     }
+    if (info.flow) h += flowSection(t, info.flow, col);
     read(h);
     var d = "<h2>" + esc(IX.tableNames[t]) + "</h2><h3>" + esc(L.columns) + " (" + info.cols.length + ")</h3><ul>" + info.cols.map(function (c) {
       return "<li" + (c[0] === col ? ' style="background:#fff8c5"' : "") + "><code>" + esc(c[0]) + '</code> <span class="muted">' + esc(c[1]) + "</span></li>";

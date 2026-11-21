@@ -585,6 +585,7 @@ def build_book(
     cols_by_table: dict[int, list[int]] = defaultdict(list)
     for c, t in col_tab.items():
         cols_by_table[t].append(c)
+    flow_by_table = _flows(data, index)
     database = data.get("database")
     table_rows = []
     for k, t in enumerate(table_ids):
@@ -596,7 +597,7 @@ def build_book(
             {
                 "i": t,
                 "kind": str(node.get("type") if node.get("type") != "table" else (node.get("kind") or "table")),
-                "db": str(node.get("database") or database or (order[t].split("/", 1)[0] if "/" in order[t].split(":", 1)[0] else "")),
+                "db": str(node.get("db") or node.get("database") or database or (order[t].split("/", 1)[0] if "/" in order[t].split(":", 1)[0] else "")),
                 "users": users,
                 "r": sum(1 for v in rws if v & R),
                 "w": sum(1 for v in rws if v & W),
@@ -609,6 +610,9 @@ def build_book(
             "users": sorted([f, *v] for f, v in users_by_table.get(t, {}).items()),
             "routes": sorted(routes_by_table.get(t, [])),
         }
+        flow = flow_by_table.get(t)
+        if flow:
+            chunk["tables"][str(t)]["flow"] = flow
         home[t] = cid
         for c in cols_by_table.get(t, []):
             home[c] = cid
@@ -694,6 +698,38 @@ def build_book(
                  "schemas": bool(table.named)},
     }
     return index_doc, chunks
+
+
+def _flows(data: dict[str, Any], index: dict[str, int]) -> dict[int, dict[str, list[Any]]]:
+    """``feeds`` edges per table, for the table page's data-flow section:
+    ``{"in": [...], "out": [...]}``, each ``[other table, confidence, columns, path, via_total]``
+    with columns ``[from column, to column, function, confidence, transform, same-name, path]``."""
+    out: dict[int, dict[str, list[Any]]] = {}
+    for edge in data.get("edges") or []:
+        if edge.get("type") != "feeds":
+            continue
+        a, b = index.get(edge["from"]), index.get(edge["to"])
+        if a is None or b is None:
+            continue
+        cols = [
+            [
+                str(c.get("from", "")).split(".", 1)[-1],
+                str(c.get("to", "")).split(".", 1)[-1],
+                index.get(str(c.get("fn") or ""), -1),
+                str(c.get("confidence") or ""),
+                1 if c.get("transform") else 0,
+                1 if c.get("match") == "name" else 0,
+                [index.get(str(x), -1) for x in c.get("path") or []],
+            ]
+            for c in edge.get("column_map") or []
+        ]
+        via = (edge.get("via") or [{}])[0]
+        path = [index.get(str(p), -1) for p in via.get("path") or []]
+        total = int(edge.get("via_total") or len(edge.get("via") or []) or 1)
+        conf = str(edge.get("confidence") or "")
+        out.setdefault(b, {"in": [], "out": []})["in"].append([a, conf, cols, path, total])
+        out.setdefault(a, {"in": [], "out": []})["out"].append([b, conf, cols, path, total])
+    return out
 
 
 def http_pairs_self(http_out: list[list[int]], nsvc: list[int], ntype: list[int]):
