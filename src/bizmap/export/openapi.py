@@ -328,12 +328,21 @@ def comment_text(text: str) -> str:
     return "" if re.fullmatch(r"\w+( godoc| handles \w+ \S+)?", lead) else lead
 
 
+_RESTATES_ROUTE = re.compile(r"^\w+ (is|handles|serves|implements) (GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) /\S*\.?$", re.I)
+
+
 def plain_summary(text: str) -> str:
-    """First sentence of an ordinary comment (annotations left out)."""
+    """First sentence of an ordinary comment (annotations left out); a
+    sentence that only restates the route ("List is GET /widgets.") is
+    not a summary."""
     lead, _parts = _swag_parts(text)
     first = " ".join(lead.split())
     if not first:
         return ""
+    m0 = re.match(r"(.+?[.!?])(\s|$)", first)
+    if _RESTATES_ROUTE.match((m0.group(1) if m0 else first).strip()):
+        rest = first[len(m0.group(1)):].strip() if m0 else ""
+        return plain_summary(rest) if rest else ""
     m = re.match(r"(.+?[.!?])(\s|$)", first)
     return (m.group(1) if m else first)[:200]
 

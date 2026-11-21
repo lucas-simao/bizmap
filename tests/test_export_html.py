@@ -879,3 +879,75 @@ def test_spec_without_description_takes_the_handler_comment_and_query_enums() ->
     ops = {(o["m"], o["p"]): o for o in operations_from_spec(_demo_spec(), SchemaTable())}
     assert ops[("GET", "/api/v1/orders")]["params"][0][4] == "Only orders in this status · one of: pending, paid, cancelled"
     assert comment_text("ListProducts godoc @Summary x @Router /p [get]") == ""
+
+
+def test_screens_of_a_used_route_come_per_route_not_per_client_file() -> None:
+    # one client file calls two routes; the page reaches only one of them
+    g = react_graph()
+    g["nodes"] += [
+        _n("api/entrypoint:http:DELETE:/orders/:id", "entrypoint", kind="http", method="DELETE", path="/orders/:id",
+           evidence={"file": "main.go", "line": 4}),
+        _n("web/function:src.api.orders.removeOrder", "function", name="removeOrder",
+           evidence={"file": "src/api/orders.ts", "line": 5}),
+    ]
+    g["edges"] += [_e("calls_http", "web/function:src.api.orders.removeOrder",
+                      "api/entrypoint:http:DELETE:/orders/:id", "inferred")]
+    index, chunks = _book(g)
+    names = chunks["names"]["l"]
+    web = next(s for s in index["services"] if s["name"] == "web")
+    uses = {names[u["r"]]: u for u in chunks[web["uses_chunk"]]["uses"]}
+    assert uses["GET /orders/:id"]["ui"] == ["src/pages/Orders.tsx"]
+    assert uses["DELETE /orders/:id"]["ui"] == [] and uses["DELETE /orders/:id"]["files"] == ["src/api/orders.ts"]
+
+
+def test_a_comment_that_only_restates_the_route_is_not_a_summary() -> None:
+    from bizmap.export.openapi import plain_summary
+
+    assert plain_summary("List is GET /widgets.") == ""
+    assert plain_summary("GetSettings handles GET /api/v1/shop/settings") == ""
+    assert plain_summary("Get handles GET /x. Returns the cart of the signed-in user.") == "Returns the cart of the signed-in user."
+
+
+def test_front_end_lists_the_api_routes_it_uses() -> None:
+    index, chunks = _book(react_graph())
+    names = chunks["names"]["l"]
+    web = next(s for s in index["services"] if s["name"] == "web")
+    assert "uses" not in chunks[web["screen_chunk"]]  # own chunk: the screens page does not parse it
+    uses = chunks[web["uses_chunk"]]["uses"]
+    assert web["uses"] == 1 and [names[u["r"]] for u in uses] == ["GET /orders/:id"]
+    u = uses[0]
+    assert u["files"] == ["src/api/orders.ts", "src/api/users.ts"] and u["ui"] == ["src/pages/Orders.tsx"] and u["g"] == 0
+
+
+def test_every_counted_string_has_a_singular_in_both_languages() -> None:
+    import re
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parents[1] / "src/bizmap/export/book.js").read_text()
+    keys = set(re.findall(r'plural\("(\w+)"', js))
+    assert {"screensN", "linkedN", "usesLead", "hiddenCalls"} <= keys
+    for k in sorted(keys):
+        assert len(re.findall(rf"\b{k}1:", js)) == 2, k  # en and pt-BR
+
+
+def test_pages_read_only_keys_their_chunk_has() -> None:
+    """Each page that loads a service chunk (`ch = chunk(sv.<field>)`) reads
+    only keys that chunk carries: a key moved to another chunk breaks the page."""
+    import re
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parents[1] / "src/bizmap/export/book.js").read_text()
+    index, chunks = _book(react_graph())
+    web = next(s for s in index["services"] if s["name"] == "web")
+    bodies = re.split(r"\n  function ", js)
+    checked = 0
+    for body in bodies:
+        m = re.search(r"ch = chunk\((?:sv|SV\[s\])\.(\w+)\)", body)
+        if not m or not web.get(m.group(1)):
+            continue
+        name = body.split("(", 1)[0]
+        have = set(chunks[web[m.group(1)]])
+        read = set(re.findall(r"\bch\.(\w+)", body))
+        assert read <= have, (name, m.group(1), sorted(read - have))
+        checked += 1
+    assert checked >= 3  # screens, unmatched, uses

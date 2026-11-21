@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Front-end pages list **the API routes they use** ("API routes web uses"),
+  by API and domain: method, path, summary, and the screens (or client files)
+  that call each one; likely links marked. The service page shows the count
+  per API. A route's screens are the ones that reach the function calling
+  that route, not every screen of its client file.
+- Screens page text has a singular ("1 screen calls the API…").
+- A comment that only restates the route ("List is GET /widgets.") is no
+  longer used as a summary.
+
 ## 0.7.0 — 2026-11-20
 
 ### Added
