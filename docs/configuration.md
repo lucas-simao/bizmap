@@ -25,6 +25,9 @@ service map.
 # bizmap.yaml (all keys optional)
 name: api                     # repository name in the graph (default: folder name)
 database: checkout            # repos with the same database share table ids
+databases:                    # name the connections a service opens (the `db` of its tables)
+  orders_db: { env: ORDERS_DATABASE_URL }
+  summary_db: SUMMARY_DATABASE_URL                     # short form
 
 repos:                        # makes this folder a workspace: scan these jointly
   - web
@@ -90,6 +93,22 @@ overrides:                    # facts static analysis cannot see
   collection ids, so `bizmap why orders.status` lists writers and readers from
   every service that touches that database. Without it, each repository's
   tables stay separate.
+
+### `databases`
+
+Names the databases a service connects to, by the env var (or config field)
+its connection is built from. Tables the code reaches through that
+connection get `db: <name>` in the graph, and `bizmap why` / `report` /
+the HTML show `orders_db.pedidos`. Without it the name comes from the
+variable (`ORDERS_DATABASE_URL` → `orders_db`). See
+[Data flow](graph-schema.md#data-flow-between-tables-feeds).
+
+```yaml
+databases:
+  orders_db: { env: ORDERS_DATABASE_URL }
+  summary_db: { env: [SUMMARY_DATABASE_URL, SUMMARY_DSN] }
+  legacy: PG_LEGACY                      # short form
+```
 
 ### `repos`
 
