@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.9.1 — 2026-11-21
+
+### Fixed
+
+- A config wrapper that spreads the caller's config into a new object
+  (`api.request({ ...config, validateStatus: () => true })`, arrow or
+  `async function`) passes the caller's `baseURL` / `url` / `method` through:
+  `reportsGet('/reports/flow')` with `baseURL: V2` →
+  `{VITE_API_URL}/api/v2/reports/flow`, never the v1 route. An object that
+  sets its own `url` / `baseURL` / `method` is not treated as a pass-through.
+- The wrapper's own `api.request(config)` / `api.request({ ...config })` call
+  has method `{dynamic}` (it comes from the config), not `POST`.
+
 ## 0.9.0 — 2026-11-21
 
 ### Added
@@ -70,15 +83,6 @@
   other node is unchanged.
 
 ### Changed
-
-- A config wrapper that spreads the caller's config into a new object
-  (`api.request({ ...config, validateStatus: () => true })`, arrow or
-  `async function`) passes the caller's `baseURL` / `url` / `method` through:
-  `reportsGet('/reports/flow')` with `baseURL: V2` →
-  `{VITE_API_URL}/api/v2/reports/flow`, never the v1 route. An object that
-  sets its own `url` / `baseURL` / `method` is not treated as a pass-through.
-- The wrapper's own `api.request(config)` / `api.request({ ...config })` call
-  has method `{dynamic}` (it comes from the config), not `POST`.
 
 - The PR comment renders much faster on large diffs (~17× for the whole
   command on a 32k-function diff); table cells sample the alphabetically first
