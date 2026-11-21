@@ -144,3 +144,112 @@ def test_signatures_show_as_text_and_never_run(tmp_path: Path) -> None:
     assert not walk.errors, walk.errors
     want = 'getOrder(id: string, opts?: "<img src=x onerror=window.__alerted=1>"): `<script>window.__alerted=1</script>`'
     assert sig == want and tip == want and alerted is False
+
+
+def _open(p, html: Path):
+    browser = _launch(p)
+    page = browser.new_page(viewport={"width": 1280, "height": 900})
+    walk = Walk(page)
+    page.goto(html.resolve().as_uri())
+    page.wait_for_selector('body[data-ready="1"]')
+    return browser, page, walk
+
+
+def _write(tmp_path: Path, data: dict) -> Path:
+    from bizmap.export import export_graph
+
+    html = tmp_path / "out.html"
+    out = export_graph(data, "html")
+    html.write_text(out if isinstance(out, str) else out[0], encoding="utf-8")
+    return html
+
+
+def test_flow_page_filters_and_opens_the_table(tmp_path: Path) -> None:
+    from test_flow_page import repro_graph
+
+    html = _write(tmp_path, repro_graph())
+    with sync_api.sync_playwright() as p:
+        browser, page, walk = _open(p, html)
+        walk.go("#/")
+        toc = page.inner_text("#toc")
+        counter = page.get_attribute("#flow-counter", "href")
+        walk.go("#/flow")
+        rows = page.eval_on_selector_all("#flow-body tr.flowrow", "els => els.map(e => e.innerText.replace(/\\s+/g, ' ').trim())")
+        quick = page.inner_text("#flow-quick")
+        page.click('#flow-quick [data-quick="fspg"]')
+        fspg = page.eval_on_selector_all("#flow-body tr.flowrow", "els => els.length")
+        page.click('#flow-quick [data-quick=""]')
+        shop = page.evaluate(
+            "() => { const s = window.__bizmap.index.services.findIndex(x => x.name === 'shop-web'); return String(s); }"
+        )
+        page.select_option("#flow-repo", shop)
+        by_shop = page.eval_on_selector_all("#flow-body tr.flowrow", "els => els.length")
+        page.select_option("#flow-repo", "")
+        page.fill("#flow-q", "nope-nothing")
+        page.wait_for_timeout(300)
+        by_text = page.eval_on_selector_all("#flow-body tr.flowrow", "els => els.length")
+        page.fill("#flow-q", "mirror")
+        page.wait_for_timeout(300)
+        page.click("#flow-body tr.flowrow td:nth-child(4)")
+        page.wait_for_timeout(200)
+        landed = page.evaluate("() => location.hash")
+        h1 = page.inner_text("#read h1")
+        # search: kinds and storage in the label, flow badge first
+        page.fill("#q", "orders")
+        page.wait_for_timeout(300)
+        results = page.eval_on_selector_all("#results .r", "els => els.map(e => e.innerText.replace(/\\s+/g, ' ').trim())")
+        browser.close()
+    assert not walk.errors, walk.errors
+    assert "Data flow" in toc or "Fluxo de dados" in toc
+    assert counter == "#/flow"
+    assert rows and len(rows) == 1, rows
+    assert "collection · Firestore" in rows[0] and "table · Postgres" in rows[0] and "orders-api" in rows[0], rows
+    assert "heuristic" in rows[0] and "table level" in rows[0], rows
+    assert "Firestore → Postgres" in quick
+    assert fspg == 1 and by_shop == 0 and by_text == 0
+    assert landed.startswith("#/t/") and h1.startswith("orders"), (landed, h1)
+    assert len(results) == len(set(results)), results  # no two identical rows
+    assert any(r.startswith("table · Postgres") and "flow 1" in r for r in results), results
+    assert any(r.startswith("collection · Firestore") and "flow 1" in r and "orders-api" in r for r in results), results
+    shop_row = next(i for i, r in enumerate(results) if "shop-web" in r)
+    flow_rows = [i for i, r in enumerate(results) if "flow 1" in r]
+    assert all(i < shop_row for i in flow_rows), results
+
+
+def test_flow_page_empty_explains_and_big_graph_paginates(tmp_path: Path) -> None:
+    from test_flow_page import repro_graph
+
+    empty = repro_graph()
+    empty["edges"] = [e for e in empty["edges"] if e["type"] != "feeds"]
+    html = _write(tmp_path, empty)
+    nodes, edges = [], []
+    for k in range(600):
+        nodes.append({"id": f"svc{k % 16}/table:t{k}", "type": "table", "name": f"t{k}", "engine": "postgres"})
+        nodes.append({"id": f"svc{k % 16}/collection:c{k}", "type": "collection", "name": f"c{k}", "db": "firestore:default"})
+    for k in range(49_000):
+        nodes.append({"id": f"svc{k % 16}/function:pkg{k % 300}.F{k}", "type": "function", "name": f"F{k}",
+                      "evidence": {"file": f"pkg{k % 300}/f{k}.go", "line": 1}})
+    for k in range(500):
+        edges.append({"id": f"feeds:{k}", "type": "feeds", "from": f"svc{k % 16}/collection:c{k}",
+                      "to": f"svc{k % 16}/table:t{k}", "confidence": "heuristic",
+                      "via": [{"path": [f"svc{k % 16}/function:pkg{k % 300}.F{k}"]}]})
+    big = tmp_path / "big"
+    big.mkdir()
+    big_html = _write(big, {"nodes": nodes, "edges": edges})
+    with sync_api.sync_playwright() as p:
+        browser, page, walk = _open(p, html)
+        empty_text = walk.go("#/flow")
+        browser.close()
+        browser, page, walk2 = _open(p, big_html)
+        walk2.go("#/flow")
+        first = page.eval_on_selector_all("#flow-body tr", "els => els.length")
+        page.click("#flow-more-btn")
+        second = page.eval_on_selector_all("#flow-body tr", "els => els.length")
+        page.fill("#q", "F1")
+        page.wait_for_timeout(400)
+        hits = page.eval_on_selector_all("#results .r", "els => els.length")
+        browser.close()
+    assert not walk.errors and not walk2.errors, (walk.errors, walk2.errors)
+    assert "No data flow found" in empty_text and "feeds" in empty_text
+    assert first == 200 and second == 400
+    assert 0 < hits <= 60

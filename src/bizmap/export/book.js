@@ -218,6 +218,7 @@
         if (sv.unmatched) h += '<a class="sub warn ' + (active === "u" + i ? "on" : "") + '" href="#/u/' + i + '"><span>⚠ ' + esc(L.unmatched) + '</span><span class="n">' + num(sv.unmatched) + "</span></a>";
       });
     });
+    h += "<h4>" + esc(KT.navFlow) + '</h4><a href="#/flow" class="' + (active === "flow" ? "on" : "") + '"><span>' + esc(KT.navFlow) + '</span><span class="n">' + num(IX.flows || 0) + "</span></a>";
     h += "<h4>" + esc(L.tables) + '</h4><a href="#/t" class="' + (active === "t" ? "on" : "") + '"><span>' + esc(L.allTables) + '</span><span class="n">' + num(IX.tables.length) + "</span></a>";
     h += '<h4>' + esc(L.map) + '</h4><a href="#/map" class="' + (active === "map" ? "on" : "") + '"><span>' + esc(L.map) + "</span></a>";
     $("toc").innerHTML = h;
@@ -230,6 +231,8 @@
     crumbs([]); toc(null);
     var routes = 0; SV.forEach(function (s) { routes += s.routes + s.jobs; });
     var h = "<h1>" + esc(L.system) + '</h1><p class="lead">' + esc(fmt(L.systemLead, { s: SV.length, r: num(routes), t: num(IX.tables.length) })) + "</p>";
+    h += '<p class="counters"><a class="chip http" id="flow-counter" href="#/flow">' + esc(ktPlural("flowCount", IX.flows || 0)) + '</a> <a class="chip" href="#/t">' +
+         num(IX.tables.length) + " " + esc(L.tablesLc) + "</a></p>";
     var m = IX.meta;
     if (m.functions) h += '<p class="lead">' + esc(fmt(L.notReached, { n: num(m.functions - m.reached), f: num(m.functions) })) + "</p>";
     var groups = [["api", L.api], ["web", L.web], ["worker", L.worker], ["lib", L.lib]];
@@ -751,9 +754,12 @@
     function fill(q) {
       q = (q || "").toLowerCase();
       var rows = IX.tables.filter(function (t) { return !q || IX.tableNames[t.i].toLowerCase().indexOf(q) >= 0; });
-      rows.sort(function (a, b) { return b.users.length - a.users.length || IX.tableNames[a.i].localeCompare(IX.tableNames[b.i]); });
+      rows.sort(function (a, b) { return b.users.length - a.users.length || (b.fl || 0) - (a.fl || 0) || IX.tableNames[a.i].localeCompare(IX.tableNames[b.i]); });
       $("tbody").innerHTML = rows.slice(0, 1500).map(function (t) {
-        return '<tr class="row" data-href="#/t/' + t.i + '"><td><b>' + esc(IX.tableNames[t.i]) + "</b>" + (t.kind !== "table" ? ' <span class="kind">' + esc(t.kind) + "</span>" : "") +
+        var also = (t.same || []).map(function (o) { return svcName(getNames().s[o]); });
+        return '<tr class="row" data-href="#/t/' + t.i + '"><td><b>' + esc(IX.tableNames[t.i]) + '</b> <span class="kind">' + esc(kindStore(t.i)) + "</span>" +
+          (t.fl ? ' <span class="chip http">' + esc(fmt(KT.flowBadge, { n: t.fl })) + "</span>" : "") +
+          (also.length ? ' <span class="muted">' + esc(fmt(KT.alsoIn, { s: also.join(", ") })) + "</span>" : "") +
           "</td><td>" + esc(t.db) + "</td><td>" + esc(t.users.map(svcName).join(", ")) + '</td><td class="num">' + t.r + '</td><td class="num">' + t.w + "</td></tr>";
       }).join("");
     }
@@ -771,6 +777,151 @@
           transform: "transformado", sameName: "só pelo nome", tableLevel: "tabela (nenhuma coluna mapeada)", mermaid: "Código Mermaid (flowchart LR)", more: "+{n} a mais" },
   };
   var FLOW_MAX_NODES = 30;
+  // the central data-flow page (#/flow) and the kind / storage labels
+  var KIND_TXT = {
+    en: { collection: "collection", table: "table", view: "view", column: "column", field: "field", flowBadge: "flow {n}",
+          alsoIn: "also in {s}", sameTitle: "The same {k} in other repos", sameLead: "Same name in the same database, seen by these repos too:",
+          navFlow: "Data flow", flowCount: "{n} data flows", flowCount1: "1 data flow",
+          pageLead: "{n} data flows: values a function reads from one table / collection and writes into another.",
+          pageLead1: "1 data flow: values a function reads from one table / collection and writes into another.",
+          emptyTitle: "No data flow found",
+          emptyLead: "A data flow (a feeds edge) is created when the scan sees a value go from a read to a write: a function reads a table or Firestore collection and writes what it read into another (in the same function, through calls it makes, or through a queue). Table-to-table copies in SQL (INSERT … SELECT) count too. Graphs from older versions have none: scan again to get them.",
+          quickAll: "All", quickCross: "Between different stores", quickFsPg: "Firestore → Postgres", quickFsSql: "Firestore → SQL",
+          anyRepo: "Any repo (source or destination)", anyStore: "Any store (source or destination)", filterText: "Filter by name, column, function or file…",
+          colSource: "Source", colDest: "Destination", colConf: "Confidence", colCols: "Columns", colEvidence: "Evidence",
+          tableLevel: "table level", columnsN: "{n} columns", columnsN1: "1 column", crossBadge: "between stores",
+          showing: "Showing {n} of {t}", showMore: "Show {n} more", noMatch: "No data flow matches these filters.", viaMore: "+{n} more paths",
+          transform: "transformed", sameName: "same name" },
+    "pt-BR": { collection: "coleção", table: "tabela", view: "view", column: "coluna", field: "campo", flowBadge: "fluxo {n}",
+          alsoIn: "também em {s}", sameTitle: "A mesma {k} em outros repos", sameLead: "Mesmo nome na mesma base, vista também por estes repos:",
+          navFlow: "Fluxo de dados", flowCount: "{n} fluxos de dados", flowCount1: "1 fluxo de dados",
+          pageLead: "{n} fluxos de dados: valores que uma função lê de uma tabela / coleção e grava em outra.",
+          pageLead1: "1 fluxo de dados: valores que uma função lê de uma tabela / coleção e grava em outra.",
+          emptyTitle: "Nenhum fluxo de dados encontrado",
+          emptyLead: "Um fluxo de dados (uma aresta feeds) é criado quando o scan vê um valor sair de uma leitura e chegar numa escrita: uma função lê uma tabela ou coleção Firestore e grava o que leu em outra (na mesma função, pelas funções que chama ou por uma fila). Cópias entre tabelas em SQL (INSERT … SELECT) também contam. Grafos de versões antigas não têm: escaneie de novo para obtê-los.",
+          quickAll: "Todos", quickCross: "Entre bases diferentes", quickFsPg: "Firestore → Postgres", quickFsSql: "Firestore → SQL",
+          anyRepo: "Qualquer repo (origem ou destino)", anyStore: "Qualquer armazenamento (origem ou destino)", filterText: "Filtrar por nome, coluna, função ou arquivo…",
+          colSource: "Origem", colDest: "Destino", colConf: "Confiança", colCols: "Colunas", colEvidence: "Evidência",
+          tableLevel: "nível de tabela", columnsN: "{n} colunas", columnsN1: "1 coluna", crossBadge: "entre bases",
+          showing: "Mostrando {n} de {t}", showMore: "Mostrar mais {n}", noMatch: "Nenhum fluxo de dados com estes filtros.", viaMore: "+{n} caminhos",
+          transform: "transformado", sameName: "mesmo nome" },
+  };
+  var KT = KIND_TXT[IX.lang] || KIND_TXT.en;
+  function ktPlural(key, n) { return fmt(n === 1 && KT[key + "1"] ? KT[key + "1"] : KT[key], { n: num(n) }); }
+  function kindWord(row) {
+    if (!row) return KT.table;
+    return row.kind === "collection" ? KT.collection : row.kind === "view" ? KT.view : KT.table;
+  }
+  // "collection · Firestore", "table · Postgres"
+  function kindStore(i) { var r = tableRow[i]; return kindWord(r) + (r && r.st ? " · " + r.st : ""); }
+  function endHtml(i) {
+    var r = tableRow[i];
+    return '<a href="#/t/' + i + '"><b>' + esc(tableName(i)) + "</b></a> " +
+      '<span class="kind">' + esc(kindStore(i)) + '</span> <span class="muted">' + esc(svcName(getNames().s[i])) + "</span>" +
+      // the database, when it says more than the repo name / the default Firestore
+      (r && r.db && r.db !== svcName(getNames().s[i]) && r.db !== "firestore:default" ? ' <span class="muted mono">' + esc(r.db) + "</span>" : "");
+  }
+  function isSql(st) { return !!st && st !== "Firestore"; }
+  function storeOf(i) { var r = tableRow[i]; return r ? r.st || "" : ""; }
+  function crossStore(f) {
+    var a = tableRow[f[0]], b = tableRow[f[1]];
+    if (!a || !b) return false;
+    return a.st !== b.st || (a.db || "") !== (b.db || "");
+  }
+  var FLOW_PAGE = 200;
+  var flowState = { quick: "", repo: "", store: "", q: "", limit: FLOW_PAGE };
+  function flowData() { return IX.chunks.indexOf("flow") >= 0 ? chunk("flow").rows : []; }
+  function flowMatches(f, st) {
+    var a = f[0], b = f[1];
+    if (st.quick === "cross" && !crossStore(f)) return false;
+    if (st.quick === "fspg" && !(storeOf(a) === "Firestore" && storeOf(b) === "Postgres")) return false;
+    if (st.quick === "fssql" && !(storeOf(a) === "Firestore" && isSql(storeOf(b)))) return false;
+    if (st.repo !== "" && String(getNames().s[a]) !== st.repo && String(getNames().s[b]) !== st.repo) return false;
+    if (st.store && storeOf(a) !== st.store && storeOf(b) !== st.store) return false;
+    if (st.q) {
+      var hay = [tableName(a), tableName(b), f[5]].concat(f[4].map(function (i) { return label(i); }));
+      f[3].forEach(function (c) { hay.push(c[0], c[1]); });
+      if (hay.join("\n").toLowerCase().indexOf(st.q) < 0) return false;
+    }
+    return true;
+  }
+  function flowRowHtml(f) {
+    var cols = f[3];
+    var colsHtml = cols.length
+      ? "<details><summary>" + esc(ktPlural("columnsN", cols.length)) + '</summary><table class="params">' + cols.map(function (c) {
+          return '<tr><td class="mono">' + esc(c[0]) + '</td><td>→</td><td class="mono">' + esc(c[1]) + '</td><td><span class="kind">' + esc(c[2]) + "</span>" +
+            (c[3] ? ' <span class="muted">' + esc(KT.transform) + "</span>" : "") + (c[4] ? ' <span class="muted">' + esc(KT.sameName) + "</span>" : "") + "</td></tr>";
+        }).join("") + "</table></details>"
+      : '<span class="muted">' + esc(KT.tableLevel) + "</span>";
+    var fns = f[4].slice(-3).map(function (i) { return fnLink(i); }).join(" → ");
+    var ev = (fns ? fns + "<br>" : "") + (f[5] ? '<span class="ev">' + esc(f[5]) + "</span>" : "") +
+      (f[6] > 1 ? ' <span class="muted">' + esc(fmt(KT.viaMore, { n: num(f[6] - 1) })) + "</span>" : "");
+    return '<tr class="row flowrow" data-href="#/t/' + f[1] + '"><td>' + endHtml(f[0]) + '</td><td>→</td><td>' + endHtml(f[1]) +
+      (crossStore(f) ? ' <span class="chip http">' + esc(KT.crossBadge) + "</span>" : "") + '</td><td><span class="kind">' + esc(f[2]) + "</span></td><td>" + colsHtml +
+      "</td><td>" + ev + "</td></tr>";
+  }
+  function pageFlow() {
+    crumbs(['<a href="#/flow">' + esc(KT.navFlow) + "</a>"]); toc("flow");
+    var rows = flowData();
+    var h = "<h1>" + esc(KT.navFlow) + "</h1>";
+    if (!rows.length) {
+      read(h + '<div class="flow-empty"><h2>' + esc(KT.emptyTitle) + '</h2><p class="lead">' + esc(KT.emptyLead) + "</p></div>");
+      detail("");
+      return;
+    }
+    h += '<p class="lead">' + esc(ktPlural("pageLead", rows.length)) + "</p>";
+    var hasFsPg = rows.some(function (f) { return storeOf(f[0]) === "Firestore" && storeOf(f[1]) === "Postgres"; });
+    var hasFsSql = rows.some(function (f) { return storeOf(f[0]) === "Firestore" && isSql(storeOf(f[1])); });
+    var quick = [["", KT.quickAll], ["cross", KT.quickCross]];
+    if (hasFsPg) quick.splice(1, 0, ["fspg", KT.quickFsPg]);
+    else if (hasFsSql) quick.splice(1, 0, ["fssql", KT.quickFsSql]);
+    var counts = {};
+    quick.forEach(function (q) { counts[q[0]] = rows.filter(function (f) { return flowMatches(f, { quick: q[0], repo: "", store: "", q: "" }); }).length; });
+    h += '<div class="tabs" id="flow-quick">' + quick.map(function (q) {
+      return '<a data-quick="' + esc(q[0]) + '" class="' + (flowState.quick === q[0] ? "on" : "") + '">' + (q[0] === "fspg" || q[0] === "fssql" ? "★ " : "") + esc(q[1]) +
+        ' <span class="muted">' + num(counts[q[0]]) + "</span></a>";
+    }).join("") + "</div>";
+    var repos = {}, stores = {};
+    SV.forEach(function (_s, k) { repos[k] = 1; });  // every repo: filtering by one with no flow says so
+    rows.forEach(function (f) {
+      [f[0], f[1]].forEach(function (i) { repos[getNames().s[i]] = 1; var st = storeOf(i); if (st) stores[st] = 1; });
+    });
+    h += '<p><select id="flow-repo"><option value="">' + esc(KT.anyRepo) + "</option>" + Object.keys(repos).sort(function (a, b) { return svcName(+a).localeCompare(svcName(+b)); }).map(function (s) {
+      return '<option value="' + esc(s) + '"' + (flowState.repo === s ? " selected" : "") + ">" + esc(svcName(+s)) + "</option>";
+    }).join("") + '</select> <select id="flow-store"><option value="">' + esc(KT.anyStore) + "</option>" + Object.keys(stores).sort().map(function (st) {
+      return '<option value="' + esc(st) + '"' + (flowState.store === st ? " selected" : "") + ">" + esc(st) + "</option>";
+    }).join("") + '</select> <input class="filter" id="flow-q" placeholder="' + esc(KT.filterText) + '" value="' + esc(flowState.q) + '"></p>';
+    h += '<p class="muted" id="flow-count"></p><table class="list"><thead><tr><th>' + esc(KT.colSource) + "</th><th></th><th>" + esc(KT.colDest) + "</th><th>" + esc(KT.colConf) +
+         "</th><th>" + esc(KT.colCols) + "</th><th>" + esc(KT.colEvidence) + '</th></tr></thead><tbody id="flow-body"></tbody></table><p id="flow-more"></p>';
+    read(h);
+    // between stores first (the copies people look for), then by source name
+    var ordered = rows.slice().sort(function (x, y) {
+      return (crossStore(y) ? 1 : 0) - (crossStore(x) ? 1 : 0) || tableName(x[0]).localeCompare(tableName(y[0])) || tableName(x[1]).localeCompare(tableName(y[1]));
+    });
+    function fill() {
+      var hits = ordered.filter(function (f) { return flowMatches(f, flowState); });
+      var shown = hits.slice(0, flowState.limit);
+      $("flow-body").innerHTML = shown.length ? shown.map(flowRowHtml).join("") : '<tr><td colspan="6" class="empty">' + esc(KT.noMatch) + "</td></tr>";
+      $("flow-count").textContent = fmt(KT.showing, { n: num(shown.length), t: num(hits.length) });
+      var rest = hits.length - shown.length;
+      $("flow-more").innerHTML = rest > 0 ? '<button id="flow-more-btn">' + esc(fmt(KT.showMore, { n: num(Math.min(rest, FLOW_PAGE)) })) + "</button>" : "";
+      var btn = $("flow-more-btn");
+      if (btn) btn.onclick = function () { flowState.limit += FLOW_PAGE; fill(); };
+    }
+    fill();
+    Array.prototype.forEach.call(document.querySelectorAll("#flow-quick [data-quick]"), function (a) {
+      a.onclick = function () {
+        flowState.quick = a.getAttribute("data-quick"); flowState.limit = FLOW_PAGE;
+        Array.prototype.forEach.call(document.querySelectorAll("#flow-quick [data-quick]"), function (b) { b.classList.toggle("on", b === a); });
+        fill();
+      };
+    });
+    $("flow-repo").onchange = function (e) { flowState.repo = e.target.value; flowState.limit = FLOW_PAGE; fill(); };
+    $("flow-store").onchange = function (e) { flowState.store = e.target.value; flowState.limit = FLOW_PAGE; fill(); };
+    var ft = null;
+    $("flow-q").oninput = function (e) { clearTimeout(ft); var v = e.target.value; ft = setTimeout(function () { flowState.q = v.trim().toLowerCase(); flowState.limit = FLOW_PAGE; fill(); }, 120); };
+    detail('<p class="muted">' + esc(KT.emptyLead) + "</p>");
+  }
   function tableName(i) { return IX.tableNames[i] || label(i); }
   function tableDbName(i) { var r = tableRow[i]; return (r && r.db ? r.db + "." : "") + tableName(i); }
   function tableLink(i) {
@@ -868,7 +1019,15 @@
     if (!row) return pageTables();
     var ch = chunk(row.chunk), info = ch.tables[t];
     crumbs(['<a href="#/t">' + esc(L.tables) + "</a>", esc(IX.tableNames[t])]); toc("t");
-    var h = "<h1>" + esc(IX.tableNames[t]) + ' <span class="kind">' + esc(row.kind) + '</span></h1><p class="lead">' + esc(row.db) + (row.users.length ? " · " + esc(row.users.map(svcName).join(", ")) : "") + "</p>";
+    var h = "<h1>" + esc(IX.tableNames[t]) + ' <span class="kind">' + esc(kindStore(t)) + '</span></h1><p class="lead">' + esc(svcName(getNames().s[t])) + (row.db ? " · " + esc(row.db) : "") +
+            (row.users.length ? " · " + esc(row.users.map(svcName).join(", ")) : "") + (row.fl ? ' · <span class="chip http">' + esc(fmt(KT.flowBadge, { n: row.fl })) + "</span>" : "") + "</p>";
+    if (row.same && row.same.length) {
+      h += "<h2>" + esc(fmt(KT.sameTitle, { k: kindWord(row) })) + '</h2><p class="muted">' + esc(KT.sameLead) + "</p><ul>" + row.same.map(function (o) {
+        var r2 = tableRow[o];
+        return "<li>" + endHtml(o) + (r2 && r2.users.length ? ' <span class="muted">· ' + esc(r2.users.map(svcName).join(", ")) + "</span>" : "") +
+          (r2 && r2.fl ? ' <span class="chip http">' + esc(fmt(KT.flowBadge, { n: r2.fl })) + "</span>" : "") + "</li>";
+      }).join("") + "</ul>";
+    }
     var bySvc = {};
     info.users.forEach(function (u) { var s = getNames().s[u[0]]; (bySvc[s] = bySvc[s] || []).push(u); });
     h += "<h2>" + esc(L.whoReads) + " (" + info.users.length + ")</h2>";
@@ -1045,13 +1204,23 @@
       else if (sub.length < 200) sub.push(i);
     }
     var rank = [2, 1, 0, 3];
-    var by = function (a, b) { return rank[nm.t[a]] - rank[nm.t[b]] || a - b; };
+    var fl = function (i) { var r = nm.t[i] === T_T ? tableRow[i] : null; return r && r.fl ? r.fl : 0; };
+    var by = function (a, b) { return rank[nm.t[a]] - rank[nm.t[b]] || fl(b) - fl(a) || a - b; };
     hits = exact.sort(by).concat(pre.sort(by), sub).slice(0, 60);
     sel = 0;
     var kinds = [L.route, L.function, L.table, L.column];
     box.innerHTML = hits.length ? hits.map(function (i, k) {
-      return '<div class="r' + (k === 0 ? " on" : "") + '" data-i="' + i + '"><span class="kind">' + esc(kinds[nm.t[i]]) + '</span><span class="lbl mono">' + esc(nm.l[i]) +
-             '</span><span class="muted">' + esc(svcName(nm.s[i])) + "</span></div>";
+      var kind = kinds[nm.t[i]], badge = "";
+      if (nm.t[i] === T_T) {
+        kind = kindStore(i);
+        if (fl(i)) badge = '<span class="chip http">' + esc(fmt(KT.flowBadge, { n: fl(i) })) + "</span>";
+      } else if (nm.t[i] === T_C) {
+        var tb = tableByName[nm.l[i].split(".").slice(0, -1).join(".").toLowerCase()];
+        if (tb !== undefined && tableRow[tb] && tableRow[tb].kind === "collection") kind = KT.field + " · Firestore";
+        else kind = KT.column;
+      }
+      return '<div class="r' + (k === 0 ? " on" : "") + '" data-i="' + i + '"><span class="kind">' + esc(kind) + '</span><span class="lbl mono">' + esc(nm.l[i]) +
+             "</span>" + badge + '<span class="muted">' + esc(svcName(nm.s[i])) + "</span></div>";
     }).join("") : '<div class="r muted">' + esc(L.noResults) + "</div>";
     box.style.display = "block";
   }
@@ -1081,7 +1250,7 @@
 
   // ── router ───────────────────────────────────────────────────────────────
   $("read").addEventListener("click", function (ev) {
-    if (ev.target.closest("a")) return;
+    if (ev.target.closest("a, summary, select, input, button, textarea, .flowrow details")) return;
     var card = ev.target.closest("[data-href]");
     if (card) { location.hash = card.dataset.href; return; }
     var head = ev.target.closest(".ep-head");
@@ -1109,6 +1278,7 @@
       else if (h[0] === "p" && SV[+h[1]]) pageFolder(+h[1], +h[2]);
       else if (h[0] === "x" && SV[+h[1]] && SV[+h[1]].uses_chunk) pageUses(+h[1]);
       else if (h[0] === "map") pageMap();
+      else if (h[0] === "flow") pageFlow();
       else pageSystem();
     } catch (err) {
       read('<p class="risk">' + esc(String(err && err.message || err)) + "</p>");
