@@ -613,6 +613,7 @@ class WriteEvent:
     file: str
     line: int
     spec_transform: bool = False
+    table_level: bool = False  # SQL built at run time: which columns is unknown
 
 
 @dataclass
@@ -668,7 +669,8 @@ class RepoContext:
         self.write_lines: dict[tuple[str, str], set[int]] = defaultdict(set)  # (file, table) -> lines
         self.queue_targets: dict[str, list[tuple[str, str]]] = defaultdict(list)  # fid -> [(queue, fn)]
         self.summaries: dict[str, Any] = {}
-        self.doc_id_params: dict[str, dict[int, str]] = {}  # fid -> {param position: collection}
+        self.doc_id_params: dict[str, dict[int, str]] = {}
+        self.sql_builders: dict[str, str] = {}  # Go: function returning write SQL -> table  # fid -> {param position: collection}
         self._index()
 
     def _index(self) -> None:
@@ -1698,6 +1700,10 @@ class Analyzer:
         depth: int,
     ) -> Any:
         ml = method.lower()
+        if self.fn.lang == "go" and self.ctx.sql_builders and method in _GO_SQL_METHODS:
+            got = self._built_sql_write(args, depth)
+            if got is not _NO_CALL:
+                return got
         # SQL text in an argument
         sql_idx, sql = self._sql_arg(args)
         if sql is not None and (ml in _QUERY_METHODS or ml.startswith(("query", "exec", "select", "get", "fetch"))):
@@ -1837,6 +1843,25 @@ class Analyzer:
         if isinstance(cur_val, Scalar):
             acc |= cur_val.srcs
         return Scalar(_with(frozenset(acc), transform=True)) if acc else None
+
+    def _built_sql_write(self, args: list[str], depth: int) -> Any:
+        """`b.Queue(upsertSQL(m.Columns), columnArgs(m.Columns)...)`: the SQL text comes from a
+        function returning `"INSERT INTO t (" + …`; the columns are built at run time, so the
+        write is table-level, fed by whatever the arguments carry."""
+        for a in args[:2]:
+            bm = re.match(r"^\s*(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\s*\(", a)
+            if not bm or bm.group(1) not in self.ctx.sql_builders:
+                continue
+            table = self.ctx.sql_builders[bm.group(1)]
+            tid = self.ctx.table_node(table, write=True) or f"table:{table}"
+            acc: set[Src] = set()
+            for x in args:
+                acc |= sources(self.eval(x.strip().removesuffix("...").strip(), depth + 1))
+            if acc:
+                self.writes.append(WriteEvent(fn=self.fn.fid, target=tid, col=None, srcs=frozenset(acc),
+                                              file=self.fn.file, line=self.line, table_level=True))
+            return None
+        return _NO_CALL
 
     def _receiver_rows(self, chain: str) -> Any:
         base = chain.rsplit(".", 1)[0] if "." in chain else ""
@@ -2043,8 +2068,14 @@ class Analyzer:
             # a pure helper (`build(id, d)`): what it returns from the values passed in
             sub = _analyze(self.ctx, info, depth=self.depth + 1, hop=(*self.hop, *hop_ids), args=arg_vals, method_call=True)
             ret = _best_return(sub.returns if sub else [])
-            if ret is not None:
+            if ret is not None and (sources(ret) or self.fn.lang != "go"):
                 return ret
+            if self.fn.lang == "go":
+                # a Go mapper (`Map(id, data, now)`) whose result this pass cannot rebuild:
+                # still derived from what went in
+                acc = frozenset().union(*(sources(v) for v in arg_vals))
+                if acc:
+                    return Scalar(_with(acc, transform=True))
         if cid in self.ctx.reads_any:
             summary = self.ctx.summaries.get(cid, _NO_CALL)
             if summary is _NO_CALL and not self.ctx.spend():
@@ -2079,6 +2110,7 @@ class Analyzer:
 
 
 _NO_CALL = object()
+_GO_SQL_METHODS = {"Queue", "Exec", "ExecContext", "Query", "QueryContext", "QueryRow", "QueryRowContext"}
 
 
 def _best_return(returns: list[Any]) -> Any:
@@ -2417,7 +2449,7 @@ def _build_feeds(ctx: RepoContext, writes: list[WriteEvent], skip_queue: bool = 
         for s in w.srcs:
             if s.table is None or s.table == w.target or _bare(s.table) == "table:unknown":
                 continue
-            if s.col is None and s.transform:
+            if s.col is None and s.transform and not w.table_level:
                 continue  # a whole row through some function: no value seen
             src_cols = ctx.columns(s.table)
             if s.col is not None and src_cols is not None and s.col not in src_cols:
@@ -2433,7 +2465,7 @@ def _build_feeds(ctx: RepoContext, writes: list[WriteEvent], skip_queue: bool = 
             key = (s.table, w.target)
             bucket = pairs.setdefault(key, {"paths": {}, "entries": []})
             ev = _evidence_dict(w.file, w.line, w.fn)
-            pconf = "exact" if direct else "heuristic"
+            pconf = "exact" if direct and not w.table_level else "heuristic"
             old = bucket["paths"].get(tuple(path))
             if old is None or _conf_rank(pconf) > _conf_rank(old[0]):
                 bucket["paths"][tuple(path)] = (pconf, ev)
@@ -2730,6 +2762,7 @@ def apply(
     if go_meta is not None:
         ctx.json_tags = dict(getattr(go_meta, "json_tags", {}) or {})
         ctx.fs_tags = dict(getattr(go_meta, "fs_tags", {}) or {})
+        ctx.sql_builders = dict(getattr(go_meta, "sql_builders", {}) or {})
     for e in graph.edges.values():
         if e.type == "enqueues" and not e.attrs.get("candidates") and _bare(e.to_id).startswith("queue:pubsub:"):
             node = graph.nodes.get(e.from_id)
