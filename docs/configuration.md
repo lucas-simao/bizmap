@@ -100,7 +100,8 @@ Names the databases a service connects to, by the env var (or config field)
 its connection is built from. Tables the code reaches through that
 connection get `db: <name>` in the graph, and `bizmap why` / `report` /
 the HTML show `orders_db.pedidos`. Without it the name comes from the
-variable (`ORDERS_DATABASE_URL` → `orders_db`). See
+variable when it looks like a DSN (`ORDERS_DATABASE_URL` → `orders_db`;
+`DB_SCHEMA` or `DB_HOST` name nothing unless listed here). See
 [Data flow](graph-schema.md#data-flow-between-tables-feeds).
 
 ```yaml

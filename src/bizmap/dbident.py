@@ -12,10 +12,12 @@ connection reaches them:
   variable (``orders_db``), or from ``databases:`` in bizmap.yaml;
 - the SQL edge's call (``src.QueryContext``, ``b.query``, ``cur.execute``)
   names the connection (through cursor / transaction aliases);
-- a repo with exactly one named connection puts every table on it;
+- a repo with exactly one named connection puts the tables its SQL reaches on it
+  (a table no code reads or writes gets no ``db``);
 - Firestore clients (``firestore.NewClient``, ``getFirestore()``,
   ``firestore.client()``) put collections on ``firestore:<project|default>``.
 
+Only DSN-like variables name a database (``DB_SCHEMA`` / ``DB_HOST`` do not).
 When nothing says which database it is, ``db`` is left out (the table is in
 the repo's database, as before).
 """
@@ -186,16 +188,52 @@ class ConnIndex:
         return None
 
 
+_DSN_TOKENS = {"URL", "URI", "DSN", "CONN", "CONNECTION", "CONNSTR", "DBURL", "DBURI", "DBDSN", "PGURL", "PGDSN",
+               "DATABASEURL", "CONNECTIONSTRING", "CONNSTRING"}
+_DBNAME_ENV = re.compile(r"^(?:(?:PG|POSTGRES|POSTGRESQL|MYSQL|DB|DATABASE)_?(?:NAME|DATABASE|DB)|PGDATABASE)$")
+_DEFAULT_RES = [
+    re.compile(r"os\.(?:getenv|environ\.get)\(\s*['\"](\w+)['\"]\s*,\s*['\"]([\w-]+)['\"]"),
+    re.compile(r"process\.env\.(\w+)\s*(?:\|\||\?\?)\s*['\"]([\w-]+)['\"]"),
+    re.compile(r"process\.env\[\s*['\"](\w+)['\"]\s*\]\s*(?:\|\||\?\?)\s*['\"]([\w-]+)['\"]"),
+]
+
+
+def is_dsn_name(name: str) -> bool:
+    """``ORDERS_DATABASE_URL`` / ``cfg.OrdersDSN`` name a connection; ``DB_SCHEMA``,
+    ``DB_HOST``, ``DB_USER`` … do not."""
+    parts = [p for p in re.split(r"[^A-Za-z0-9]+", _upper_snake(name)) if p]
+    return any(p in _DSN_TOKENS for p in parts) or "".join(parts[-2:]) in _DSN_TOKENS
+
+
 def _env_names(window: str, dsn_vars: dict[str, str]) -> list[str]:
+    """Every env var / config field the window reads (DSN-like or not)."""
     envs: list[str] = []
     for rx in _ENV_RES:
         envs += rx.findall(window)
     envs += [_upper_snake(f) for f in _FIELD_RE.findall(window)]
-    if not envs:
-        for ident in re.findall(r"\b(\w+)\b", window):
-            if ident in dsn_vars:
-                envs.append(dsn_vars[ident])
+    for ident in re.findall(r"\b(\w+)\b", window):
+        if ident in dsn_vars:
+            envs.append(dsn_vars[ident])
     return envs
+
+
+def _db_of_window(window: str, dsn_vars: dict[str, str], cfg: dict[str, str]) -> str | None:
+    """Database name of one connection constructor call."""
+    envs = [_upper_snake(e) for e in _env_names(window, dsn_vars)]
+    for env in envs:  # declared in bizmap.yaml: whatever the variable is
+        if env in cfg:
+            return cfg[env]
+    for env in envs:
+        if is_dsn_name(env):
+            name = db_name_from_env(env)
+            if name:
+                return name
+    # `dbname=os.getenv("DB_NAME", "orders")` inside the connector: the literal default
+    for rx in _DEFAULT_RES:
+        for env, default in rx.findall(window):
+            if _DBNAME_ENV.match(_upper_snake(env)):
+                return default.lower()
+    return None
 
 
 def _window(text: str, start: int) -> str:
@@ -240,7 +278,7 @@ def build_index(texts: dict[str, str], raw_config: dict[str, Any] | None) -> Con
             m = _DSN_VAR_RE.search(line.strip())
             if not m or _CTOR_RE.search(line):
                 continue
-            envs = _env_names(m.group(2), {})
+            envs = [e for e in _env_names(m.group(2), {}) if is_dsn_name(e) or _upper_snake(e) in cfg]
             if envs:
                 dsn_vars[m.group(1)] = envs[0]
         for m in _CTOR_RE.finditer(text):
@@ -256,14 +294,7 @@ def build_index(texts: dict[str, str], raw_config: dict[str, Any] | None) -> Con
                 # `db, err :=` on the previous line of a multi-line call is rare; skip
                 continue
             window = _window(text, m.start())
-            envs = _env_names(window, dsn_vars)
-            db = None
-            for env in envs:
-                env_u = _upper_snake(env)
-                db = cfg.get(env_u) or db_name_from_env(env_u)
-                if db:
-                    break
-            idx.add(rel, var, db)
+            idx.add(rel, var, _db_of_window(window, dsn_vars, cfg))
         aliases = idx.aliases[rel]
         for line in text.splitlines():
             if _CTOR_RE.search(line):
@@ -361,12 +392,6 @@ def assign_dbs(graph: Graph, texts: dict[str, str], idx: ConnIndex) -> None:
             node.attrs["db"] = next(iter(dbs))
         else:
             node.attrs["db_candidates"] = sorted(dbs)
-    if only:
-        for node in graph.nodes.values():
-            if node.type in ("table", "view") and not node.attrs.get("external") and not node.attrs.get("db"):
-                if node.attrs.get("db_candidates") or node.id.endswith("table:unknown"):
-                    continue
-                node.attrs["db"] = only
 
 
 def table_db(graph: Graph, node_id: str) -> str | None:
