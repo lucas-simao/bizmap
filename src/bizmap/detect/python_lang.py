@@ -2927,11 +2927,29 @@ def _scopes(fn_node: Node) -> list[Node]:
     return out
 
 
+def _owner(n: Node, kinds: tuple[str, ...] = ("function_definition",)) -> Node | None:
+    cur = parent_of(n)
+    while cur is not None and cur.type not in kinds:
+        cur = parent_of(cur)
+    return cur
+
+
+def _same(a: Node | None, b: Node | None) -> bool:
+    return a is not None and b is not None and (a.start_byte, a.end_byte, a.type) == (b.start_byte, b.end_byte, b.type)
+
+
 def _origin(expr: Node, fn_node: Node, before: Node) -> Node | None:
     """Value last assigned to ``expr`` (a name or ``self.x``): in the function
-    above ``before``, else anywhere in the enclosing function / class / module."""
+    it is used in, above its use, else in the functions around it, the class
+    (``self.x`` set in any of its methods) or the module. Assignments inside
+    other functions never count: a local of one function is not another's."""
+    owner = _owner(expr)
+    if owner is not None and not _same(owner, fn_node):
+        fn_node, before = owner, expr  # an expression of another method (`__init__`)
     name = text(expr)
-    for k, scope in enumerate(_scopes(fn_node)):
+    is_self = name.startswith(("self.", "cls."))
+    scopes = _scopes(fn_node)
+    for k, scope in enumerate(scopes):
         best: tuple[int, Node] | None = None
         for n in walk(scope):
             if n.type != "assignment":
@@ -2942,6 +2960,12 @@ def _origin(expr: Node, fn_node: Node, before: Node) -> Node | None:
                 continue
             if k == 0 and n.start_byte >= before.start_byte:
                 continue
+            home = _owner(n, ("function_definition", "class_definition", "module"))
+            if not _same(home, scope):
+                # `self.x = …` in a method of this class
+                if not (is_self and scope.type == "class_definition" and home is not None
+                        and home.type == "function_definition" and _same(_owner(home, ("class_definition",)), scope)):
+                    continue
             if best is None or n.start_byte > best[0]:
                 best = (n.start_byte, right)
         if best is not None:
