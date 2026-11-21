@@ -20,6 +20,7 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from bizmap.dataflow import downstream
 from bizmap.graph import Graph, Node
 
 MARKER = "<!-- bizmap-impact -->"
@@ -193,6 +194,8 @@ class Impact:
     warnings: list[str] = field(default_factory=list)
     # scanned dir relative to the git root (for `file:line` links; not in JSON)
     prefix: str = "."
+    # tables / columns fed (`feeds`) from what the changed code writes or copies
+    downstream: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def entrypoints(self) -> list[str]:
@@ -216,6 +219,7 @@ class Impact:
             "hint": self.hint,
             "schema_changes": [c.to_dict() for c in self.schema_changes],
             "warnings": self.warnings,
+            **({"downstream": self.downstream} if self.downstream else {}),
         }
 
 
@@ -643,9 +647,13 @@ def compute_impact(
             f"{len(sql_changed)} changed .sql file(s) not read for schema changes "
             "(start `bizmap mcp` with --repo-root, or run `bizmap impact --repo-root`)"
         )
+    flow = []
+    if any(e.type == "feeds" for e in graph.edges.values()):
+        written = sorted({w for f in out for w in f.writes})
+        flow = downstream(graph, [f.function for f in out], written, limit=0)
     return Impact(
         functions=out, unmapped_files=unmapped, hint=hint, schema_changes=schema, warnings=warnings,
-        prefix=prefix,
+        prefix=prefix, downstream=flow,
     )
 
 
@@ -1551,6 +1559,18 @@ def render_markdown(
             f"<b>Data</b> · writes {n_w} · reads {n_r} · {facts.columns} {_plural(facts.columns, 'column')}", rows
         )
 
+    def downstream_section(cap: int) -> list[str]:
+        rows_in = impact.downstream
+        if not rows_in:
+            return []
+        rows = ["| Downstream | From | Via | Confidence |", "|---|---|---|---|"]
+        for d in rows_in[:cap]:
+            rows.append(f"| {_code(d['to'])} | {_code(d['from'])} | {_code(d['via'])} | {d['confidence']} |")
+        if len(rows_in) > cap:
+            rows.append(f"\n+{len(rows_in) - cap} more.")
+        n_t = len({d["to"] for d in rows_in})
+        return _details(f"<b>Downstream</b> · {n_t} {_plural(n_t, 'destination')} fed from the changed data", rows)
+
     def trigger_section(cap: int) -> list[str]:
         trig = sorted({x for ts in facts.table_triggers.values() for x in ts})
         if not trig:
@@ -1641,6 +1661,7 @@ def render_markdown(
         if cap:
             body += ep_section(cap)
             body += data_section(cap)
+            body += downstream_section(cap)
         schema_md = _schema_section(graph, impact, links, cap=min(30, max(cap, 5)))
         if schema_md:
             risky_schema = any(c.risky for c in impact.schema_changes)
