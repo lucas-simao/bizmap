@@ -74,7 +74,8 @@ def test_engine_data_rebuilds_the_same_index() -> None:
     ix = Index.from_dict(data)
     g = engine_data(ix, data)
     assert g["ids"][: len(ix.nodes)] == list(ix.nodes)
-    assert len(g["e"]["a"]) == sum(1 for e in data["edges"])  # every edge type here is one the engine reads
+    # derived copies of reads / writes are left out (every query skips them)
+    assert len(g["e"]["a"]) == sum(1 for e in data["edges"] if not e.get("derived"))
     k = g["ids"].index(f"{API}/function:internal/orders.Repo.storeStatus")
     assert g["nm"][k] == "Repo.storeStatus" and g["F"][g["ef"][k]] == "internal/orders/repo.go"
     feeds = [j for j, t in enumerate(g["e"]["t"]) if g["ET"][t] == "feeds"]

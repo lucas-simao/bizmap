@@ -110,7 +110,13 @@
   // ── engine and lookups ──
   function engine() {
     if (!QIX) {
-      var g = chunk("qg");
+      var meta0 = chunk("qg"), g = {}, k, f;
+      for (f in meta0) g[f] = meta0[f];
+      var cols = ["ids", "ty", "nm", "ef", "el", "bi"];
+      cols.forEach(function (c) { g[c] = []; });
+      for (k = 0; k < meta0.nn; k++) { var part = chunk("qn" + k); cols.forEach(function (c) { g[c] = g[c].concat(part[c]); }); }
+      g.e = { a: [], b: [], t: [], c: [], d: [], f: [], l: [] };
+      for (k = 0; k < meta0.ne; k++) { var ep = chunk("qe" + k); Object.keys(g.e).forEach(function (c) { g.e[c] = g.e[c].concat(ep[c]); }); }
       QIX = new BizQuery.Index(g);
       QIX.hidSet = new Set(g.hid || []);
     }

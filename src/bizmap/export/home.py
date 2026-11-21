@@ -122,7 +122,18 @@ def build_home(
     # for the page: each engine node's index in the book (its pages, service) and the hidden ones
     qg["bi"] = [book_index.get(nid, -1) for nid in qg["ids"]]
     qg["hid"] = [k for k, nid in enumerate(qg["ids"]) if nid in ix.nodes and hidden(nid)]
-    chunks: dict[str, Any] = {"qg": qg}
+    chunks: dict[str, Any] = {}
+    # node and edge columns in slices (qn0…, qe0…); the page joins them on the first question
+    n_nodes, n_edges = len(qg["ids"]), len(qg["e"]["a"])
+    for k, start in enumerate(range(0, n_nodes, NODE_SLICE)):
+        chunks[f"qn{k}"] = {f: qg[f][start : start + NODE_SLICE] for f in ("ids", "ty", "nm", "ef", "el", "bi")}
+    for k, start in enumerate(range(0, n_edges, EDGE_SLICE)):
+        chunks[f"qe{k}"] = {f: v[start : start + EDGE_SLICE] for f, v in qg["e"].items()}
+    for f in ("ids", "ty", "nm", "ef", "el", "bi", "e"):
+        del qg[f]
+    qg["nn"] = -(-n_nodes // NODE_SLICE)
+    qg["ne"] = -(-n_edges // EDGE_SLICE)
+    chunks["qg"] = qg
 
     # ── owners, matrix cells, findings ──
     tables = [e for e in entities if e["kind"] != "column"]
@@ -307,6 +318,10 @@ def build_home(
 # ── the graph the engine reads, in columns ──────────────────────────────────
 
 ENGINE_EDGES = ("calls", "triggers", "reads", "writes", "enqueues", "feeds", "calls_http")
+# copies (`derived`) of these are skipped by every query; evidence is only read on these
+_NEVER_DERIVED = ("calls", "reads", "writes", "enqueues")
+_EDGE_EVIDENCE = ("reads", "writes", "calls_http", "feeds")
+NODE_SLICE, EDGE_SLICE = 20_000, 100_000  # per chunk: none is large to parse
 _SPARSE = ("table", "kind", "method", "path", "topic", "symbol", "handler", "db", "engine", "start_line", "repo")
 
 
@@ -360,13 +375,15 @@ def engine_data(ix: Index, data: dict[str, Any]) -> dict[str, Any]:
     for e in data.get("edges") or []:
         if not isinstance(e, dict) or "from" not in e or "to" not in e or e.get("type") not in ENGINE_EDGES:
             continue
+        if e.get("derived") and e["type"] in _NEVER_DERIVED:  # every query skips these copies
+            continue
         k = len(ea)
         ea.append(ref(e["from"]))
         eb.append(ref(e["to"]))
         et.append(code(etypes, etpos, e["type"]))
         ec.append(code(confs, cpos, e.get("confidence")))
         ed.append(1 if e.get("derived") else 0)
-        ev = e.get("evidence")
+        ev = e.get("evidence") if e["type"] in _EDGE_EVIDENCE else None
         if isinstance(ev, dict) and ev.get("file"):
             eef.append(code(files, fpos, ev["file"]))
             eel.append(ev.get("line"))
