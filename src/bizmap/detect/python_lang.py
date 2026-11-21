@@ -66,6 +66,15 @@ FIRESTORE_DOC_EVENTS = {
 FIRESTORE_READ = {"get", "stream", "list_documents"}
 FIRESTORE_WRITE = {"set", "update", "delete", "add"}
 SA_QUERY = {"select", "insert", "update", "delete"}
+# `from sqlalchemy.dialects.postgresql import insert as pg_insert` and friends
+SA_INSERT_ALIASES = {
+    "pg_insert", "postgres_insert", "postgresql_insert", "psql_insert", "mysql_insert", "sqlite_insert",
+}
+
+
+def _sa_name(name: str) -> str:
+    """A dialect ``insert`` alias is SQLAlchemy's ``insert``."""
+    return "insert" if name in SA_INSERT_ALIASES else name
 HTTP_CLIENT_LIBS = ("httpx", "requests", "aiohttp", "urllib")
 HTTP_CLIENT_CTORS = {
     "Client",
@@ -1961,7 +1970,7 @@ class PythonAnalyzer:
             if arg.type == "keyword_argument":
                 arg = arg.child_by_field_name("value") or arg
             if arg.type == "call":
-                inner_name = call_callee_name(arg)
+                inner_name = _sa_name(call_callee_name(arg))
                 if inner_name == "text":
                     # execute(text("...")): the SQL is the text() argument,
                     # not an unresolved call expression.
@@ -2023,6 +2032,7 @@ class PythonAnalyzer:
     ) -> None:
         bindings = analysis.bindings
         models = analysis.models
+        method = _sa_name(method)
         if method in SA_QUERY:
             if not pos:
                 return
@@ -2069,17 +2079,24 @@ class PythonAnalyzer:
                 )
             )
             return
-        if method == "values":
+        if method in ("values", "on_conflict_do_update"):
             table, _ = _table_from_chain(node, bindings, models)
             if not table:
+                table = _stmt_table(node, fn.node, bindings, models)
+            if not table:
                 return
-            kw = call_kwargs(node)
-            if kw:
-                for col in kw:
-                    analysis.accesses.append(
-                        PyAccess(fn, "write", table, col.lower(), Confidence.EXACT, evidence)
-                    )
+            if method == "values":
+                cols = [c.lower() for c in call_kwargs(node)] or _dict_keys(
+                    pos[0] if pos else None, fn.node, node, bindings, models
+                )
             else:
+                cols = _dict_keys(call_kwargs(node).get("set_"), fn.node, node, bindings, models)
+            if cols:
+                for col in cols:
+                    analysis.accesses.append(
+                        PyAccess(fn, "write", table, col, Confidence.EXACT, evidence)
+                    )
+            elif method == "values":
                 analysis.accesses.append(
                     PyAccess(fn, "write", table, None, Confidence.INFERRED, evidence)
                 )
@@ -2598,7 +2615,7 @@ def _resolve_table_ref(
         return None, None
     if node.type == "call":
         fn = node.child_by_field_name("function")
-        if fn is not None and text(fn).split(".")[-1] in {"select", "insert", "update", "delete"}:
+        if fn is not None and _sa_name(text(fn).split(".")[-1]) in {"select", "insert", "update", "delete"}:
             pos = call_posargs(node)
             return _resolve_table_ref(pos[0] if pos else None, bindings, models)
         return _resolve_table_ref(fn or node.named_children[0], bindings, models)
@@ -2698,13 +2715,78 @@ def _builder_chain(node: Node) -> list[tuple[str, Node]]:
     chain: list[tuple[str, Node]] = []
     cur: Node | None = node
     while cur is not None and cur.type == "call":
-        chain.append((call_callee_name(cur), cur))
+        chain.append((_sa_name(call_callee_name(cur)), cur))
         func = cur.child_by_field_name("function")
         if func is not None and func.type == "attribute":
             cur = func.child_by_field_name("object")
         else:
             break
     return chain
+
+
+def _assignment_before(name: str, scope: Node | None, before: Node) -> Node | None:
+    """Right side of the last ``name = …`` in ``scope`` above ``before``."""
+    if scope is None:
+        return None
+    found = None
+    for n in walk(scope):
+        if n.type != "assignment" or n.start_byte >= before.start_byte:
+            continue
+        left = n.child_by_field_name("left")
+        right = n.child_by_field_name("right")
+        if left is not None and right is not None and left.type == "identifier" and text(left) == name:
+            if found is None or n.start_byte > found[0]:
+                found = (n.start_byte, right)
+    return found[1] if found else None
+
+
+def _stmt_table(node: Node, scope: Node | None, bindings: dict[str, str], models: dict) -> str | None:
+    """``stmt.values(…)`` / ``stmt.on_conflict_do_update(…)`` where
+    ``stmt = pg_insert(t)…`` was assigned above."""
+    func = node.child_by_field_name("function")
+    obj = func.child_by_field_name("object") if func is not None and func.type == "attribute" else None
+    seen = 0
+    while obj is not None and obj.type == "identifier" and seen < 4:
+        right = _assignment_before(text(obj), scope, node)
+        if right is None or right.type != "call":
+            return None
+        table, _ = _table_from_chain(right, bindings, models)
+        if table:
+            return table
+        f2 = right.child_by_field_name("function")
+        obj = f2.child_by_field_name("object") if f2 is not None and f2.type == "attribute" else None
+        seen += 1
+    return None
+
+
+def _dict_keys(arg: Node | None, scope: Node | None, before: Node, bindings: dict[str, str], models: dict) -> list[str]:
+    """Column names of a ``.values({...})`` / ``set_={...}`` mapping: a dict
+    literal, ``dict(a=…)``, or a variable assigned one of those above."""
+    if arg is None:
+        return []
+    if arg.type == "identifier":
+        right = _assignment_before(text(arg), scope, before)
+        return _dict_keys(right, None, before, bindings, models) if right is not None else []
+    if arg.type == "call" and call_callee_name(arg) == "dict":
+        return [k.lower() for k in call_kwargs(arg)]
+    if arg.type != "dictionary":
+        return []
+    out: list[str] = []
+    for pair in arg.named_children:
+        if pair.type != "pair":
+            continue
+        key = pair.child_by_field_name("key")
+        if key is None:
+            continue
+        if key.type == "string":
+            name = unquote(text(key))
+            if name and re.fullmatch(r"[A-Za-z_][\w]*", name):
+                out.append(name.lower())
+        elif key.type == "attribute":
+            _t, col = _resolve_table_ref(key, bindings, models)
+            if col:
+                out.append(col)
+    return out
 
 
 def _builder_resolves(node: Node, bindings: dict[str, str], models: dict) -> bool:
