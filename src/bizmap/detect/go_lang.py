@@ -40,7 +40,9 @@ CRON_METHODS = {"AddFunc", "AddJob", "Schedule", "Start", "AddCronJob"}
 TIME_TICKER_METHODS = {"NewTicker", "Tick"}
 TIME_AFTER = "After"
 HTTP_ROUTE_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "Any", "Match"}
-GROUP_TYPE_NAMES = {"Group", "Echo"}
+# echo: Group / Echo; gin: RouterGroup / Engine / IRouter / IRoutes
+GROUP_TYPE_NAMES = {"Group", "Echo", "RouterGroup", "Engine", "IRouter", "IRoutes"}
+ROOT_ROUTER_TYPE_NAMES = {"Echo", "Engine"}
 PREFIX_MAX_ITERS = 32
 PREFIX_MAX_LEN = 1024
 _PATH_SELECTOR = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -1476,65 +1478,64 @@ class GoAnalyzer:
                         and (method in HTTP_ROUTE_METHODS or handle_method)
                         and method_matches(method, (route_rule.detect.get("calls") or {}).get("method"))
                     ):
-                        if True:
-                            argspec = (route_rule.detect.get("calls") or {}).get("arguments") or {}
-                            path_idx = int(argspec.get("path", {}).get("index", 0))
-                            handler_idx = int(argspec.get("handler", {}).get("index", 1))
-                            if handler_idx < 0:
-                                # gin: middlewares may come first, the handler is the last argument
-                                handler_idx = len(args) - 1
-                            if method == "Match":
-                                path_idx, handler_idx = 1, 2
-                            if handle_method:
-                                path_idx, handler_idx = 1, len(args) - 1
-                            path_node = args[path_idx] if len(args) > path_idx else None
-                            handler_node = args[handler_idx] if len(args) > handler_idx and handler_idx > path_idx else None
-                            path_res = _resolve_expr(
-                                path_node, env, package_consts, info.import_aliases, idx.consts_by_import
+                        argspec = (route_rule.detect.get("calls") or {}).get("arguments") or {}
+                        path_idx = int(argspec.get("path", {}).get("index", 0))
+                        handler_idx = int(argspec.get("handler", {}).get("index", 1))
+                        if handler_idx < 0:
+                            # gin: middlewares may come first, the handler is the last argument
+                            handler_idx = len(args) - 1
+                        if method == "Match":
+                            path_idx, handler_idx = 1, 2
+                        if handle_method:
+                            path_idx, handler_idx = 1, len(args) - 1
+                        path_node = args[path_idx] if len(args) > path_idx else None
+                        handler_node = args[handler_idx] if len(args) > handler_idx and handler_idx > path_idx else None
+                        path_res = _resolve_expr(
+                            path_node, env, package_consts, info.import_aliases, idx.consts_by_import
+                        )
+                        prefix, prefix_unresolved = self._receiver_prefix(
+                            node, prefix_map, echo_rule, env, package_consts, info, idx, fn
+                        )
+                        if (
+                            handler_node is not None
+                            and _path_is_string_like(path_node, path_res, env, package_consts)
+                        ):
+                            full_path = _join_path(prefix, path_res.path_text)
+                            path_unresolved = (
+                                (not path_res.fully_static)
+                                or prefix_unresolved
+                                or ("{" in full_path)
                             )
-                            prefix, prefix_unresolved = self._receiver_prefix(
-                                node, prefix_map, echo_rule, env, package_consts, info, idx, fn
+                            path_conf = (
+                                Confidence.EXACT if not path_unresolved else Confidence.UNKNOWN
                             )
-                            if (
-                                handler_node is not None
-                                and _path_is_string_like(path_node, path_res, env, package_consts)
-                            ):
-                                full_path = _join_path(prefix, path_res.path_text)
-                                path_unresolved = (
-                                    (not path_res.fully_static)
-                                    or prefix_unresolved
-                                    or ("{" in full_path)
-                                )
-                                path_conf = (
-                                    Confidence.EXACT if not path_unresolved else Confidence.UNKNOWN
-                                )
-                                handler, candidates, hconf = self._resolve_handler_node(
-                                    handler_node, fn, info, idx
-                                )
-                                route_method = handle_method or (
-                                    "ANY" if method == "Any" else ("MATCH" if method == "Match" else method)
-                                )
-                                parts = self._factory_parts(handler_node, handler, fn, info, idx)
-                                routes.append(
-                                    RouteHit(
-                                        method=route_method,
-                                        path=full_path,
-                                        handler_expr=text(handler_node),
-                                        handler=handler,
-                                        confidence=hconf,
-                                        candidates=candidates,
-                                        path_confidence=path_conf,
+                            handler, candidates, hconf = self._resolve_handler_node(
+                                handler_node, fn, info, idx
+                            )
+                            route_method = handle_method or (
+                                "ANY" if method == "Any" else ("MATCH" if method == "Match" else method)
+                            )
+                            parts = self._factory_parts(handler_node, handler, fn, info, idx)
+                            routes.append(
+                                RouteHit(
+                                    method=route_method,
+                                    path=full_path,
+                                    handler_expr=text(handler_node),
+                                    handler=handler,
+                                    confidence=hconf,
+                                    candidates=candidates,
+                                    path_confidence=path_conf,
+                                    file=info.rel,
+                                    line=line_of(node),
+                                    evidence=Evidence(
                                         file=info.rel,
                                         line=line_of(node),
-                                        evidence=Evidence(
-                                            file=info.rel,
-                                            line=line_of(node),
-                                            symbol=text(handler_node),
-                                        ),
-                                        path_unresolved=path_unresolved,
-                                        factory_parts=parts,
-                                    )
+                                        symbol=text(handler_node),
+                                    ),
+                                    path_unresolved=path_unresolved,
+                                    factory_parts=parts,
                                 )
+                            )
 
                     self._record_go_http(
                         node,
@@ -1908,7 +1909,7 @@ class GoAnalyzer:
 
     def _seed_echo_params(self, fn: GoFunction, prefixes: dict[str, str]) -> None:
         for name, gtype in fn.params.items():
-            if gtype and gtype.name == "Echo":
+            if gtype and gtype.name in ROOT_ROUTER_TYPE_NAMES:
                 prefixes.setdefault(name, "")
 
     def _is_group_type(self, gtype: GoType | None) -> bool:
