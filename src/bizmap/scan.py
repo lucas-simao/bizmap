@@ -7,11 +7,12 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from bizmap import dataflow, dbident, fsapply, progress
 from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
 from bizmap.detect.js_lang import JsAnalysis, JsAnalyzer
-from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer
+from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer, valid_queue_name
 from bizmap.detect.rules import load_rules
 from bizmap.detect.signatures import go_signature, py_signature
 from bizmap.files import WalkOptions, discover_sql_files, iter_files, rel
@@ -917,7 +918,7 @@ def _propagate_collections(
 def _apply_queues(graph: Graph, analysis: PyAnalysis, entrypoints_by_handler: dict[str, list[str]]) -> None:
     consumers: dict[tuple[str, str], list[str]] = defaultdict(list)
     for ev in analysis.queue_events:
-        if ev.role != "consume":
+        if ev.role != "consume" or not ev.name or not valid_queue_name(ev.name):
             continue
         qid = queue_id(ev.queue_kind, ev.name)
         graph.add_node(qid, "queue", kind=ev.queue_kind, name=ev.name)
@@ -931,10 +932,23 @@ def _apply_queues(graph: Graph, analysis: PyAnalysis, entrypoints_by_handler: di
         consumers[(ev.queue_kind, ev.name)].append(ev.function.qualname)
         for eid in entrypoints_by_handler.get(ev.function.qualname, []):
             graph.add_edge("triggers", qid, eid, confidence=Confidence.INFERRED, evidence=ev.evidence)
+    env_values = getattr(analysis, "env_values", None) or {}  # bizmap.yaml `env:`
     for ev in analysis.queue_events:
         if ev.role != "produce":
             continue
-        name = ev.name
+        name = ev.name or (env_values.get(ev.env) if ev.env else "") or ""
+        if not name:
+            # a topic held in an env var without a default: a dynamic queue on the function
+            node = graph.get(function_id(ev.function.qualname))
+            if node is not None and ev.env:
+                bucket = list(node.attrs.get("unresolved_queues") or [])
+                item = {"kind": ev.queue_kind, "env": ev.env, "evidence": ev.evidence.to_dict()}
+                if item not in bucket:
+                    bucket.append(item)
+                node.attrs["unresolved_queues"] = bucket
+            continue
+        if not valid_queue_name(name):
+            continue
         if ev.queue_kind == "celery" and ev.target_symbol:
             # match consume events whose function name/qualname matches
             for (kind, cname), _fns in list(consumers.items()):
@@ -947,13 +961,17 @@ def _apply_queues(graph: Graph, analysis: PyAnalysis, entrypoints_by_handler: di
                     break
         qid = queue_id(ev.queue_kind, name)
         graph.add_node(qid, "queue", kind=ev.queue_kind, name=name)
-        graph.add_edge(
+        if ev.env:
+            graph.nodes[qid].attrs["env"] = ev.env
+        edge = graph.add_edge(
             "enqueues",
             function_id(ev.function.qualname),
             qid,
             confidence=Confidence.INFERRED,
             evidence=ev.evidence,
         )
+        if ev.queue_kind == "rq" and ev.target_symbol:
+            edge.attrs["task"] = ev.target_symbol
 
 
 def _queue_hints(raw: dict | None) -> dict[str, str]:
@@ -1042,6 +1060,8 @@ def _link_queue_consumers(graph: Graph, analysis: PyAnalysis, cfg: ScanConfig) -
         if ev.role != "produce":
             continue
         if ev.queue_kind not in {"cloud_tasks", "pubsub"}:
+            continue
+        if not ev.name or not valid_queue_name(ev.name):
             continue
         url = ev.http_url
         topic = ev.name if ev.queue_kind == "pubsub" else ev.name
@@ -2453,6 +2473,20 @@ def _warn_graph(graph: Graph, msg: str) -> None:
     graph.attrs["warnings"] = existing
 
 
+def _apply_go_cloud(graph: Graph, root: Path, go_files: list[Path], cfg: ScanConfig) -> tuple[dict[str, str], Any]:
+    """Firestore and Pub/Sub publishes in Go (a text pass). Returns the texts read
+    and what the data-flow pass needs (struct tags, publish topics)."""
+    if not go_files:
+        return {}, None
+    texts = source_texts(root, go_files)
+    try:
+        env_values = {str(k): str(v) for k, v in ((cfg.raw or {}).get("env") or {}).items()}
+        return texts, fsapply.apply_go_cloud(graph, texts, env_values)
+    except Exception as exc:  # noqa: BLE001 - never lose the scan over a text pass
+        _warn_graph(graph, f"Go Firestore / Pub/Sub pass failed ({type(exc).__name__}: {exc}); skipped")
+        return texts, None
+
+
 def _apply_js_firestore(graph: Graph, root: Path, js_files: list[Path], analysis: JsAnalysis) -> dict[str, str]:
     """Firestore reads / writes, triggers and Pub/Sub publishes in JS/TS (a
     text pass over the files that use Firestore). Returns the texts read."""
@@ -2470,7 +2504,8 @@ def _apply_js_firestore(graph: Graph, root: Path, js_files: list[Path], analysis
 
 
 def _apply_dataflow(
-    graph: Graph, root: Path, cfg: ScanConfig, files: list[Path], known: dict[str, str] | None = None
+    graph: Graph, root: Path, cfg: ScanConfig, files: list[Path], known: dict[str, str] | None = None,
+    go_meta: Any = None,
 ) -> None:
     """``db`` on tables and ``feeds`` between them (a text pass after the
     detectors; a failure there only adds a warning)."""
@@ -2482,7 +2517,7 @@ def _apply_dataflow(
         }
         idx = dbident.build_index(texts, cfg.raw)
         dbident.assign_dbs(graph, texts, idx)
-        dataflow.apply(graph, root, texts, firestore=idx.firestore or False)
+        dataflow.apply(graph, root, texts, firestore=idx.firestore or False, go_meta=go_meta)
     except Exception as exc:  # noqa: BLE001 - never lose the scan over data flow
         existing = list(graph.attrs.get("warnings") or [])
         existing.append(f"data-flow pass failed ({type(exc).__name__}: {exc}); feeds skipped")
@@ -2645,6 +2680,8 @@ def _scan_one(
     _add_schema_nodes(graph, schema)
 
     go_sql, go_prop = _apply_go(graph, go_analysis, schema, expand_star=expand)
+    go_texts, go_meta = _apply_go_cloud(graph, root, go_files, cfg)
+    py_analysis.env_values = {str(k): str(v) for k, v in ((cfg.raw or {}).get("env") or {}).items()}
     py_sql, py_prop = _apply_python(graph, py_analysis, schema, expand_star=expand)
     _apply_js(graph, js_analysis, schema)
     js_texts = _apply_js_firestore(graph, root, js_files, js_analysis)
@@ -2797,7 +2834,7 @@ def _scan_one(
     split_factory_members(graph, root, span_cache)
     split_go_route_closures(graph, root, span_cache)  # its own edge index: after the JS moves
     split_js_inline_handlers(graph)
-    _apply_dataflow(graph, root, cfg, [*go_files, *py_files, *js_files], js_texts)
+    _apply_dataflow(graph, root, cfg, [*go_files, *py_files, *js_files], {**go_texts, **js_texts}, go_meta)
     timings.propagate += go_prop + py_prop + (time.perf_counter() - t_prop)
     progress.done(f"{graph.repo}: graph", t_graph)
 
