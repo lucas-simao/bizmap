@@ -465,11 +465,13 @@ class Rows:
 @dataclass
 class Row:
     sel: ResolvedSelect
+    alias: dict[str, str] | None = None  # Go struct field -> document field (`firestore:"…"` tags)
 
 
 @dataclass
 class Obj:
     fields: dict[str, Any]
+    type_name: str | None = None  # Go struct literal type (its `json:"…"` tags name the fields)
 
 
 @dataclass
@@ -568,7 +570,7 @@ def _hop_value(value: Any, hop: str) -> Any:
     if isinstance(value, Scalar):
         return Scalar(_with(value.srcs, hop=hop))
     if isinstance(value, Obj):
-        return Obj({k: _hop_value(v, hop) for k, v in value.fields.items()})
+        return Obj({k: _hop_value(v, hop) for k, v in value.fields.items()}, value.type_name)
     if isinstance(value, ListOf):
         return ListOf(_hop_value(value.elem, hop))
     if isinstance(value, Arr):
@@ -579,7 +581,7 @@ def _hop_value(value: Any, hop: str) -> Any:
             star_tables=value.sel.star_tables,
             tables=value.sel.tables,
         )
-        return Row(sel) if isinstance(value, Row) else Rows(sel, value.kind)
+        return Row(sel, value.alias) if isinstance(value, Row) else Rows(sel, value.kind)
     if isinstance(value, Msg):
         return Msg(value.topic, (hop, *value.hops), value.local)
     if isinstance(value, Fs):
@@ -659,6 +661,9 @@ class RepoContext:
         self.triggers: dict[str, dict[str, Any]] = {}  # fid -> firestore_trigger (TS handlers)
         self.push_topics: dict[str, str] = {}  # fid -> Pub/Sub topic delivered to it (push / subscription)
         self.aliases: dict[str, str] = {}  # Pydantic `Field(alias=…)`: alias -> attribute
+        self.json_tags: dict[str, dict[str, str]] = {}  # Go struct -> field -> json name
+        self.fs_tags: dict[str, dict[str, str]] = {}  # Go struct -> field -> firestore name
+        self.go_topics: dict[str, str] = {}  # Go fid -> the one Pub/Sub topic it publishes to
         self.calls: dict[str, set[str]] = defaultdict(set)
         self.write_lines: dict[tuple[str, str], set[int]] = defaultdict(set)  # (file, table) -> lines
         self.queue_targets: dict[str, list[tuple[str, str]]] = defaultdict(list)  # fid -> [(queue, fn)]
@@ -1058,7 +1063,7 @@ _QUERY_METHODS = {
 }
 _ROW_METHODS = {"fetchone", "fetchrow", "first", "one", "one_or_none", "scalar", "fetchfirst", "next"}
 _SET_METHODS = {"fetchall", "fetchmany", "all", "mappings", "dicts", "fetch", "tolist", "to_list"}
-_PASS_METHODS = {"parse", "loads", "dict", "stringify", "dumps", "tojson", "toobject", "assign", "structuredclone",
+_PASS_METHODS = {"parse", "loads", "dict", "stringify", "dumps", "marshal", "marshalindent", "tojson", "toobject", "assign", "structuredclone",
                  "copy", "deepcopy", "freeze", "data", "json", "todict", "model_dump", "_asdict", "as_dict"}
 _PUBLISH = {"publish", "publishjson", "send", "sendmessage", "emit", "enqueue", "add", "produce", "push_task"}
 _CONSUME = {"subscribe", "on", "consume", "process", "handle", "listen", "addlistener", "once", "handler"}
@@ -1112,6 +1117,7 @@ class Analyzer:
         self.line = fn.start
         self.strings = ctx.file_strings.get(fn.file) or {}
         self._chain_topic: str | None = None
+        self.var_types: dict[str, str] = {}  # Go: variable -> struct type
         self.callees = self._callee_index()
 
     # --- env
@@ -1259,13 +1265,16 @@ class Analyzer:
         decl = _ASSIGN_KW.match(t)
         body = t[decl.end() :] if decl else t
         if lang == "go":
-            gm = re.match(r"^var\s+(.+)$", body)
+            gm = re.match(r"^var\s+(.+)$", t)
             if gm:
                 body = gm.group(1)
                 if _find_assign(body) is None:
                     names = split_top(body.split(" ")[0])
+                    tm = re.match(r"^[\w, ]+?\s+\*?(?:\w+\.)?(\w+)\s*$", body.strip())
                     for name in names:
                         self.assign(name, None)
+                        if tm:
+                            self.var_types[name.strip()] = tm.group(1)
                     return
         pos = _find_assign(body)
         if pos is None:
@@ -1324,7 +1333,8 @@ class Analyzer:
         if isinstance(value, Row) and any(_bare(t).startswith("collection:") for t in value.sel.star_tables):
             # a Firestore document's fields keep their case and need no schema
             t = next(t for t in value.sel.star_tables if _bare(t).startswith("collection:"))
-            return Scalar(frozenset({Src(table=t, col=name, hops=_hops_of_sel(value.sel))}))
+            col = (value.alias or {}).get(name, name)
+            return Scalar(frozenset({Src(table=t, col=col, hops=_hops_of_sel(value.sel))}))
         if isinstance(value, Row):
             for item_name, srcs in value.sel.items:
                 if item_name == key:
@@ -1432,8 +1442,15 @@ class Analyzer:
         if ml == "get" and args and v.kind == "doc":
             lit = self.m.lit(args[0])
             return Scalar(frozenset({Src(table=v.coll, col=lit.value, hops=v.hops)})) if lit is not None else None
-        if ml in ("get", "stream", "list", "getall") and not args:
+        if ml in ("get", "stream", "list", "getall", "documents") and (not args or v.kind in ("docref", "ref")):
+            # Go passes ctx: `ref.Doc(id).Get(ctx)`, `q.Documents(ctx)`
             return Fs(v.coll, "doc" if v.kind == "docref" else "query", v.id_param, v.hops)
+        if ml == "datato" and args and v.kind == "doc":
+            target = args[0].strip().lstrip("&").strip()
+            alias = self.ctx.fs_tags.get(self.var_types.get(target, "")) or None
+            row = _doc_data(v.coll, v.hops)
+            self.assign(target, Row(row.sel, alias))
+            return None
         if ml in ("doc", "document"):
             if args and v.kind == "ref":
                 mark_id(args[0], v.coll)
@@ -1513,7 +1530,11 @@ class Analyzer:
             if gm and e.endswith("}"):
                 ob = gm.end() - 1
                 if match_close(e, ob) == len(e) - 1:
-                    return self._object(e[ob + 1 : -1], depth, go=True)
+                    obj = self._object(e[ob + 1 : -1], depth, go=True)
+                    tname = re.match(r"^(?:\w+\.)?(\w+)\s*\{", e)
+                    if isinstance(obj, Obj) and tname and not e.startswith(("map[", "[]")):
+                        obj.type_name = tname.group(1)
+                    return obj
             am = re.match(r"^append\(", e)
             if am:
                 args = split_top(e[am.end() : match_close(e, am.end() - 1)])
@@ -1638,7 +1659,7 @@ class Analyzer:
                 method = chain_text.split(".")[-1]
                 recv_text = chain_text.rsplit(".", 1)[0] if "." in chain_text else ""
                 recv_val = self.lookup(recv_text) if recv_text and pure else None
-                if method == "collection" and args:
+                if method.lower() == "collection" and args:
                     lit = self.m.lit(args[0])
                     if lit is not None and not lit.dynamic:
                         fs_collection = lit.value
@@ -1686,6 +1707,18 @@ class Analyzer:
             if isinstance(payload, Obj) and sources(payload):
                 self.publishes.append(
                     PublishEvent(fn=self.fn.fid, topic=self._chain_topic, payload=payload, file=self.fn.file, line=self.line)
+                )
+            return None
+        if self.fn.lang == "go" and ml == "publish" and len(args) >= 2 and self.fn.fid in self.ctx.go_topics:
+            payload = self.eval(args[1], depth + 1)
+            if isinstance(payload, Obj) and isinstance(payload.fields.get("Data"), Obj):
+                payload = payload.fields["Data"]  # &pubsub.Message{Data: body}
+            if isinstance(payload, Obj) and sources(payload):
+                tags = self.ctx.json_tags.get(payload.type_name or "") or {}
+                named = Obj({tags.get(k, k): v for k, v in payload.fields.items()})
+                self.publishes.append(
+                    PublishEvent(fn=self.fn.fid, topic=self.ctx.go_topics[self.fn.fid], payload=named,
+                                 file=self.fn.file, line=self.line)
                 )
             return None
         if isinstance(cur_val, Msg) and ml not in _PUBLISH:
@@ -2003,6 +2036,12 @@ class Analyzer:
             if sub is not None:
                 self.writes.extend(sub.writes)
                 self.publishes.extend(sub.publishes)
+        if tainted and cid not in self.ctx.reads_any and cid not in self.ctx.writes_any and self.ctx.spend():
+            # a pure helper (`build(id, d)`): what it returns from the values passed in
+            sub = _analyze(self.ctx, info, depth=self.depth + 1, hop=(*self.hop, *hop_ids), args=arg_vals, method_call=True)
+            ret = next((r for r in (sub.returns if sub else []) if r is not None), None)
+            if ret is not None:
+                return ret
         if cid in self.ctx.reads_any:
             summary = self.ctx.summaries.get(cid, _NO_CALL)
             if summary is _NO_CALL and not self.ctx.spend():
@@ -2641,15 +2680,27 @@ def _candidates(ctx: RepoContext, firestore: bool) -> list[FnInfo]:
                 or (reads and (_in_span(h.produce, info) or _in_span(h.fs, info)))
                 or _in_span(h.consume, info)
                 or fid in ctx.push_topics
+                or (reads and fid in ctx.go_topics)
             )
         if ok:
             out.append(info)
     return out
 
 
-def apply(graph: Graph, root: Path, texts: dict[str, str] | None = None, *, firestore: bool = False) -> None:
+def apply(
+    graph: Graph, root: Path, texts: dict[str, str] | None = None, *, firestore: bool = False, go_meta: Any = None
+) -> None:
     """Add ``feeds`` edges (with ``column_map``) to a freshly scanned graph."""
     ctx = RepoContext(graph, root, texts, firestore=firestore)
+    if go_meta is not None:
+        ctx.json_tags = dict(getattr(go_meta, "json_tags", {}) or {})
+        ctx.fs_tags = dict(getattr(go_meta, "fs_tags", {}) or {})
+    for e in graph.edges.values():
+        if e.type == "enqueues" and not e.attrs.get("candidates") and _bare(e.to_id).startswith("queue:pubsub:"):
+            node = graph.nodes.get(e.from_id)
+            q = graph.nodes.get(e.to_id)
+            if node is not None and node.attrs.get("language") == "go" and q is not None and q.attrs.get("name"):
+                ctx.go_topics.setdefault(e.from_id, str(q.attrs["name"]))
     for rel, text in (texts or {}).items():
         if rel.endswith(".py") and "alias" in text:
             for m in _PYDANTIC_ALIAS.finditer(text):
