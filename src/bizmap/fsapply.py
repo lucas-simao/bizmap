@@ -156,6 +156,14 @@ _SKIP_DIRS = {"node_modules", ".git", ".venv", "venv", "dist", "build", "__pycac
 
 def _endpoint_path(url: str) -> str:
     url = url.strip().strip("\"'")
+    if url.startswith("$("):  # $(gcloud run services describe … --format='value(status.url)')/path
+        depth = 0
+        for k, c in enumerate(url):
+            depth += c == "("
+            depth -= c == ")"
+            if depth == 0 and k > 1:
+                url = url[k + 1 :]
+                break
     url = re.sub(r"^\$\{?\w+\}?", "", url)  # $URL/path, ${URL}/path
     if "://" in url:
         url = urlparse(url).path

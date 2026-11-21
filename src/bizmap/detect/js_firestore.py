@@ -181,7 +181,8 @@ class _FileScan:
         self.m: Masked = mask(text, "javascript")
         self.text = self.m.text
         self.fns = sorted(fns, key=lambda f: (f.start, -f.end))
-        self.consts = consts
+        # this file's own constants first (`const COLLECTION = 'order_events'`, not exported)
+        self.consts = {**consts, **collect_constants({rel: text})}
         self.module = _module(rel)
         self.refs: list[tuple[int, str, _Target]] = []  # (pos, name, target)
         self.used: set[int] = set()  # positions of `.collection(` already in a chain
@@ -320,16 +321,15 @@ class _FileScan:
 def _collection(t: _Target) -> tuple[str | _Param, str] | None:
     """(collection name or the helper parameter, path) of a target."""
     segs = list(t.segments)
-    if t.is_doc and len(segs) % 2 == 1:
-        segs = segs[:-1] if len(segs) > 1 else segs
     if t.is_doc and len(segs) % 2 == 0:
-        segs = segs[:-1]
+        segs = segs[:-1]  # doc(db, 'settings', 'pricing'): the collection is `settings`
     if not segs:
         return None
     if len(segs) % 2 == 0:  # an odd collection path is malformed: ignore
         return None
     last = segs[-1]
-    path = "/".join(s if isinstance(s, str) else "{param}" for s in segs)
+    # a parameter in an id position is just an id; in the last position it names the collection
+    path = "/".join(s if isinstance(s, str) else ("{param}" if k == len(segs) - 1 else "{}") for k, s in enumerate(segs))
     if isinstance(last, _Param):
         return last, path
     if not isinstance(last, str) or last in ("{}",) or "{" in last:

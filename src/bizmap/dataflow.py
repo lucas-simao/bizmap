@@ -1949,6 +1949,8 @@ class Analyzer:
     def _orm_tables(self) -> list[str]:
         out = []
         for t in self.ctx.direct_w.get(self.fn.fid, ()):
+            if _bare(t) == "table:unknown":
+                continue  # a dynamic / unresolved table is never a feeds end
             lines = self.ctx.write_lines.get((self.fn.file, t)) or set()
             if any(abs(ln - self.line) <= 2 for ln in lines):
                 out.append(t)
@@ -2334,11 +2336,13 @@ def _build_feeds(ctx: RepoContext, writes: list[WriteEvent], skip_queue: bool = 
     graph = ctx.graph
     pairs: dict[tuple[str, str], dict[str, Any]] = {}
     for w in writes:
+        if _bare(w.target) == "table:unknown":
+            continue
         dst_cols = ctx.columns(w.target)
         if w.col is not None and dst_cols is not None and w.col not in dst_cols:
             continue  # not a column of the destination
         for s in w.srcs:
-            if s.table is None or s.table == w.target:
+            if s.table is None or s.table == w.target or _bare(s.table) == "table:unknown":
                 continue
             if s.col is None and s.transform:
                 continue  # a whole row through some function: no value seen
@@ -2544,7 +2548,7 @@ def link_queue_flows(graph: Graph) -> None:
                             continue
                         for d in dests:
                             dt = _resolve_in(graph, cons, d["table"])
-                            if dt is None or dt == st:
+                            if dt is None or dt == st or _bare(dt) == "table:unknown":
                                 continue
                             ent: list[dict[str, Any]] = pairs[(st, dt)]
                             if s.get("column") and d.get("column"):
