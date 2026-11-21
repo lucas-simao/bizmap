@@ -114,6 +114,7 @@ changed counts.
 | `mermaid` | `true` | Include the Mermaid diagram. |
 | `shared-services` | `3` | High risk when the PR writes a table this many services read or write (integer ≥ 2). |
 | `risk-threshold` | | `low`, `medium` or `high`: fail the job when the risk is at least this level. Empty never fails. |
+| `html` | | Also write the offline graph page (`bizmap export --format html`) to this path, relative to the workspace. Works on `push` too (then only the page is made). |
 | `fail-on-error` | `false` | Fail the job when BizMap itself fails (the comment always says it failed). |
 | `python-version` | `3.12` | Python used to run BizMap. |
 | `github-token` | `${{ github.token }}` | Token for the comment (needs `pull-requests: write`). |
@@ -125,6 +126,64 @@ changed counts.
 | `markdown` | Path of the Markdown written to the PR comment. |
 | `status` | `ok`, `skipped` or `failed`. |
 | `risk` | `none`, `low`, `medium` or `high` (empty when no report was produced). |
+| `html` | Absolute path of the graph page written for the `html` input (empty without it). |
+
+## Publish the graph page on GitHub Pages
+
+With `html`, the Action also writes the offline graph page. On a push to the
+default branch there is no diff to map, so it only scans and writes the page;
+publish it with the Pages actions
+(one-time setup: *Settings → Pages → Build and deployment → Source: GitHub Actions*):
+
+```yaml
+# .github/workflows/bizmap-pages.yml
+name: BizMap graph page
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: bizmap-pages
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lucas-simao/bizmap@v0.8.0
+        id: bizmap
+        with:
+          path: .
+          comment: "false"
+          html: site/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+```
+
+> **Already publishing another site on Pages?** A repository has a single
+> Pages site. Build your site first, then write the graph page into a
+> subfolder of the same artifact (e.g. `html: site/graph/index.html`) and
+> upload `site` once. BizMap's own documentation does this: its
+> [graph example](https://lucas-simao.github.io/bizmap/graph/) is
+> `examples/checkout`, rebuilt on every push to `main`.
+
+The page shows the code it was scanned from: anyone who can open the Pages
+URL can read the routes, functions and tables. For a private repository, check
+who can see its Pages site before publishing.
 
 ## Behaviour worth knowing
 

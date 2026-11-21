@@ -101,6 +101,7 @@ nav:
   - Languages and detectors: languages.md
   - MCP server: mcp.md
   - GitHub Action: github-action.md
+  - Example graph: https://lucas-simao.github.io/bizmap/graph/   # built by docs.yml from examples/checkout
   - Reference:
       - Graph format: graph-schema.md
       - How it works: how-it-works.md

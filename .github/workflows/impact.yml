@@ -28,8 +28,12 @@ jobs:
         with:
           path: .
           comment: "false"
-      - name: The report was produced
+          html: out/bizmap.html
+      - name: The report and the graph page were produced
         env:
           STATUS: ${{ steps.bizmap.outputs.status }}
+          HTML: ${{ steps.bizmap.outputs.html }}
         run: |
           test "$STATUS" = ok
+          test "$HTML" = "$GITHUB_WORKSPACE/out/bizmap.html"
+          test -s "$HTML" && grep -q '<html' "$HTML"

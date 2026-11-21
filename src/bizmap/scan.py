@@ -1881,6 +1881,8 @@ def _apply_db_triggers(graph: Graph, schema: Schema) -> None:
             events=trig.events,
             function=trig.function,
             evidence=trig.evidence.to_dict() if trig.evidence else None,
+            # optional, additive: only for `UPDATE OF col, ...` (others unchanged)
+            **({"columns": list(trig.update_columns)} if trig.update_columns else {}),
         )
         fn = schema.functions.get(trig.function)
         if not fn:
