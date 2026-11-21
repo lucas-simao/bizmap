@@ -28,6 +28,7 @@ from bizmap.detect.tsutil import (
 from bizmap.files import rel
 from bizmap.graph import Confidence, Evidence
 from bizmap.sql_analyze import looks_like_sql
+from bizmap.urlclean import clean_method, clean_url
 
 _GO_LANGUAGE = Language(tsgo.language())
 
@@ -194,6 +195,11 @@ class GoHttpCall:
     url: str
     evidence: Evidence
     unresolved: bool = False
+    via: str = ""  # the HTTP helper the call goes through (`api.Client.get`)
+
+    def __post_init__(self) -> None:
+        self.url = clean_url(self.url)
+        self.method = clean_method(self.method)
 
 
 @dataclass
@@ -1347,7 +1353,10 @@ class GoAnalyzer:
         http_calls: list[GoHttpCall] = []
         situations: dict[str, list[str]] = defaultdict(list)
 
-        echo_rule = next((r for r in self.rules if r.produce.get("entrypoint", {}).get("kind") == "http"), None)
+        http_rules = [r for r in self.rules if r.produce.get("entrypoint", {}).get("kind") == "http"]
+        # group prefixes (`Group`) work the same in every router rule
+        echo_rule = http_rules[0] if http_rules else None
+        rule_by_file: dict[str, Rule | None] = {}
         pgx_rule = next((r for r in self.rules if "sql" in r.produce), None)
         ticker_rule = next((r for r in self.rules if r.detect.get("go_call") or r.detect.get("go_statement")), None)
 
@@ -1449,19 +1458,37 @@ class GoAnalyzer:
                                         )
                                     )
 
+                    if info.rel not in rule_by_file:
+                        rule_by_file[info.rel] = next(
+                            (r for r in http_rules if import_matches(info.imports, r.when)), None
+                        )
+                    route_rule = rule_by_file[info.rel]
+                    handle_method: str | None = None
+                    if route_rule is not None and method == "Handle" and len(args) >= 3:
+                        # gin `r.Handle("PATCH", "/path", h)`: the method is the first argument
+                        m_res = _resolve_expr(
+                            args[0], env, package_consts, info.import_aliases, idx.consts_by_import
+                        )
+                        if m_res.fully_static and m_res.text and m_res.text.isalpha():
+                            handle_method = m_res.text.upper()
                     if (
-                        echo_rule
-                        and method in HTTP_ROUTE_METHODS
-                        and method_matches(method, (echo_rule.detect.get("calls") or {}).get("method"))
+                        route_rule is not None
+                        and (method in HTTP_ROUTE_METHODS or handle_method)
+                        and method_matches(method, (route_rule.detect.get("calls") or {}).get("method"))
                     ):
-                        if import_matches(info.imports, echo_rule.when):
-                            argspec = (echo_rule.detect.get("calls") or {}).get("arguments") or {}
+                        if True:
+                            argspec = (route_rule.detect.get("calls") or {}).get("arguments") or {}
                             path_idx = int(argspec.get("path", {}).get("index", 0))
                             handler_idx = int(argspec.get("handler", {}).get("index", 1))
+                            if handler_idx < 0:
+                                # gin: middlewares may come first, the handler is the last argument
+                                handler_idx = len(args) - 1
                             if method == "Match":
                                 path_idx, handler_idx = 1, 2
+                            if handle_method:
+                                path_idx, handler_idx = 1, len(args) - 1
                             path_node = args[path_idx] if len(args) > path_idx else None
-                            handler_node = args[handler_idx] if len(args) > handler_idx else None
+                            handler_node = args[handler_idx] if len(args) > handler_idx and handler_idx > path_idx else None
                             path_res = _resolve_expr(
                                 path_node, env, package_consts, info.import_aliases, idx.consts_by_import
                             )
@@ -1484,8 +1511,8 @@ class GoAnalyzer:
                                 handler, candidates, hconf = self._resolve_handler_node(
                                     handler_node, fn, info, idx
                                 )
-                                route_method = "ANY" if method == "Any" else (
-                                    "MATCH" if method == "Match" else method
+                                route_method = handle_method or (
+                                    "ANY" if method == "Any" else ("MATCH" if method == "Match" else method)
                                 )
                                 parts = self._factory_parts(handler_node, handler, fn, info, idx)
                                 routes.append(
@@ -3071,6 +3098,7 @@ class GoAnalyzer:
                     url=url,
                     evidence=evidence,
                     unresolved=("{" in url) or not path_res.fully_static,
+                    via=callee.qualname,
                 )
             )
 

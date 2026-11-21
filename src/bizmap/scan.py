@@ -1470,6 +1470,20 @@ def _stash_http_call(
 _UI_SOURCE_EXTS = (".tsx", ".jsx", ".vue", ".svelte")
 
 
+_JS_TEST_DIRS = ("__tests__", "__mocks__", "mocks", "__fixtures__", "e2e", "cypress", "playwright")
+
+
+def _is_js_test_source(path: str) -> bool:
+    """`__tests__/`, `mocks/`, `*.test.ts`, `*.spec.tsx`… (JS/TS only)."""
+    parts = path.replace("\\", "/").split("/")
+    name = parts[-1]
+    if not name.endswith((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")):
+        return False
+    if ".test." in name or ".spec." in name or name.startswith("setupTests"):
+        return True
+    return any(part in _JS_TEST_DIRS for part in parts[:-1])
+
+
 def _is_ui_source(path: str | None) -> bool:
     """A component file (`.tsx`, `.jsx`, `.vue`, `.svelte`)."""
     return str(path or "").lower().endswith(_UI_SOURCE_EXTS)
@@ -1688,7 +1702,7 @@ def _link_http(
         path = str(node.attrs.get("path") or "")
         if method and path:
             routes.append((node.id, method, path))
-    calls: list[tuple[str, str, str, Evidence, Confidence, bool]] = []
+    calls: list[tuple[str, str, str, Evidence, Confidence, bool, str]] = []
     if py:
         for c in py.http_calls:
             calls.append(
@@ -1699,10 +1713,13 @@ def _link_http(
                     c.evidence,
                     c.confidence,
                     bool(getattr(c, "client_unknown", False)),
+                    str(getattr(c, "via", "") or ""),
                 )
             )
     if js:
         for c in js.http_calls:
+            if _is_js_test_source(c.file):
+                continue
             ev = Evidence(file=c.file, line=c.line, symbol=c.symbol)
             calls.append(
                 (
@@ -1712,6 +1729,7 @@ def _link_http(
                     ev,
                     Confidence.INFERRED,
                     bool(getattr(c, "client_unknown", False)),
+                    str(getattr(c, "via", "") or ""),
                 )
             )
     if go:
@@ -1724,6 +1742,7 @@ def _link_http(
                     c.evidence,
                     Confidence.INFERRED,
                     bool(getattr(c, "client_unknown", False)),
+                    str(getattr(c, "via", "") or ""),
                 )
             )
     unmatched: list[dict] = []
@@ -1732,7 +1751,7 @@ def _link_http(
         for n in graph.nodes.values()
         if n.type == "entrypoint"
     }
-    for fid, method, url, ev, conf, client_unknown in calls:
+    for fid, method, url, ev, conf, client_unknown, via in calls:
         caller_repo = None
         node = graph.get(fid)
         if node is not None:
@@ -1765,6 +1784,8 @@ def _link_http(
         item = {"url": url, "method": method, "keys": keys, "from": fid, "reason": reason}
         if service:
             item["service"] = service
+        if via:
+            item["via"] = via
         unmatched.append(item)
     graph.attrs["unresolved_http"] = unmatched
     return unmatched
@@ -2587,6 +2608,8 @@ def _scan_one(
             client_unknown=bool(getattr(call, "client_unknown", False)),
         )
     for call in js_analysis.http_calls:
+        if _is_js_test_source(call.file):
+            continue
         _stash_http_call(
             graph,
             function_id(call.symbol),
@@ -2602,6 +2625,8 @@ def _scan_one(
         if hc.caller != hc.callee:
             callers_of[hc.callee].append(hc)
     for lit in js_analysis.route_literals:
+        if _is_js_test_source(lit.file):
+            continue  # a test or a mock (msw `rest.get('/x')`) is not the app calling the API
         if not lit.method and _is_ui_source(lit.file) and not getattr(lit, "helper", False):
             # a path in a component with nothing saying it is a request (no
             # client method, no fetch, no `url` + method) is navigation or a

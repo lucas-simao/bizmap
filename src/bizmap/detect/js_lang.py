@@ -31,6 +31,7 @@ from bizmap.detect.tsutil import (
 )
 from bizmap.files import SKIP_DIR_NAMES, rel
 from bizmap.sql_analyze import looks_like_sql
+from bizmap.urlclean import clean_method, clean_url
 
 try:
     import tree_sitter_javascript as tsjs
@@ -854,6 +855,10 @@ class JsHttpCall:
     symbol: str
     unresolved: bool = False
     client_unknown: bool = False
+
+    def __post_init__(self) -> None:
+        self.url = clean_url(self.url)
+        self.method = clean_method(self.method)
 
 
 @dataclass
@@ -3772,6 +3777,8 @@ _LITERAL_SKIP_KEYS = {
 }
 # Callees whose string arguments are navigation, matching, logging, or
 # route registration rather than an HTTP request.
+_NAV_VAR_WORDS = ("redirect", "callback", "returnto", "returnurl", "nexturl", "successurl", "cancelurl")
+
 _LITERAL_SKIP_CALLS = {
     "navigate",
     "navigateto",
@@ -3900,6 +3907,13 @@ def _literal_is_excluded(top: Node, routers: dict[str, str]) -> bool:
         left = parent.child_by_field_name("left")
         ltxt = text(left).lower() if left is not None else ""
         if ltxt.endswith("href") or ltxt.endswith("location") or ltxt.endswith("pathname"):
+            return True
+    if ptype in {"variable_declarator", "assignment_expression"}:
+        # `const redirectUri = `${APP_URL}/oauth/callback``: where the browser
+        # comes back to, not a request
+        target = parent.child_by_field_name("name") or parent.child_by_field_name("left")
+        tname = text(target).lower().replace("_", "") if target is not None else ""
+        if any(word in tname for word in _NAV_VAR_WORDS):
             return True
     if ptype == "arguments" and parent_of(parent) is not None and parent_of(parent).type in {
         "call_expression",
