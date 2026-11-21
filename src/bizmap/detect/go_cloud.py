@@ -87,6 +87,7 @@ class GoPublish:
     fields: list[str] = field(default_factory=list)
     via: str | None = None  # the wrapper type
     candidates: bool = False  # several wrapper instances could be the receiver: which one is unknown
+    unknown: bool = False  # a publisher no instance reaches: the topic is unknown
     confidence: str = "exact"
 
 
@@ -133,6 +134,21 @@ class _GoFile:
         self.text = self.m.text
         self.fns = fns
         self.lines_at = [0] + [m.end() for m in re.finditer("\n", self.text)]
+        # import alias -> the imported package directory's last segment
+        self.imports: dict[str, str] = {}
+        blocks = [m.group(1) for m in re.finditer(r"\bimport\s*\(([^)]*)\)", self.text)]
+        blocks += [m.group(0) for m in re.finditer(r"\bimport\s+(?:[\w.]+\s+)?\x00\d+\x00", self.text)]
+        for blk in blocks:
+            for im in re.finditer(r"(?:^|\n|import)\s*([\w.]+\s+)?(\x00\d+\x00)", blk):
+                lit = self.m.lit(im.group(2))
+                if lit is None or not lit.value:
+                    continue
+                last = lit.value.rstrip("/").rsplit("/", 1)[-1]
+                if re.fullmatch(r"v\d+", last) and "/" in lit.value:
+                    last = lit.value.rstrip("/").rsplit("/", 2)[-2]
+                alias = (im.group(1) or "").strip() or last
+                if alias not in ("_", "."):
+                    self.imports[alias] = last
 
     def line(self, pos: int) -> int:
         lo, hi = 0, len(self.lines_at)
@@ -174,6 +190,7 @@ class _Index:
         self.env_values = env_values
         self.env_defaults: dict[str, str] = {}  # env var -> its default wherever one is given
         self.field_values: dict[str, set[str]] = {}  # struct field -> literal / constant values set to it
+        self.slices: dict[str, list[tuple[_GoFile, str]]] = {}  # package var -> its `[]string{…}` elements
         for gf in files.values():
             for em in _ENV_CALL.finditer(gf.text):
                 env = _lit(gf.m, em.group(1))
@@ -203,6 +220,10 @@ class _Index:
 
     def _scan(self, gf: _GoFile) -> None:
         t = gf.text
+        for mm in re.finditer(rf"(?:^|\n)\s*(?:var\s+)?({_IDENT})\s*(?:\[\]string\s*)?=\s*\[\]string\s*\{{", t):
+            close = match_close(t, mm.end() - 1)
+            self.slices.setdefault(mm.group(1), [])
+            self.slices[mm.group(1)] = [(gf, e) for e in split_top(t[mm.end() : close]) if e.strip()]
         for mm in _CONST_LINE.finditer(t):
             v = _lit(gf.m, mm.group(2))
             if v is not None:
@@ -297,6 +318,15 @@ class _Index:
                         return got
             if self.consts.get(last):
                 return [GoTopic(self.consts[last])]
+            if last in self.slices and (("." in e) or not re.search(rf"\b{re.escape(e)}\s*:?=", fn_body)):
+                # `reports.Topics` / `Topics`: a package `var Topics = []string{…}`
+                out2: list[GoTopic] = []
+                for sgf, el in self.slices[last]:
+                    got2 = self.topics(sgf, el, "")
+                    if got2 is None:
+                        return None
+                    out2 += got2
+                return out2
             if last in self.fields:
                 seen: dict[tuple[str | None, str | None], GoTopic] = {}
                 for t in self.fields[last]:
@@ -885,12 +915,20 @@ class _Flow:
         if re.fullmatch(_IDENT, e):
             key = self._local_key(f, e)
             return self._get(key) if key else frozenset()
-        fm = re.fullmatch(rf"({_IDENT})\.({_IDENT})", e)
-        if fm:
-            owner = self._type_of(f, fm.group(1))
+        if re.fullmatch(rf"{_IDENT}(?:\.{_IDENT})+", e):
+            head, last = e.rsplit(".", 1)
+            owner = self.static_type(f, head)
             if owner:
-                return self._get(("field", owner, fm.group(2)))
+                return self._get(("field", owner, last))
         return frozenset()
+
+    def _is_pkg(self, f: _FnInfo, name: str) -> bool:
+        return (self._type_of(f, name) is None and not self._defs(f).get(name)
+                and all(pn != name for pn, _ in f.params) and name != f.recv)
+
+    def _pkg_of(self, f: _FnInfo, alias: str) -> str:
+        """The package directory's last segment an import alias names (`invoicesint` → `invoices`)."""
+        return f.gf.imports.get(alias, alias)
 
     def _type_of(self, f: _FnInfo, var: str) -> str | None:
         if var == f.recv:
@@ -901,18 +939,23 @@ class _Flow:
         vm = re.search(rf"\b(?:var\s+{re.escape(var)}\s+\*?(?:{_IDENT}\.)?({_IDENT})|{re.escape(var)}\s*:?=\s*&?(?:{_IDENT}\.)?({_IDENT})\s*\{{)", f.body)
         if vm:
             return vm.group(1) or vm.group(2)
+        # `ann := orders.NewAnnouncer(…)`: what the constructor returns
+        cm = re.search(rf"\b{re.escape(var)}\s*(?:,\s*{_IDENT}\s*)?:?=\s*(?:{_IDENT}\.)?({_IDENT})\s*\(", f.body)
+        if cm and cm.group(1) in self.idx.returns:
+            return self.idx.returns[cm.group(1)]
         return None
 
     def static_type(self, f: _FnInfo, expr: str) -> str | None:
-        e = expr.strip()
-        if re.fullmatch(_IDENT, e):
-            return self._type_of(f, e)
-        fm = re.fullmatch(rf"({_IDENT})\.({_IDENT})", e)
-        if fm:
-            owner = self._type_of(f, fm.group(1))
-            if owner:
-                return self.field_types.get((owner, fm.group(2)))
-        return None
+        """Type of `x`, `x.f`, `r.f.pubs` (through struct field types)."""
+        parts = expr.strip().split(".")
+        if not all(re.fullmatch(_IDENT, p) for p in parts):
+            return None
+        owner = self._type_of(f, parts[0])
+        for p in parts[1:]:
+            if owner is None:
+                return None
+            owner = self.field_types.get((owner, p))
+        return owner
 
     def _callees(self, f: _FnInfo, callee: str) -> list[_FnInfo]:
         parts = callee.split(".")
@@ -923,7 +966,8 @@ class _Flow:
         head = ".".join(parts[:-1])
         if len(parts) == 2 and self._type_of(f, parts[0]) is None and self._local_key(f, parts[0])[0] != "param":
             if not re.search(rf"\b{re.escape(parts[0])}\s*:?=", f.body):
-                return [c for c in cands if c.pkg == parts[0] and c.recv_type is None]  # pkg.Func
+                pkg = self._pkg_of(f, parts[0])
+                return [c for c in cands if c.pkg == pkg and c.recv_type is None]  # pkg.Func
         owner = self.static_type(f, head)
         if owner:
             typed = [c for c in cands if c.recv_type == owner]
@@ -940,31 +984,41 @@ class _Flow:
             if not changed:
                 return
 
+    def _assign(self, f: _FnInfo, lhs: str, rhs: str) -> bool:
+        insts = self.value(f, rhs)
+        if not insts:
+            return False
+        km = re.fullmatch(rf"({_IDENT}(?:\.{_IDENT})*)\s*\[\s*([^\]]+?)\s*\]", lhs)
+        base = km.group(1) if km else lhs
+        if km:
+            key = _lit(f.gf.m, km.group(2)) or km.group(2).split(".")[-1]
+            if all(i[0] is None for i in insts):
+                insts = frozenset((key, i[1], i[2]) for i in insts)
+        if "." in base:
+            head, fld = base.rsplit(".", 1)
+            owner = self.static_type(f, head)
+            target = ("field", owner, fld) if owner else None
+        else:
+            target = self._local_key(f, base)
+        return self._put(target, insts) if target else False
+
     def _step(self, f: _FnInfo) -> bool:
         body = f.body
         changed = False
-        # x := <expr> / x, err := <expr> / x = <expr> / m[k] = <expr> / s.f = <expr>
-        for mm in re.finditer(rf"(?:^|[\n;{{]|\b(?:for|if|switch)\s)\s*((?:{_IDENT}(?:\.{_IDENT})?(?:\[[^\]\n]*\])?)(?:\s*,\s*{_IDENT})*)\s*:?=(?!=)\s*", body):
-            lhs = mm.group(1).split(",")[0].strip()
+        # x := <expr> / x, err := <expr> / x = <expr> / m[k] = <expr> / s.f = <expr> / s.f[k] = <expr>
+        # / a.x, a.y = r, pub
+        lhs_item = rf"{_IDENT}(?:\.{_IDENT})*(?:\[[^\]\n]*\])?"
+        for mm in re.finditer(rf"(?:^|[\n;{{]|\b(?:for|if|switch)\s)\s*({lhs_item}(?:\s*,\s*{lhs_item})*)\s*:?=(?!=)\s*", body):
+            lhs_all = [x.strip() for x in split_top(mm.group(1))]
             self._pos = mm.start(1)
-            rhs = _expr_at(body, mm.end())
-            insts = self.value(f, rhs)
-            if not insts:
-                continue
-            km = re.fullmatch(rf"({_IDENT})\s*\[\s*([^\]]+?)\s*\]", lhs)
-            if km:
-                key = _lit(f.gf.m, km.group(2)) or km.group(2).split(".")[-1]
-                if all(i[0] is None for i in insts):
-                    insts = frozenset((key, i[1], i[2]) for i in insts)
-                target = self._local_key(f, km.group(1))
-            elif "." in lhs:
-                v, fld = lhs.split(".", 1)
-                owner = self._type_of(f, v)
-                target = ("field", owner, fld) if owner else None
+            if len(lhs_all) > 1:
+                line_end = re.search(r"[\n;]", body[mm.end() :])
+                rhs_all = split_top(body[mm.end() : mm.end() + line_end.start()] if line_end else body[mm.end() :])
+                pairs = list(zip(lhs_all, rhs_all, strict=True)) if len(rhs_all) == len(lhs_all) else [(lhs_all[0], _expr_at(body, mm.end()))]
             else:
-                target = self._local_key(f, lhs)
-            if target:
-                changed |= self._put(target, insts)
+                pairs = [(lhs_all[0], _expr_at(body, mm.end()))]
+            for lhs, rhs in pairs:
+                changed |= self._assign(f, lhs, rhs)
         # struct literals: &T{pub: x} / T{a, b, x}
         for mm in re.finditer(rf"(?<![\w.])(?:{_IDENT}\.)?({_IDENT})\s*\{{", body):
             stype = mm.group(1)
@@ -1101,17 +1155,14 @@ def _pubsub(files: dict[str, _GoFile], texts: dict[str, str], idx: _Index, res: 
                 continue  # a receiver of another type
             confidence = "exact"
             if not insts:
-                # a publisher type, instance unknown: the instances of the constructors that
-                # build a value of that type (the wrapper itself, or one whose Publish matches)
-                if stype is None:
-                    continue  # nothing says it is a publisher
-                ok_ctors = {wrappers[stype]} if stype in wrappers else {
-                    wrappers[w] for w, sig in sigs.items() if sig == iface_sig.get(stype)
-                }
-                insts = frozenset(i for i in all_insts if i[2] in ok_ctors)
-                if not insts:
+                # a publisher type, but no instance reaches it: a publish without a known topic
+                # (never the topics of other instances)
+                if stype is None or (stype not in wrappers and stype not in ifaces and stype != "interface"):
                     continue
-                confidence = "inferred"
+                line = f.fn.start + body.count("\n", 0, mm.start())
+                res.publishes.append(GoPublish(f.fn.qual, f.gf.rel, line, [], [], _via(frozenset(), wrappers),
+                                               unknown=True))
+                continue
             line = f.fn.start + body.count("\n", 0, mm.start())
             fields = _fields_of_data(f.gf, idx, args[1], body)
             groups = {i[1] for i in insts}

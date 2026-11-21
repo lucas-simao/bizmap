@@ -173,6 +173,15 @@ def apply_go_cloud(
                 bucket.append(item)
             node.attrs["unresolved_queues"] = bucket
         names = sorted({t.name for t in named if t.name})
+        if getattr(p, "unknown", False):
+            bucket = list(node.attrs.get("unresolved_queues") or [])
+            item = {"kind": "pubsub", "reason": "instance_unknown", "evidence": Evidence(p.file, p.line, p.symbol).to_dict()}
+            if p.via:
+                item["via"] = p.via
+            if item not in bucket:
+                bucket.append(item)
+            node.attrs["unresolved_queues"] = bucket
+            continue
         if p.candidates:
             # which of several wrapper instances is the receiver is unknown: no edges
             if names:
