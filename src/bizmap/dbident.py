@@ -84,10 +84,12 @@ _FS_PROJECT_RES = [
     re.compile(r"firestore\.NewClient\(\s*\w+\s*,\s*\"([^\"]+)\""),
     re.compile(r"new\s+Firestore\(\s*\{[^}]*projectId\s*:\s*['\"]([^'\"]+)['\"]", re.S),
     re.compile(r"firestore\.(?:Async)?Client\(\s*project\s*=\s*['\"]([^'\"]+)['\"]"),
+    re.compile(r"initializeApp\(\s*\{[^}]*projectId\s*:\s*['\"]([^'\"]+)['\"]", re.S),
 ]
 _FS_CLIENT_RE = re.compile(
     r"firestore\.NewClient\(|getFirestore\(|admin\.firestore\(|new\s+Firestore\(|firestore\.(?:Async)?Client\("
-    r"|firestore\.client\(|@google-cloud/firestore|firebase-admin/firestore"
+    r"|firestore\.client\(|@google-cloud/firestore|firebase-admin/firestore|['\"]firebase/firestore(?:/lite)?['\"]|['\"]firebase-functions(?:/v2)?/firestore['\"]"
+    r"|\bonDocument(?:Written|Created|Updated|Deleted)\w*\("
 )
 
 _STRIP_TAIL = {

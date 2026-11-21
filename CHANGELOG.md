@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+### Added
+
+- **Firestore in JS/TS.** Reads and writes with the web modular SDK
+  (`getDoc(s)`, `onSnapshot`, `setDoc` / `updateDoc` / `addDoc` /
+  `deleteDoc` on `collection(db, …)` / `doc(db, …)` / `query(…)` or a stored
+  reference) and admin chains (`db.collection('x').doc(id).get()` …
+  `.set()`), with the collection from a literal, a constant, an enum member,
+  a template path, a multi-segment path (`collection(db, 'drawings', id,
+  'versions')`, `doc(db, 'settings', 'pricing')`) or the literal a helper's
+  caller passes; the file's own (non-exported) constants come first. Writes list their
+  `fields`; callers and their entrypoints inherit the access. Subcollections
+  are the last collection of the path (`collection:notes`, `path:
+  customers/{}/notes`), as in Python. Collections get `db:
+  firestore:<projectId|default>` (also from `initializeApp({ projectId })`).
+- Cloud Functions Firestore triggers in TS (`onDocumentWritten('orders/{id}',
+  …)`, v1 `.document(…).onWrite`) as `entrypoint:firestore:<collection>:<event>`,
+  and `pubsub.topic(t).publishMessage({ json })` as `enqueues
+  queue:pubsub:<t>` with the message `fields`.
+- **Firestore as a `feeds` source**: a document read (`to_dict()`, `data()`,
+  `stream()`, a trigger's `event.data.after.data()`) and its fields written to
+  Postgres (`orders.customerId -> order_summary.customer_id`), in one
+  function, through calls (across modules), and collection → collection. The
+  document id is `orders.__id__` (a reference). Fields need no schema.
+- **Pub/Sub push between repos**: `push_subscriptions:` in `bizmap.yaml` (and
+  `gcloud pubsub subscriptions create --topic --push-endpoint` in shell / YAML
+  files, commented or continued with `\`; `$VAR/path`, `${VAR}/path`,
+  `$(…)/path` and full URLs match the route by path) link a topic to an HTTP route; the route's handler gets the message,
+  so trigger → topic → route → `pg_insert` becomes a `feeds` in a joint scan /
+  `registry merge` (fields matched by name ignoring case / `_`, or a Pydantic
+  alias).
+
+### Fixed
+
+- SQLAlchemy Core: `pg_insert` / `sa_insert` (dialect or aliased `insert`)
+  is `insert`; `order_summary.insert()` / `.update()` / `.delete()` on a known
+  `Table` is a write to it; a table held in `t = order_summary` or
+  `self._t = order_summary` (set in the class) resolves; `conn.execute(stmt…)`
+  on a statement built above is that statement. `.values({...})`, a dict
+  variable, `dict(...)` and `on_conflict_do_update(set_={...})` give their
+  columns. None of these add `table:unknown` any more, and a plain
+  `some_dict.values()` is no longer taken for a SQLAlchemy write.
+- FastAPI / Flask: a router picked by an expression (`feeds = served if cond
+  else unserved`) registers its routes, included wherever a candidate is.
+- `feeds` never start or end on `table:unknown`.
+
+### Changed
+
+- A column passed through calls unchanged is `exact` in `column_map` (the
+  `feeds` edge stays `heuristic` for call paths).
+
 ## 0.9.1 — 2026-11-21
 
 ### Fixed
