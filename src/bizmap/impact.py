@@ -886,6 +886,8 @@ class _Facts:
     columns: int
     risk: str
     reasons: list[tuple[str, str]]
+    # calls to a scanned service that has no such route: (function, call, service)
+    missing_routes: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
@@ -1027,12 +1029,18 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
     # what static analysis could not settle, near the change
     notes: list[str] = []
     call_notes: list[str] = []
+    missing: list[tuple[str, str, str]] = []  # (function, call, service) with no route in a scanned service
     for fid in reached_fns:
         node = graph.nodes[fid]
         for u in node.attrs.get("unresolved_http") or []:
             if not isinstance(u, dict):
                 continue
             call = f"{u.get('method') or ''} {u.get('url') or '?'}".strip()
+            if u.get("reason") == "route_not_found":
+                svc = str(u.get("service") or "the target service")
+                missing.append((fid, call, svc))
+                notes.append(f"{_code(_short_fn(graph, fid))} calls {_code(call)} — no matching route in {_code(svc)}")
+                continue
             reason = str(u.get("reason") or "unmatched").replace("_", " ")
             notes.append(f"{_code(_short_fn(graph, fid))} calls {_code(call)} — {reason}")
         calls = [str(c) for c in node.attrs.get("unresolved_calls") or [] if _interesting_call(str(c))]
@@ -1049,10 +1057,17 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
         node = graph.get(ep)
         if node is None:
             continue
-        if node.attrs.get("candidates") or str(node.attrs.get("confidence") or "") == "unknown":
-            notes.append(f"{_code(_label(graph, ep))}: handler is ambiguous (several candidates)")
+        cands = list(dict.fromkeys(node.attrs.get("candidates") or []))
+        regs = node.attrs.get("registrations") or []
+        if len(regs) > 1:
+            where = ", ".join(f"{r.get('file')}:{r.get('line')}" for r in regs[:4]) + (" …" if len(regs) > 4 else "")
+            notes.append(f"{_code(_label(graph, ep))}: registered {len(regs)} times ({where}) — which one serves depends on registration order")
+        elif len(cands) > 1:
+            notes.append(f"{_code(_label(graph, ep))}: handler is ambiguous ({len(cands)} candidates)")
         elif node.attrs.get("unresolved"):
             notes.append(f"{_code(_label(graph, ep))}: route path not fully resolved")
+        elif str(node.attrs.get("confidence") or "") == "unknown":
+            notes.append(f"{_code(_label(graph, ep))}: handler not resolved")
     notes += call_notes
 
     columns = len({w for f in impact.functions for w in _known(f.writes + f.reads) if _column_of(w)})
@@ -1064,6 +1079,7 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
         fired_on={t: [x for x in ts if x in fired] for t, ts in table_triggers.items() if any(x in fired for x in ts)},
         http=[http[k] for k in sorted(http)], notes=notes,
         low_conf=len(low), columns=columns, risk="none", reasons=[],
+        missing_routes=missing,
     )
     facts.risk, facts.reasons = _risk(graph, impact, facts, shared_services)
     return facts
@@ -1113,6 +1129,15 @@ def _risk(graph: Graph, impact: Impact, facts: _Facts, shared_services: int) -> 
     if http_eps:
         names = [_label(graph, e) for e in http_eps]
         reasons.append(("medium", f"changes the handler of {_names(names, 3)}"))
+    if facts.missing_routes:
+        by_svc: dict[str, list[str]] = {}
+        for _fid, call, svc in facts.missing_routes:
+            by_svc.setdefault(svc, []).append(call)
+        for svc, calls in sorted(by_svc.items()):
+            calls = sorted(set(calls))
+            reasons.append(
+                ("medium", f"calls {_names(calls, 3)}, which {_code(svc)} does not serve (no matching route)")
+            )
     crossing = sorted(
         {
             f"{a} → {b}"

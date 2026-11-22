@@ -323,6 +323,7 @@ _HTTP_STOP_LABELS = {
 }
 
 _REASON_HINTS = {
+    "route_not_found": "the service was scanned, but none of its routes matches — the caller calls something the API does not have",
     "target_not_scanned": "URL composed, but no scanned route matches — scan that service or ignore",
     "base_unknown": "path known, base URL not — map the env var under `services:` in bizmap.yaml",
     "path_dynamic": "path built at runtime — expected `unknown`",
