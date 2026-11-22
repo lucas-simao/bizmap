@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.2 — 2026-11-22
+
 ### Fixed (demo repos)
 
 - **No more false "handler is ambiguous"**: the scan wrote `candidates:
