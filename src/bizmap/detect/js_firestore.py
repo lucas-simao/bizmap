@@ -40,6 +40,7 @@ _MOD_READ = {
     "getAggregateFromServer": "query",
 }
 _MOD_WRITE = {"setDoc", "updateDoc", "addDoc", "deleteDoc"}
+_MOD_METHOD = {"setDoc": "set", "updateDoc": "update", "addDoc": "add", "deleteDoc": "delete"}
 _MOD_CALL = re.compile(r"(?<![\w$.])(" + "|".join(sorted({*_MOD_READ, *_MOD_WRITE}, key=len, reverse=True)) + r")\s*\(")
 _CHAIN_READ = {"get", "stream", "onSnapshot", "listDocuments", "count"}
 _CHAIN_WRITE = {"set", "update", "delete", "create", "add"}
@@ -47,6 +48,13 @@ _CHAIN_PASS = {"where", "orderBy", "limit", "limitToLast", "offset", "startAt", 
                "withConverter", "select", "doc", "collection", "count"}
 _TX_CALL = re.compile(r"(?<![\w$])([A-Za-z_$][\w$]*)\s*\.\s*(set|update|delete|create|get)\s*\(")
 _ADMIN_START = re.compile(r"\.\s*collection\s*\(")
+# `db.doc('orders/' + id).set(…)` straight on a Firestore instance
+_ADMIN_DOC_START = re.compile(r"(?<![\w$.)\]])([A-Za-z_$][\w$]*)\s*\.\s*doc\s*\(")
+_FS_INSTANCE_DECL = re.compile(
+    r"(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^=;\n]+)?=\s*(?:await\s+)?"
+    r"(?:getFirestore\s*\(|initializeFirestore\s*\(|new\s+Firestore\s*\(|[A-Za-z_$][\w$.]*\.\s*firestore\s*\(\s*\))"
+)
+_FS_INSTANCE_NAMES = {"db", "firestore", "fs", "fsdb", "firestoreDb", "adminDb", "fdb", "store"}
 _ADMIN_REF_ARG = re.compile(r"^[A-Za-z_$][\w$]*\s*\.\s*(?:doc|collection)\s*\(")
 _REF_START = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(doc|collection|where|orderBy|limit|get|set|update|delete|create|add|onSnapshot|stream)\s*\(")
 _DECL = re.compile(r"(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^=;\n]+)?=\s*(?:await\s+)?")
@@ -86,6 +94,7 @@ class FsAccess:
     symbol: str
     fields: list[str] = field(default_factory=list)
     via: str | None = None  # helper whose parameter named the collection
+    method: str | None = None  # the write call: set | update | add | create | delete (None: unknown)
 
 
 @dataclass
@@ -220,6 +229,8 @@ class _FileScan:
         self.module = _module(rel)
         self.refs: list[tuple[int, str, _Target]] = []  # (pos, name, target)
         self.used: set[int] = set()  # positions of `.collection(` already in a chain
+        self.methods: dict[int, str | None] = {}  # write site position -> set | update | add | create | delete
+        self.last_method: str | None = None
         self.lines_at = [0] + [m.end() for m in re.finditer("\n", self.text)]
 
     def line(self, pos: int) -> int:
@@ -240,12 +251,39 @@ class _FileScan:
         return best
 
     # --- values
+    def _piece(self, expr: str) -> str:
+        """One piece of a path: a literal (templates with ``${CONST}`` filled in),
+        a string constant, or ``{}`` for a value only known at runtime."""
+        e = expr.strip()
+        while e.startswith("(") and match_close(e, 0) == len(e) - 1:
+            e = e[1:-1].strip()
+        lit = self.m.lit(e)
+        if lit is not None:
+            if not lit.dynamic:
+                return lit.value
+
+            def fill(m: re.Match[str]) -> str:
+                name = m.group(1).strip()
+                val = self.consts.get(name)
+                return val if isinstance(val, str) and "{" not in val else "{}"
+
+            return re.sub(r"\$\{([^}]*)\}", fill, lit.value)
+        if re.fullmatch(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?", e) and e in self.consts:
+            return self.consts[e]
+        return "{}"
+
     def segments_of(self, expr: str, fn: _Fn | None) -> list[object] | None:
-        """Path segments of one argument of collection() / doc()."""
+        """Path segments of one argument of collection() / doc():
+        `'orders'`, `` `${ORDERS}/${id}` ``, `'notes/' + id`, `ORDERS + '/' + id`."""
         e = expr.strip()
         lit = self.m.lit(e)
         if lit is not None:
-            value = re.sub(r"\$\{[^}]*\}", "{}", lit.value) if lit.dynamic else lit.value
+            value = self._piece(e)
+            return [s for s in value.strip("/").split("/") if s] or None
+        parts = _split_plus(e)
+        if len(parts) > 1:
+            value = "".join(self._piece(p) for p in parts)
+            # `'orders' + suffix`: the name itself is built → `orders{}` (unknown)
             return [s for s in value.strip("/").split("/") if s] or None
         if re.fullmatch(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?", e):
             if e in self.consts:
@@ -342,6 +380,7 @@ class _FileScan:
             elif name in _CHAIN_WRITE:
                 op = "write"
                 last_args = args
+                self.last_method = name
                 i = j
                 break
             elif name not in _CHAIN_PASS:
@@ -350,6 +389,21 @@ class _FileScan:
         if not segs:
             return None, i, op, last_args
         return _Target(segs, is_doc), i, op, last_args
+
+
+def _split_plus(e: str) -> list[str]:
+    """``a + b + c`` at the top level (not inside calls / brackets)."""
+    parts, depth, last = [], 0, 0
+    for k, c in enumerate(e):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "+" and depth == 0 and e[k + 1 : k + 2] not in ("+", "=") and e[k - 1 : k] != "+":
+            parts.append(e[last:k])
+            last = k + 1
+    parts.append(e[last:])
+    return [p for p in (x.strip() for x in parts) if p] if len(parts) > 1 else [e]
 
 
 def _collection(t: _Target) -> tuple[str | _Param, str] | None:
@@ -423,7 +477,7 @@ def scan_files(
             header = "\n".join(fs_files[file].split("\n")[line - 1 : min(line + 3, end)])
             hm = re.search(r"\)\s*(?::\s*[^={]+)?(?:=>|\{)", header)
             by_file.setdefault(file, []).append(_Fn(qual, line, end, _params_of(header[: hm.end()] if hm else header)))
-    pending: list[tuple[str, int, str, str, int, list[str], str]] = []  # helper qual, param, kind, file, line, fields, path
+    pending: list[tuple[str, int, str, str, int, list[str], str, str | None]] = []  # helper, param, kind, file, line, fields, path, method
     scans: dict[str, _FileScan] = {}
     for rel in sorted(fs_files):
         fs = _FileScan(rel, fs_files[rel], by_file.get(rel, []), consts)
@@ -432,6 +486,7 @@ def scan_files(
         _functions(fs, res)
         _collect_refs(fs)
         for kind, target, pos, fields in _sites(fs):
+            method = fs.methods.get(pos)
             line = fs.line(pos)
             fn = fs.fn_at(line)
             got = _collection(target)
@@ -441,12 +496,12 @@ def scan_files(
             sym = fn.qual if fn is not None else f"{fs.module}.module"
             if isinstance(coll, _Param):
                 if fn is not None:
-                    pending.append((fn.qual, coll.index, kind, rel, line, fields, path))
+                    pending.append((fn.qual, coll.index, kind, rel, line, fields, path, method))
                 continue
-            res.accesses.append(FsAccess(kind, coll, path, rel, line, sym, fields))
+            res.accesses.append(FsAccess(kind, coll, path, rel, line, sym, fields, method=method))
         _publishes(fs, res)
     # a collection named by the caller of a helper: `listAll('customers')`
-    for helper, index, kind, rel, hline, fields, _hpath in pending:
+    for helper, index, kind, rel, hline, fields, _hpath, method in pending:
         short = helper.split(".")[-1]
         sites: list[tuple[str, str, int]] = []
         for caller, callee, cfile, cline in calls or []:
@@ -463,7 +518,7 @@ def scan_files(
         if not sites:
             # nobody in the scan names it (`export function saveTo(name, …)`):
             # the helper writes to a collection only known at runtime
-            res.accesses.append(FsAccess(kind, UNKNOWN, UNKNOWN, rel, hline, helper, fields))
+            res.accesses.append(FsAccess(kind, UNKNOWN, UNKNOWN, rel, hline, helper, fields, method=method))
             continue
         for caller, cfile, cline in sites:
             cscan = scans.get(cfile) or _FileScan(cfile, texts[cfile], [], consts)
@@ -478,7 +533,7 @@ def scan_files(
             got = _collection(_Target(segs, False))
             if got is None or isinstance(got[0], _Param):
                 continue
-            res.accesses.append(FsAccess(kind, got[0], got[1], cfile, cline, caller, fields, via=helper))
+            res.accesses.append(FsAccess(kind, got[0], got[1], cfile, cline, caller, fields, via=helper, method=method))
     return res
 
 
@@ -529,6 +584,7 @@ def _sites(fs: _FileScan) -> list[tuple[str, _Target, int, list[str]]]:
         if fn_name in _MOD_WRITE:
             if fn_name == "addDoc":
                 t = _Target(list(t.segments), False)
+            fs.methods[mm.start()] = _MOD_METHOD.get(fn_name)
             out.append(("write", t, mm.start(), _fields(fs.m, args[1] if len(args) > 1 else None)))
         else:
             out.append(("read", t, mm.start(), []))
@@ -553,7 +609,24 @@ def _sites(fs: _FileScan) -> list[tuple[str, _Target, int, list[str]]]:
         if t is None:
             continue
         kind = "read" if method == "get" else "write"
+        if kind == "write":
+            fs.methods[mm.start()] = method
         out.append((kind, t, mm.start(), _fields(fs.m, args[1] if kind == "write" and len(args) > 1 else None)))
+    # straight on the instance: db.doc(`orders/${id}`).update(…)
+    instances = set(_FS_INSTANCE_DECL.findall(text)) | _FS_INSTANCE_NAMES
+    for mm in _ADMIN_DOC_START.finditer(text):
+        recv = mm.group(1)
+        if recv not in instances or fs.ref(recv, mm.start()) is not None:
+            continue
+        fn = fs.fn_at(fs.line(mm.start()))
+        t, end, op, last_args = fs.chain(text, mm.start(), fn, mm.start())
+        for sub in _ADMIN_START.finditer(text, mm.start(), end):
+            fs.used.add(sub.start())  # db.doc(x).collection('y'): this chain, not a second one
+        if t is None or op is None:
+            continue  # an in-place ref (batch.update(db.doc(…), …)) is handled above
+        if op == "write":
+            fs.methods[mm.start()] = fs.last_method
+        out.append((op, t, mm.start(), _fields(fs.m, last_args[0] if last_args else None) if op == "write" else []))
     # admin chains: x.collection('a').doc(id).get()
     for mm in _ADMIN_START.finditer(text):
         if mm.start() in fs.used:
@@ -564,6 +637,8 @@ def _sites(fs: _FileScan) -> list[tuple[str, _Target, int, list[str]]]:
             fs.used.add(sub.start())
         if t is None or op is None:
             continue
+        if op == "write":
+            fs.methods[mm.start()] = fs.last_method
         out.append((op, t, mm.start(), _fields(fs.m, last_args[0] if last_args else None) if op == "write" else []))
     # chains from a reference variable: ordersRef.doc(id).get()
     for mm in _REF_START.finditer(text):
@@ -576,6 +651,8 @@ def _sites(fs: _FileScan) -> list[tuple[str, _Target, int, list[str]]]:
             fs.used.add(sub.start())
         if t is None or op is None:
             continue
+        if op == "write":
+            fs.methods[mm.start()] = fs.last_method
         out.append((op, t, mm.start(), _fields(fs.m, last_args[0] if last_args else None) if op == "write" else []))
     return out
 

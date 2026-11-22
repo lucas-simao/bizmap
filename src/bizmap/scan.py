@@ -1854,25 +1854,6 @@ def _link_http(
     return unmatched
 
 
-def _link_firestore_triggers(graph: Graph) -> None:
-    writers: dict[str, list[tuple[str, Evidence | None]]] = defaultdict(list)
-    for edge in graph.edges.values():
-        if edge.type != "writes" or not edge.to_id.startswith("collection:"):
-            continue
-        coll = edge.to_id.split(":", 1)[1]
-        writers[coll].append((edge.from_id, edge.evidence))
-    for node in list(graph.nodes.values()):
-        if node.type != "entrypoint" or node.attrs.get("kind") != "firestore":
-            continue
-        coll = str(node.attrs.get("collection") or "")
-        if not coll:
-            continue
-        for writer_id, ev in writers.get(coll.lower(), []):
-            if writer_id == node.id:
-                continue
-            graph.add_edge("triggers", writer_id, node.id, confidence=Confidence.INFERRED, evidence=ev)
-
-
 def _apply_sql_functions(graph: Graph, schema: Schema) -> None:
     for fn in schema.functions.values():
         fid = function_id(f"sql.{fn.name}")
@@ -2542,6 +2523,7 @@ def _apply_go_helpers(graph: Graph, root: Path, go_texts: dict[str, str]) -> Non
                 index.add("triggers", eid, fid, confidence=Confidence.INFERRED, evidence=ev)
                 for etype, target in sorted(_table_hits(graph, index, fid, memo)):
                     index.add(etype, eid, target, confidence=Confidence.INFERRED, evidence=ev, derived="call")
+        go_helpers.drop_template_routes(graph, routes)
     except Exception as exc:  # noqa: BLE001 - never lose the scan over a text pass
         _warn_graph(graph, f"Go route-helper pass failed ({type(exc).__name__}: {exc}); skipped")
 
@@ -2892,7 +2874,7 @@ def _scan_one(
             }
         )
         node.attrs["queue_events"] = bucket
-    _link_firestore_triggers(graph)
+    fsapply.link_firestore_triggers(graph)
     fsapply.link_firebase_callables(graph)
     try:
         fsapply.apply_push_subscriptions(graph, root, cfg.raw)

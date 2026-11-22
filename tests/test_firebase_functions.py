@@ -184,6 +184,8 @@ def test_nested_repo_is_not_walked(tmp_path: Path) -> None:
 GO = {
     "internal/entrypoint/scheduled.go": """package entrypoint
 
+import "github.com/labstack/echo/v4"
+
 const JobsPrefix = "/internal/jobs/"
 
 type ScheduledJob interface {
@@ -232,6 +234,8 @@ func (c *Orders) Handle(ctx context.Context, ev entrypoint.Event) error { return
     "internal/httpapi/routes.go": """package httpapi
 
 import (
+	"github.com/labstack/echo/v4"
+
 	"example.com/svc/internal/consumers"
 	"example.com/svc/internal/entrypoint"
 	"example.com/svc/internal/jobs"
@@ -269,3 +273,8 @@ def test_scan_go_helper_routes_trigger_handlers(tmp_path: Path) -> None:
     targets = {e.to_id for e in g.edges.values() if e.type == "triggers" and e.from_id == ep.id}
     assert "function:internal/jobs.Nightly.Run" in targets
     assert "entrypoint:http:POST:/eventarc/firestore/orders" in g.nodes
+    # the route detector's template (`POST /internal/jobs/{job.Name()}`, `e.POST(h.Path(), …)`)
+    # is replaced by the expanded routes: no route at the helper's own line
+    https = {n.id: n for n in g.nodes.values() if n.type == "entrypoint" and n.attrs.get("kind") == "http"}
+    assert set(https) == {"entrypoint:http:POST:/internal/jobs/nightly-totals", "entrypoint:http:POST:/eventarc/firestore/orders"}, sorted(https)
+    assert not any(e.from_id not in g.nodes or e.to_id not in g.nodes for e in g.edges.values())

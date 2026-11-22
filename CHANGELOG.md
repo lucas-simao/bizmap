@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Fixed (after #155)
+
+- **Firestore writes through a built document path** resolve their
+  collection: `` db.doc(`${ORDERS}/${id}`) `` (a string constant of the same
+  file), `db.doc('notes/' + id)`, `db.doc(NOTES + '/' + id)`, and subcollections
+  (`` `${ORDERS}/${id}/items/${line}` `` → `items`), in a batch / transaction
+  (`batch.update(db.doc(…), …)`, `tx.set(…)`) or straight on the instance
+  (`db.doc(path).set / update / delete / create / get`, on a `getFirestore()` /
+  `admin.firestore()` instance or a `db`-like name). A name that is itself
+  built (`'orders' + suffix`) stays `collection:unknown`.
+- **Go helper routes**: once a registration helper is expanded for at least
+  one call site, the route detector's template route at the helper's own
+  `e.POST(Prefix+job.Name(), …)` (`POST /internal/jobs/{job.Name()}`, with
+  every job's tables) is dropped with its edges (listed in the graph's
+  `template_routes_dropped`), so `who-writes` shows each write once, through
+  its real route.
+- **Firestore trigger events**: a write triggers `onDocumentCreated` only
+  through `add` / `set` / `create`, `onDocumentUpdated` through `update` /
+  `set`, `onDocumentDeleted` through `delete` (`onDocumentWritten`: any). JS
+  write edges record the call (`fs_ops`), carried to the callers' derived
+  edges; a write whose call is unknown (Go, a helper) can still fire any
+  event.
+
 ## 0.14.0 — 2026-11-21
 
 ### Added
