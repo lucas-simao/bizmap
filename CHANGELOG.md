@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.15.0 — 2026-11-22
+
 ### Added (demo repos)
 
 - **A pure rule shows where its result lands**: a changed function that
