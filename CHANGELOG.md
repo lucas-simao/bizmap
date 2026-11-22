@@ -40,13 +40,36 @@
   record per table); the engine's graph is parsed on the first question;
   answers page 100 lines, the matrix 30 columns, suggestions 12.
 - Docs: [the start screen](docs/commands/export-home.md), with screenshots.
-
 - `--no-cache` / `BIZMAP_NO_CACHE=1` and `--cache-dir DIR` /
   `BIZMAP_CACHE_DIR` on the three query commands.
 - `bizmap scan` says, once per file, when it wrote `bizmap.graph.json` (or the
   `.mmd`) inside a git repo that does not ignore it, with the `.gitignore` line
   to add (`BIZMAP_NO_GITIGNORE_HINT=1` silences it). Docs: "Generated files and
   what to ignore" in `docs/commands/scan.md`.
+- **Firebase Functions entrypoints in JS/TS** (#150): `https.onCall` /
+  `onCall` (`firebase_call`), `https.onRequest` / `onRequest`
+  (`firebase_http`), `onSchedule` and v1 `pubsub.schedule().onRun`
+  (`scheduled_job`, with `schedule`), `onMessagePublished` and v1
+  `pubsub.topic().onPublish` (`pubsub`, with `topic`, triggered by the queue),
+  `onTaskDispatched`, `beforeUser*` and v1 `auth.user().onCreate` (`auth`).
+  The handler passed to the factory is the function `<module>.<export>`, so
+  its calls and data reach the entrypoint.
+- **Deployed names** (#151): exports are followed from the functions entry
+  file (`package.json` `main`, mapped back to `src/`) through
+  `exports.g = require('./x')`, `exports.n = mod.n`, `export { a as b } from`
+  and `export *`; entrypoints get `deployed_name` (`users-archiveUser`) and
+  are keyed by it.
+- **Callable callers** (#152): `httpsCallable(fns, '<name>')` (generic form,
+  across lines) and `httpsCallableFromURL` link to the function with that
+  deployed name in any scanned repo (`calls_http`, `via: firebase_callable`).
+  Names no scanned function has are `unresolved_http` with reason
+  `callable_not_scanned`.
+- **Go routes mounted through a helper** (#153): a function that mounts
+  `e.POST(Prefix + job.Name(), …)` / `e.POST(h.Path(), …)` from an interface
+  argument is expanded per call site (`pkg.NewX(…)`, `&pkg.X{}`, or a variable
+  assigned from one): `POST /internal/jobs/<Name()>`, triggering the concrete
+  type's other interface methods (`Run`, `Handle`), with their tables rolled
+  up.
 
 ### Changed
 
@@ -59,7 +82,6 @@
 - `who-writes` / `who-reads` / `trace` (Python) accept an already resolved
   entity, and `query.unresolved_footer` gives the closing lines as the text
   output prints them (used by the export; output unchanged).
-
 - **The query index cache no longer lands in the user's repo.** `who-writes` /
   `who-reads` / `trace` wrote `bizmap.graph.idx` next to the graph (0.13.1):
   nothing ignored it, and on a big graph it passed 100 MB (a `git add .` then a
@@ -69,6 +91,15 @@
   path, the 16 most recent kept; it is used only while the graph keeps its
   path, size, mtime and a content fingerprint. A leftover `bizmap.graph.idx`
   is pointed out (not used, not deleted).
+- **Namespaced Firestore triggers** (#149): `firestore.onDocumentCreated(…)` /
+  `firestoreV2.onDocumentUpdated(…)` were skipped; `document:` given as a
+  template with a constant (`` `${COLLECTION}/{id}` ``) is resolved.
+- **Batch / transaction writes with an in-place ref** (#154):
+  `` batch.update(db.doc(`orders/${id}`), …) `` and
+  `tx.set(db.collection('orders').doc(id), …)` are writes.
+- **Nested repos and worktrees are not walked** (#147): a directory with its
+  own `.git` (dir or file) inside a scanned repo is skipped (`skipped:
+  nested_repos`); `scan: include` brings it back.
 
 ## 0.13.1 — 2026-11-21
 
