@@ -116,7 +116,21 @@
     var v = or(split(nid)[0], n.repo, this.repo);
     return v === undefined ? null : v;
   };
+  // query.Index.store: `SQL` (engine unknown) borrows the engine of the same
+  // table in another repo (same name, same or unknown database) when exactly one is known
   Index.prototype.store = function (nid) {
+    var own = this.ownStore(nid), n = this.node(nid) || {}, self = this;
+    if (own !== "SQL" || (n.type !== "table" && n.type !== "view")) return own;
+    var db = pyStr(or(n.db, "")).toLowerCase(), name = pyStr(or(n.name, "")).toLowerCase(), peers = new Set();
+    (this.byName.get(name) || []).forEach(function (p) {
+      if (p === nid || self.kind(p) !== n.type) return;
+      var pdb = pyStr(or(self.node(p).db, ""));
+      if (!db || !pdb || pdb.toLowerCase() === db) peers.add(self.ownStore(p));
+    });
+    peers.delete("SQL");
+    return peers.size === 1 ? Array.from(peers)[0] : own;
+  };
+  Index.prototype.ownStore = function (nid) {
     var n = this.node(nid) || {};
     if (n.type === "column") { var t = this.tableOfColumn(nid); return t ? this.store(t) : "SQL"; }
     var db = pyStr(or(n.db, "")).toLowerCase();
@@ -182,11 +196,16 @@
 
   // ── resolving the entity ──
   function QueryError(message, payload, code) { this.message = message; this.payload = payload; this.code = code; }
+  // query.group_store: one label for nodes grouped as one entity (a known engine beats `SQL`)
+  function groupStore(ix, ids) {
+    var known = uniqSorted(ids.map(function (n) { return ix.store(n); })).filter(function (x) { return x !== "SQL"; });
+    if (!known.length) return "SQL";
+    return known.length === 1 ? known[0] : known;
+  }
   function entityDict(ix, ent) {
-    var stores = uniqSorted(ent.nodes.map(function (n) { return ix.store(n); }));
     return {
       kind: ent.kind, name: ent.name,
-      store: stores.length === 1 ? stores[0] : stores,
+      store: groupStore(ix, ent.nodes),
       repos: uniqSorted(ent.nodes.map(function (n) { return ix.repoOf(n); }).filter(truthy)),
       nodes: ent.nodes.map(function (n) { return ix.brief(n); }),
     };
@@ -239,7 +258,7 @@
     if (groups.length > 1) {
       var candidates = groups.map(function (g) {
         var first = ix.node(g[0]);
-        return { kind: pyStr(first.type), name: ix.label(g[0]), store: ix.store(g[0]),
+        return { kind: pyStr(first.type), name: ix.label(g[0]), store: groupStore(ix, g),
                  repos: uniqSorted(g.map(function (n) { return ix.repoOf(n); }).filter(truthy)), ids: g, qualify: qualified(ix, g) };
       });
       throw new QueryError(ref + " is ambiguous", { schema: SCHEMA, error: "ambiguous", query: ref, candidates: candidates }, 2);
@@ -312,6 +331,24 @@
     ix._roots.set(fn, result);
     return result;
   }
+  // query._WIRING / _wiring_prefix: start-up code between a `main` / job and the
+  // real handler is folded (`main → … → Handle`), never after a route or a consumer
+  var WIRING = new RegExp("^(?:main|init|run|start|serve|execute|routes?|router|" +
+    "(?:setup|bootstrap|configure|initiali[sz]e|wire|mount|register)\\w*|" +
+    "(?:build|new|make|create|add|init)(?:routes?|router|server|app|handlers?|api|http|mux|engine|deps|dependencies|container|services?)|" +
+    "\\w*(?:router|routes|mux)|" +
+    "func\\d+|\\$?\\d+|<?lambda>?|anonymous|<anonymous>)$", "i");
+  var ROOT_KINDS_WITH_WIRING = ["main", "cli", "job", "cron", "command"];
+  function shortName(ix, nid) { return last(ix.label(nid).split(".")); }
+  function wiringPrefix(ix, root, mid) {
+    var node = ix.node(root) || {};
+    if (node.type === "entrypoint" && ROOT_KINDS_WITH_WIRING.indexOf(pyStr(or(node.kind, ""))) < 0) return 0;
+    if (node.type === "function" && !WIRING.test(shortName(ix, root))) return 0;
+    var k = 0;
+    while (k < mid.length - 1 && WIRING.test(shortName(ix, mid[k]))) k++;
+    if (k === mid.length - 1 && WIRING.test(shortName(ix, mid[k]))) k++;
+    return k;
+  }
   function accessRows(ix, ent, etype) {
     var targets = dataTargets(ix, ent), perFn = new Map();
     targets.forEach(function (owner, tid) {
@@ -331,11 +368,13 @@
       var rr = ix.kind(fn) === "entrypoint" ? [[{ root: fn, path: [fn], confidence: "exact" }], false] : roots(ix, fn);
       var access = BY_RANK[row.rank || 1];
       var entries = rr[0].map(function (r) {
-        var path = r.path;
+        var path = r.path, mid = path.slice(1, -1), skip = wiringPrefix(ix, r.root, mid);
+        var handler = skip < mid.length ? mid[skip] : null;
         return {
           entrypoint: ix.brief(r.root),
-          handler: path.length > 2 ? ix.brief(path[1]) : null,
-          via: Math.max(0, path.length - 3),
+          handler: handler ? ix.brief(handler) : null,
+          wiring: skip,
+          via: Math.max(0, mid.length - skip - 1),
           path: path.map(function (p) { return ix.brief(p); }),
           confidence: BY_RANK[Math.min(rankOf(r.confidence), rankOf(access))],
         };
@@ -570,35 +609,42 @@
   // ── the closing lines (query.unresolved_footer) ──
   var TXT = {
     en: { unresolved: "Could change this answer", nothing_unres: "Nothing unresolved in these repos could change this answer.",
-          dyn_writes: "{n} write(s) with a {family} name built at runtime in {repo} could not be resolved",
-          dyn_reads: "{n} read(s) with a {family} name built at runtime in {repo} could not be resolved",
+          dyn_writes: "{n} write(s) with a {family} name built at runtime ({repos}) could not be resolved",
+          dyn_reads: "{n} read(s) with a {family} name built at runtime ({repos}) could not be resolved",
           unres_q: "{n} publish(es) to a topic only known at runtime in the functions involved",
           unres_http: "{n} HTTP call(s) from the functions involved matched no route",
           kinds: { table: "table", view: "view", collection: "collection", column: "column" } },
     "pt-BR": { unresolved: "Pode mudar esta resposta", nothing_unres: "Nada não resolvido nestes repos pode mudar esta resposta.",
-          dyn_writes: "{n} escrita(s) com nome de {family} montado em tempo de execução em {repo} não puderam ser resolvidas",
-          dyn_reads: "{n} leitura(s) com nome de {family} montado em tempo de execução em {repo} não puderam ser resolvidas",
+          dyn_writes: "{n} escrita(s) com nome de {family} montado em tempo de execução ({repos}) não puderam ser resolvidas",
+          dyn_reads: "{n} leitura(s) com nome de {family} montado em tempo de execução ({repos}) não puderam ser resolvidas",
           unres_q: "{n} publicação(ões) num tópico só conhecido em tempo de execução nas funções envolvidas",
           unres_http: "{n} chamada(s) HTTP das funções envolvidas não ligaram em nenhuma rota",
           kinds: { table: "tabela", view: "view", collection: "coleção", column: "coluna" } },
   };
   function fmt(s, o) { return s.replace(/\{(\w+)\}/g, function (_, k) { return o[k]; }); }
+  // query._dynamic_lines: one line per (access, kind), the repos and the functions
+  function dynamicLines(items, T) {
+    var groups = new Map();
+    items.forEach(function (u) { push(groups, (u.access || "writes") + "\u0000" + u.kind, u); });
+    return Array.from(groups.keys()).sort(function (a, b) { return cmpTuple(a.split("\u0000"), b.split("\u0000")); }).map(function (key) {
+      var us = groups.get(key), access = key.split("\u0000")[0], kind = key.split("\u0000")[1];
+      var fam = kind.replace(/^dynamic_/, "");
+      var n = us.reduce(function (t, u) { return t + u.count; }, 0);
+      var repos = us.map(function (u) { return (u.repo || "-") + ": " + u.count; }).join(", ");
+      var fns = [];
+      us.forEach(function (u) { u.functions.forEach(function (f) { fns.push(f.label + (us.length > 1 && u.repo ? " [" + u.repo + "]" : "")); }); });
+      return fmt(access === "writes" ? T.dyn_writes : T.dyn_reads, { n: n, family: T.kinds[fam] || kind, repos: repos }) + ": " + fns.join(", ");
+    });
+  }
   function footer(result, lang) {
     var T = TXT[lang] || TXT.en, lines = [];
     if (result.query.command === "trace") {
       var u = result.unresolved;
-      u.dynamic_writes.forEach(function (d) {
-        var fam = d.kind.replace(/^dynamic_/, "");
-        lines.push(fmt(T.dyn_writes, { n: d.count, family: T.kinds[fam] || d.kind, repo: d.repo || "-" }));
-      });
+      lines = lines.concat(dynamicLines(u.dynamic_writes, T));
       if (u.queues.length) lines.push(fmt(T.unres_q, { n: u.queues.length }));
       if (u.http.length) lines.push(fmt(T.unres_http, { n: u.http.length }));
     } else {
-      result.unresolved.forEach(function (d) {
-        var fam = d.kind.replace(/^dynamic_/, "");
-        lines.push(fmt(d.access === "writes" ? T.dyn_writes : T.dyn_reads, { n: d.count, family: T.kinds[fam] || d.kind, repo: d.repo || "-" }) +
-                   ": " + d.functions.map(function (f) { return f.label; }).join(", "));
-      });
+      lines = dynamicLines(result.unresolved, T);
     }
     if (!lines.length) lines = [T.nothing_unres];
     return [T.unresolved + ":"].concat(lines);
