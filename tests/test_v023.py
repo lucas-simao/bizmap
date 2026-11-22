@@ -28,7 +28,7 @@ def _edge(graph, etype: str, frm: str, to: str):
 
 
 def test_graph_version() -> None:
-    assert GRAPH_VERSION == "0.15.0"
+    assert GRAPH_VERSION == "0.15.1"
 
 
 def test_go_group_prefix_same_var_two_funcs_does_not_hang(tmp_path: Path) -> None:

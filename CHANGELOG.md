@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.15.1 — 2026-11-22
+
 ### Changed (HTML export)
 
 - **One look for every form control**: the top search, the big search on the
