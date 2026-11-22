@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from bizmap import dataflow, dbident, fsapply, progress
+from bizmap.detect import go_helpers, js_firebase
 from bizmap.detect.go_lang import GoAnalysis, GoAnalyzer, GoFunction
 from bizmap.detect.js_lang import JsAnalysis, JsAnalyzer
 from bizmap.detect.python_lang import PyAccess, PyAnalysis, PythonAnalyzer, valid_queue_name
@@ -2246,6 +2247,7 @@ def relink_merged_graph(graph: Graph, services: dict[str, str] | None = None) ->
     _warn_unscanned_services(graph, services)
     _drop_route_literal_edges(graph)
     _relink_http_from_graph(graph, services)
+    fsapply.link_firebase_callables(graph)
     _link_route_literals(graph)
     _relink_queues_from_graph(graph, services)
     dataflow.link_queue_flows(graph)
@@ -2504,6 +2506,46 @@ def _apply_go_cloud(graph: Graph, root: Path, go_files: list[Path], cfg: ScanCon
         return texts, None
 
 
+def _apply_go_helpers(graph: Graph, root: Path, go_texts: dict[str, str]) -> None:
+    """Routes a Go registration helper mounts from an interface method
+    (`RegisterScheduled(e, auth, jobs.NewX(..))` → `POST /internal/jobs/x`):
+    one entrypoint per call site, triggering the concrete type's methods,
+    with their tables rolled up (see ``detect/go_helpers``)."""
+    if not go_texts:
+        return
+    try:
+        module = None
+        gomod = root / "go.mod"
+        if gomod.is_file():
+            mm = re.search(r"(?m)^module\s+(\S+)", gomod.read_text(encoding="utf-8", errors="replace"))
+            module = mm.group(1) if mm else None
+        routes = go_helpers.scan_helpers(go_texts, module)
+        if not routes:
+            return
+        from bizmap.spans import _OutIndex, _table_hits
+
+        index = _OutIndex(graph)
+        memo: dict[str, set[tuple[str, str]]] = {}
+        for r in routes:
+            eid = entrypoint_id("http", f"{r.verb}:{r.path}")
+            ev = Evidence(r.file, r.line, r.helper)
+            handlers = [
+                fid for fid in (function_id(f"{r.type_pkg}.{r.type_name}.{m}") for m in r.handlers)
+                if fid in graph.nodes
+            ]
+            graph.add_node(
+                eid, "entrypoint", kind="http", method=r.verb, path=r.path, language="go",
+                symbol=f"{r.type_pkg}.{r.type_name}", helper=r.helper,
+                confidence=Confidence.INFERRED.value, evidence=ev.to_dict(),
+            )
+            for fid in handlers:
+                index.add("triggers", eid, fid, confidence=Confidence.INFERRED, evidence=ev)
+                for etype, target in sorted(_table_hits(graph, index, fid, memo)):
+                    index.add(etype, eid, target, confidence=Confidence.INFERRED, evidence=ev, derived="call")
+    except Exception as exc:  # noqa: BLE001 - never lose the scan over a text pass
+        _warn_graph(graph, f"Go route-helper pass failed ({type(exc).__name__}: {exc}); skipped")
+
+
 def _apply_js_firestore(graph: Graph, root: Path, js_files: list[Path], analysis: JsAnalysis) -> dict[str, str]:
     """Firestore reads / writes, triggers and Pub/Sub publishes in JS/TS (a
     text pass over the files that use Firestore). Returns the texts read."""
@@ -2512,11 +2554,20 @@ def _apply_js_firestore(graph: Graph, root: Path, js_files: list[Path], analysis
     texts = source_texts(root, js_files)
     try:
         calls = [(c.caller, c.callee, c.file, c.line) for c in getattr(analysis, "calls", []) or []]
+        uses_functions = any("firebase-functions" in t for t in texts.values())
+        deployed = js_firebase.deployed_names(root, texts) if uses_functions else {}
         fsapply.apply_js_firestore(
-            graph, texts, dict(analysis.functions or {}), dict(getattr(analysis, "function_ends", {}) or {}), calls
+            graph, texts, dict(analysis.functions or {}), dict(getattr(analysis, "function_ends", {}) or {}), calls,
+            deployed,
         )
     except Exception as exc:  # noqa: BLE001 - never lose the scan over Firestore
         _warn_graph(graph, f"JS Firestore pass failed ({type(exc).__name__}: {exc}); skipped")
+    try:
+        fsapply.apply_js_callables(
+            graph, texts, dict(analysis.functions or {}), dict(getattr(analysis, "function_ends", {}) or {})
+        )
+    except Exception as exc:  # noqa: BLE001 - never lose the scan over callables
+        _warn_graph(graph, f"JS Firebase callable pass failed ({type(exc).__name__}: {exc}); skipped")
     return texts
 
 
@@ -2707,6 +2758,7 @@ def _scan_one(
     t_prop = time.perf_counter()
     _apply_sql_functions(graph, schema)
     _apply_db_triggers(graph, schema)
+    _apply_go_helpers(graph, root, go_texts)
     sql_failures = drain_sql_failures()
     if sql_failures:
         existing = list(graph.attrs.get("warnings") or [])
@@ -2841,6 +2893,7 @@ def _scan_one(
         )
         node.attrs["queue_events"] = bucket
     _link_firestore_triggers(graph)
+    fsapply.link_firebase_callables(graph)
     try:
         fsapply.apply_push_subscriptions(graph, root, cfg.raw)
     except Exception as exc:  # noqa: BLE001 - a config hint never costs the scan

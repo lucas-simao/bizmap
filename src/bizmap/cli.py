@@ -80,6 +80,7 @@ def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
             "generated_dirs": "generated dirs",
             "generated_files": "generated/minified files",
             "gitignored": ".gitignored paths",
+            "nested_repos": "nested repos/worktrees",
             "go_tests": "Go test files",
             "go_test_dirs": "Go testdata dirs",
             "py_tests": "Python test files",

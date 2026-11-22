@@ -22,7 +22,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from bizmap.detect.go_cloud import GoCloudResult, scan_go, valid_topic
-from bizmap.detect.js_firestore import FS_FILE, FsResult, scan_files
+from bizmap.detect.js_firebase import callable_sites
+from bizmap.detect.js_firestore import FS_FILE, FsFunction, FsResult, scan_files
 from bizmap.graph import (
     Confidence,
     Evidence,
@@ -76,11 +77,15 @@ def apply_js_firestore(
     functions: dict[str, tuple[str, int]],
     function_ends: dict[str, int],
     calls: list[tuple[str, str, str, int]],
+    deployed: dict[tuple[str, str], str] | None = None,
 ) -> FsResult | None:
     if not any(FS_FILE.search(t) for t in texts.values()):
         return None
     res = scan_files(texts, functions, function_ends, calls)
+    deployed = deployed or {}
     direct: list[tuple[str, str, str]] = []  # (edge type, function id, target id)
+    for f in res.functions:
+        _add_cloud_function(graph, f, deployed.get((f.file, f.name)))
     for t in res.triggers:
         fid = function_id(t.qual)
         graph.add_node(
@@ -97,6 +102,10 @@ def apply_js_firestore(
             language="javascript", collection=t.collection, document=t.document, event=t.event,
             confidence=Confidence.EXACT.value, evidence=ev.to_dict(),
         )
+        name = deployed.get((t.file, t.qual.rsplit(".", 1)[-1]))
+        if name:
+            graph.nodes[eid].attrs.setdefault("deployed_name", name)
+            graph.nodes[fid].attrs.setdefault("deployed_name", name)
         graph.add_edge("triggers", eid, fid, confidence=Confidence.EXACT, evidence=ev)
         cid = _ensure_coll(graph, t.collection, None)
         graph.add_edge("reads", fid, cid, confidence=Confidence.EXACT, evidence=ev)
@@ -127,6 +136,91 @@ def apply_js_firestore(
             edge.attrs["fields"] = sorted(set(edge.attrs.get("fields") or []) | set(p.fields))
     _propagate(graph, direct)
     return res
+
+
+def _add_cloud_function(graph: Graph, f: FsFunction, deployed: str | None) -> None:
+    """A callable / HTTPS / scheduled / Pub/Sub / auth Cloud Function: its
+    handler function and an entrypoint named after the deployed name
+    (`users-archiveUser`), which callers link to."""
+    fid = function_id(f.qual)
+    graph.add_node(
+        fid, "function", name=f.qual, language="javascript",
+        evidence={"file": f.file, "line": f.start, "symbol": f.qual}, start_line=f.start, end_line=f.end,
+    )
+    node = graph.nodes[fid]
+    node.attrs.setdefault("start_line", f.start)
+    node.attrs.setdefault("end_line", f.end)
+    name = deployed or f.name
+    attrs: dict[str, Any] = {
+        "kind": f.kind, "symbol": f.qual, "language": "javascript", "name": name,
+        "confidence": Confidence.EXACT.value, "evidence": Evidence(f.file, f.start, f.qual).to_dict(),
+    }
+    if deployed:
+        attrs["deployed_name"] = deployed
+        node.attrs.setdefault("deployed_name", deployed)
+    if f.kind in {"firebase_call", "firebase_http", "firebase_task"}:
+        # Firebase serves `https://<region>-<project>.cloudfunctions.net/<name>`
+        attrs.update(method="POST" if f.kind != "firebase_http" else "ANY", path=f"/{name}")
+    if f.schedule:
+        attrs["schedule"] = f.schedule
+    if f.topic:
+        attrs["topic"] = f.topic
+    if f.event:
+        attrs["event"] = f.event
+    eid = entrypoint_id(f.kind, name if deployed else f.qual)
+    graph.add_node(eid, "entrypoint", **attrs)
+    ev = Evidence(f.file, f.start, f.qual)
+    graph.add_edge("triggers", eid, fid, confidence=Confidence.EXACT, evidence=ev)
+    if f.kind == "pubsub" and f.topic:
+        qid = queue_id("pubsub", f.topic)
+        graph.add_node(qid, "queue", kind="pubsub", name=f.topic)
+        graph.add_edge("triggers", qid, eid, confidence=Confidence.EXACT, evidence=ev)
+
+
+def apply_js_callables(
+    graph: Graph,
+    texts: dict[str, str],
+    functions: dict[str, tuple[str, int]],
+    function_ends: dict[str, int],
+) -> None:
+    """Stash `httpsCallable(fns, '<name>')` calls on the calling function
+    (`firebase_calls`); `link_firebase_callables` turns them into edges."""
+    for site in callable_sites(texts, functions, function_ends):
+        fid = _ensure_fn(graph, site.symbol, site.file, site.line)
+        node = graph.nodes[fid]
+        item = {"name": site.name, "evidence": {"file": site.file, "line": site.line, "symbol": site.symbol}}
+        bucket = list(node.attrs.get("firebase_calls") or [])
+        if item not in bucket:
+            bucket.append(item)
+        node.attrs["firebase_calls"] = bucket
+
+
+_CALLABLE_KINDS = {"firebase_call", "firebase_http", "firebase_task"}
+
+
+def link_firebase_callables(graph: Graph) -> None:
+    """`calls_http` (via `firebase_callable`) from each stashed callable call to
+    the Cloud Function entrypoint with that deployed name, in any scanned repo.
+    Names no scanned function has go to `unresolved_http` as
+    `callable_not_scanned`. Idempotent: safe to run again after a merge."""
+    targets: dict[str, list[str]] = defaultdict(list)
+    for node in graph.nodes.values():
+        if node.type == "entrypoint" and node.attrs.get("kind") in _CALLABLE_KINDS and node.attrs.get("deployed_name"):
+            targets[str(node.attrs["deployed_name"])].append(node.id)
+    unresolved = [u for u in graph.attrs.get("unresolved_http") or [] if u.get("reason") != "callable_not_scanned"]
+    for node in list(graph.nodes.values()):
+        for item in node.attrs.get("firebase_calls") or []:
+            name = str(item.get("name") or "")
+            ev = Evidence.from_dict(item["evidence"]) if item.get("evidence") else None
+            hits = targets.get(name) or []
+            for eid in hits:
+                graph.add_edge("calls_http", node.id, eid, confidence=Confidence.EXACT, evidence=ev,
+                               via="firebase_callable")
+            if not hits:
+                note = {"url": name, "method": "CALL", "keys": [], "from": node.id, "reason": "callable_not_scanned"}
+                if note not in unresolved:
+                    unresolved.append(note)
+    graph.attrs["unresolved_http"] = unresolved
 
 
 def apply_go_cloud(

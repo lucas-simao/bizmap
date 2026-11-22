@@ -375,6 +375,12 @@ def iter_files(
                 continue
             if d in SKIP_DIR_NAMES:
                 continue
+            if (base / d / ".git").exists():
+                # a nested repo, submodule or worktree (`.git` dir or file): its own
+                # project, not files of this one (a stale worktree checked out inside
+                # the repo would duplicate every function). `scan: include` keeps it.
+                opts.bump("nested_repos", d_rel)
+                continue
             if opts.skip_generated and (
                 d in GENERATED_DIR_NAMES
                 or (d in ROOT_GENERATED_DIR_NAMES and any(m in filenames for m in PROJECT_MANIFESTS))

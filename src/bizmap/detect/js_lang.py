@@ -1225,6 +1225,18 @@ class JsAnalyzer:
                             analysis.calls.append(
                                 JsCall(caller=parent_qual, callee=qual, file=rel_file, line=line_of(value))
                             )
+            if b"firebase-functions" in _src:
+                # `exports.X = onCall(async (req) => …)`: the handler is the function X
+                for fb in typed_walk(tree, {"arrow_function", "function", "function_expression"}, JS_TYPES):
+                    if firebase_handler_name(fb) is None:
+                        continue
+                    qual = _fn_qual(fb, module)
+                    if not qual or qual in analysis.functions:
+                        continue
+                    analysis.functions[qual] = (rel_file, line_of(fb))
+                    analysis.function_ends[qual] = fb.end_point[0] + 1
+                    fn_nodes[qual] = fb
+                    file_quals.append(qual)
             # calls to helpers declared in an enclosing function's scope
             fn_by_span = {
                 (fn_nodes[q].start_byte, fn_nodes[q].end_byte): q
@@ -2034,6 +2046,81 @@ def _js_why(fn: Node) -> str | None:
     return why or None
 
 
+# Firebase Functions factories whose last argument is the handler
+# (`exports.archiveUser = https.onCall(async (req) => …)`): v2 names, and the
+# v1 leaves of a chain (`functions.pubsub.schedule('…').onRun(cb)`)
+FIREBASE_FACTORIES = frozenset({
+    "onCall", "onCallGenkit", "onRequest", "onSchedule", "onMessagePublished", "onTaskDispatched",
+    "onDocumentCreated", "onDocumentUpdated", "onDocumentDeleted", "onDocumentWritten",
+    "onDocumentCreatedWithAuthContext", "onDocumentUpdatedWithAuthContext",
+    "onDocumentDeletedWithAuthContext", "onDocumentWrittenWithAuthContext",
+    "onObjectFinalized", "onObjectDeleted", "onObjectArchived", "onObjectMetadataUpdated",
+    "onValueCreated", "onValueUpdated", "onValueDeleted", "onValueWritten",
+    "beforeUserCreated", "beforeUserSignedIn", "beforeEmailSent", "beforeSmsSent", "onCustomEventPublished",
+})
+_FIREBASE_V1_LEAVES = frozenset({"onRun", "onPublish", "onWrite", "onCreate", "onUpdate", "onDelete", "onFinalize",
+                                 "onArchive", "onMetadataUpdate", "onDispatch"})
+_FIREBASE_V1_CHAIN = re.compile(r"\b(?:firestore|pubsub|auth|storage|database|tasks|schedule|topic|document)\b")
+_FN_WRAPPERS = frozenset({"parenthesized_expression", "as_expression", "satisfies_expression", "non_null_expression"})
+
+
+def firebase_handler_name(fn: Node) -> str | None:
+    """`X` for the handler passed last to a Firebase Functions factory whose
+    result is a module-level export: `exports.X = onCall(cb)`,
+    `module.exports.X = …`, `[export] const X = …`. The handler is otherwise
+    anonymous, so its calls and data would land on `<module>.module`."""
+    if fn.type not in {"arrow_function", "function", "function_expression"}:
+        return None
+    args = parent_of(fn)
+    if args is None or args.type != "arguments" or not args.named_children or args.named_children[-1] != fn:
+        return None
+    call = parent_of(args)
+    if call is None or call.type != "call_expression":
+        return None
+    callee = call.child_by_field_name("function")
+    if callee is None:
+        return None
+    if callee.type == "identifier":
+        leaf = text(callee)
+        chain = ""
+    elif callee.type == "member_expression":
+        prop = callee.child_by_field_name("property")
+        leaf = text(prop) if prop is not None else ""
+        chain = text(callee.child_by_field_name("object") or callee)
+    else:
+        return None
+    if leaf not in FIREBASE_FACTORIES and not (leaf in _FIREBASE_V1_LEAVES and _FIREBASE_V1_CHAIN.search(chain)):
+        return None
+    up = parent_of(call)
+    while up is not None and up.type in _FN_WRAPPERS:
+        up = parent_of(up)
+    if up is None:
+        return None
+    if up.type == "assignment_expression":
+        left = up.child_by_field_name("left")
+        stmt = parent_of(up)
+        if left is None or left.type != "member_expression" or stmt is None or stmt.type != "expression_statement":
+            return None
+        top = parent_of(stmt)
+        if top is None or top.type != "program":
+            return None
+        owner = text(left.child_by_field_name("object") or left)
+        prop = left.child_by_field_name("property")
+        if owner not in {"exports", "module.exports"} or prop is None:
+            return None
+        return text(prop) or None
+    if up.type == "variable_declarator":
+        decl = parent_of(up)
+        top = parent_of(decl) if decl is not None else None
+        if top is not None and top.type == "export_statement":
+            top = parent_of(top)
+        if top is None or top.type != "program":
+            return None
+        name = _declarator_name(up)
+        return name if name and name.isidentifier() else None
+    return None
+
+
 def _fn_own_name(cur: Node) -> str | None:
     """Name a function-like node is known by, or None when anonymous.
 
@@ -2058,6 +2145,7 @@ def _fn_own_name(cur: Node) -> str | None:
         key = _returned_member_key(cur) or _object_member_key(cur)
         if key:
             return key
+        return firebase_handler_name(cur)
     return None
 
 
