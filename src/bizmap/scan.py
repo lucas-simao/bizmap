@@ -43,6 +43,8 @@ from bizmap.http_match import (
     path_template_match,
     path_without_placeholders,
     route_literal_hits,
+    route_not_found,
+    scanned_repo_names,
     service_for_url,
     strip_service_base,
     suffix_template_match,
@@ -491,10 +493,18 @@ def _apply_go(
     entrypoints_by_handler: dict[str, list[str]] = defaultdict(list)
     job_functions: set[str] = {j.handler.qualname for j in analysis.jobs}
 
+    registrations: dict[str, list[dict]] = defaultdict(list)
     for route in analysis.routes:
         handler = route.handler
         key = f"{route.method}:{route.path}"
         eid = entrypoint_id("http", key)
+        reg = {
+            "file": route.evidence.file,
+            "line": route.evidence.line,
+            "handler": handler.qualname if handler else str(route.handler_expr or ""),
+        }
+        if reg not in registrations[eid]:
+            registrations[eid].append(reg)
         conf = route.confidence
         if route.path_confidence == Confidence.UNKNOWN:
             conf = Confidence.UNKNOWN
@@ -505,9 +515,12 @@ def _apply_go(
             symbol=handler.qualname if handler else route.handler_expr,
             why=handler.why if handler else None,
             confidence=conf.value,
-            candidates=list(route.candidates or []),
             evidence=route.evidence.to_dict(),
         )
+        cands = list(dict.fromkeys(route.candidates or []))
+        # one candidate is just the handler (or the only guess): not "several"
+        if len(cands) > 1 or (cands and not handler):
+            node_kwargs["candidates"] = cands
         if getattr(route, "path_unresolved", False):
             node_kwargs["unresolved"] = True
         graph.add_node(eid, "entrypoint", **node_kwargs)
@@ -531,6 +544,8 @@ def _apply_go(
                 )
                 if eid not in entrypoints_by_handler[part.qualname]:
                     entrypoints_by_handler[part.qualname].append(eid)
+
+    _note_duplicate_routes(graph, registrations)
 
     for job in analysis.jobs:
         handler = job.handler
@@ -1814,6 +1829,7 @@ def _link_http(
         for n in graph.nodes.values()
         if n.type == "entrypoint"
     }
+    scanned: set[str] | None = None
     for fid, method, url, ev, conf, client_unknown, via in calls:
         caller_repo = None
         node = graph.get(fid)
@@ -1834,6 +1850,9 @@ def _link_http(
         keys = unresolved_http_keys(url)
         reason = classify_unresolved_http(url, client_unknown=client_unknown)
         service = service_for_url(url, services)
+        if scanned is None:
+            scanned = scanned_repo_names(graph)
+        reason = route_not_found(reason, service, services, scanned)
         node = graph.get(fid)
         if node is not None:
             notes = list(node.attrs.get("unresolved_http") or [])
@@ -2295,6 +2314,7 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
     mapped_envs: set[str] = set()
     for name, spec in (services or {}).items():
         mapped_envs.update(_service_fields(str(name), spec)[1])
+    scanned = scanned_repo_names(graph)
 
     # pass 1: match everything; note which repo each unmapped env key reaches
     results: list[tuple[object, list[tuple[str, str, Evidence | None, dict, list[str]]]]] = []
@@ -2372,6 +2392,7 @@ def _relink_http_from_graph(graph: Graph, services: dict[str, str]) -> None:
             keys = unresolved_http_keys(url)
             reason = classify_unresolved_http(url, client_unknown=bool(item.get("client_unknown")))
             service = service_for_url(url, services)
+            reason = route_not_found(reason, service, services, scanned)
             if reason == "target_not_scanned" and key and key not in mapped_envs:
                 hint_calls[key] += 1
                 for repo in other_repos:
@@ -2464,6 +2485,33 @@ def _relink_queues_from_graph(graph: Graph, services: dict[str, str]) -> None:
                     confidence=Confidence.INFERRED,
                     evidence=evidence,
                 )
+
+
+def _note_duplicate_routes(graph: Graph, registrations: dict[str, list[dict]]) -> None:
+    """The same METHOD + path registered more than once (two files, two
+    handlers): keep every registration on the node (`registrations`, every
+    handler stays a `triggers` target) and say so (`duplicate_routes`, a
+    warning) — never let one silently stand for the others."""
+    dups = []
+    for eid, regs in sorted(registrations.items()):
+        places = sorted({(r["file"], r["line"]) for r in regs})
+        if len(places) < 2:
+            continue
+        node = graph.get(eid)
+        if node is None:
+            continue
+        regs = sorted(regs, key=lambda r: (r["file"], r["line"], r["handler"]))
+        node.attrs["registrations"] = regs
+        handlers = sorted({r["handler"] for r in regs if r["handler"]})
+        if len(handlers) > 1:
+            node.attrs["candidates"] = handlers
+        label = f"{node.attrs.get('method') or ''} {node.attrs.get('path') or ''}".strip()
+        where = ", ".join(f"{r['file']}:{r['line']} ({r['handler'] or '?'})" for r in regs)
+        dups.append({"route": eid, "registrations": regs})
+        _warn_graph(graph, f"duplicate_route: {label} is registered {len(regs)} times: {where}")
+    if dups:
+        existing = list(graph.attrs.get("duplicate_routes") or [])
+        graph.attrs["duplicate_routes"] = existing + [d for d in dups if d not in existing]
 
 
 def _warn_graph(graph: Graph, msg: str) -> None:

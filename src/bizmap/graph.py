@@ -276,6 +276,12 @@ class Graph:
         warnings = self.attrs.get("warnings")
         if warnings:
             payload["warnings"] = sort_list_attrs(warnings)
+        dups = self.attrs.get("duplicate_routes")
+        if dups:
+            payload["duplicate_routes"] = sorted(dups, key=lambda d: str(d.get("route") or ""))
+        dropped = self.attrs.get("template_routes_dropped")
+        if dropped:
+            payload["template_routes_dropped"] = sorted(set(dropped))
         return payload
 
     @classmethod
@@ -298,6 +304,9 @@ class Graph:
         graph.attrs["service_hints"] = data.get("service_hints") or []
         graph.attrs["external_envs"] = data.get("external_envs") or []
         graph.attrs["in_process_http"] = int(data.get("in_process_http") or 0)
+        for key in ("warnings", "duplicate_routes", "template_routes_dropped"):
+            if data.get(key):
+                graph.attrs[key] = list(data[key])
         graph.attrs["queues"] = data.get("queues") or {}
         graph.attrs["unresolved_http"] = data.get("unresolved_http") or []
         for raw in data.get("nodes") or []:

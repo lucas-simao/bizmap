@@ -410,6 +410,7 @@ def _unique_suffix_match(
 
 
 UNRESOLVED_HTTP_REASONS = (
+    "route_not_found",
     "target_not_scanned",
     "base_unknown",
     "path_dynamic",
@@ -465,6 +466,28 @@ def classify_unresolved_http(
     if not literal:
         return "path_dynamic"
     return "target_not_scanned"
+
+
+def route_not_found(reason: str, service: str | None, services: dict | None, scanned_repos: set[str]) -> str:
+    """``target_not_scanned`` names a service that *was* scanned: the URL goes
+    to a known service, but none of its routes matches (the caller calls
+    something the API does not have) → ``route_not_found``."""
+    # `service_for_url` already names the scanned repo (an entry's `repo:` wins)
+    if reason != "target_not_scanned" or not service:
+        return reason
+    return "route_not_found" if str(service) in scanned_repos else reason
+
+
+def scanned_repo_names(graph: Any) -> set[str]:
+    """Repos present in the graph (multi-repo prefixes and the repo itself)."""
+    names = {str(r) for r in (getattr(graph, "attrs", {}).get("repos") or []) if r}
+    if getattr(graph, "repo", None):
+        names.add(str(graph.repo))
+    for node in graph.nodes.values():
+        r = node.attrs.get("repo")
+        if r:
+            names.add(str(r))
+    return names
 
 
 def unresolved_http_keys(url: str) -> list[str]:

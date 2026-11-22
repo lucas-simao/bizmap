@@ -144,7 +144,7 @@ def scan_summary(graph: Graph, *, verbose: bool = False) -> list[str]:
         target_counts[target] = target_counts.get(target, 0) + 1
         origin = _origin_of(graph, str(item.get("from") or ""))
         origin_counts[origin] = origin_counts.get(origin, 0) + 1
-    order = ("target_not_scanned", "base_unknown", "path_dynamic", "client_unknown")
+    order = ("route_not_found", "target_not_scanned", "base_unknown", "path_dynamic", "client_unknown")
     bits = [f"{name}={reason_counts[name]}" for name in order if name in reason_counts]
     bits += [f"{n}={c}" for n, c in sorted(reason_counts.items()) if n not in order]
     lines.append(f"{len(unresolved)} unresolved HTTP calls: " + ", ".join(bits))
