@@ -242,6 +242,30 @@ def merge_graphs(graphs: list[Graph], *, version: str | None = None) -> Graph:
         merged.attrs["services"] = services
     if queues:
         merged.attrs["queues"] = queues
+    # per-repo notes: warnings (prefixed with the repo), duplicate / dropped routes (qualified ids)
+    warnings: list[str] = []
+    dup_routes: list[dict] = []
+    dropped: list[str] = []
+    for graph in graphs:
+        name = repo_name_of(graph)
+        multi = len(graphs) > 1
+        for w in graph.attrs.get("warnings") or []:
+            w = str(w)
+            item = f"[{name}] {w}" if multi and not w.startswith(f"[{name}] ") else w
+            if item not in warnings:
+                warnings.append(item)
+        for d in graph.attrs.get("duplicate_routes") or []:
+            rid = str(d.get("route") or "")
+            dup_routes.append({**d, "route": f"{name}/{rid}" if multi and rid and not rid.startswith(f"{name}/") else rid})
+        for rid in graph.attrs.get("template_routes_dropped") or []:
+            rid = str(rid)
+            dropped.append(f"{name}/{rid}" if multi and not rid.startswith(f"{name}/") else rid)
+    if warnings:
+        merged.attrs["warnings"] = warnings
+    if dup_routes:
+        merged.attrs["duplicate_routes"] = dup_routes
+    if dropped:
+        merged.attrs["template_routes_dropped"] = sorted(set(dropped))
     if len(databases) == 1:
         merged.database = next(iter(databases))
         merged.attrs["database"] = merged.database

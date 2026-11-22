@@ -34,6 +34,30 @@
   functions that name other columns of the table (`UPDATE orders SET status`)
   or derived table-level copies on callers.
 
+## 0.14.2 — 2026-11-22
+
+### Fixed (demo repos)
+
+- **No more false "handler is ambiguous"**: the scan wrote `candidates:
+  ["main.H.Ping"]` (one item) even on an exact route, and `bizmap impact`
+  took any non-empty list as ambiguous. A route now keeps `candidates` only
+  with more than one (or when the handler is not resolved), and the comment
+  says "handler is ambiguous (N candidates)" only for more than one; an
+  unresolved handler says "handler not resolved".
+- **`route_not_found`**: a call to a service that *was* scanned but has no
+  matching route (`web` calls `GET /health`, `api` only serves `/ping`) is no
+  longer `target_not_scanned`. The PR comment says "calls `GET …/health`,
+  which `api` does not serve (no matching route)" as a **medium** risk
+  reason, plus a note; the HTML and `bizmap scan` summary list the new reason.
+- **Duplicate routes (#148)**: the same METHOD + path registered more than
+  once (two files, two handlers) keeps every registration
+  (`registrations: [{file, line, handler}]` on the node, every handler a
+  `triggers` target), a `duplicate_route` warning, and `duplicate_routes` in
+  the graph JSON; the PR comment notes "registered N times (a.go:7, b.go:7)".
+  Warnings, duplicate and dropped template routes now survive the multi-repo
+  merge (warnings prefixed `[repo]`), and `template_routes_dropped` is written
+  to the JSON.
+
 ### Docs
 
 - Landing pages and references caught up with 0.13–0.14.1: the home page,

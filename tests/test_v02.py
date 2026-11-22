@@ -466,7 +466,7 @@ def test_cli_scan_multi_and_registry_merge(pyplatform_root: Path, tmp_path: Path
     r3 = runner.invoke(main, ["registry", "merge", str(ga), str(gb), "--out", str(merged)])
     assert r3.exit_code == 0, r3.output
     data = json.loads(merged.read_text(encoding="utf-8"))
-    assert data["version"] == "0.14.1"
+    assert data["version"] == "0.14.2"
     why = runner.invoke(main, ["why", "orders.status", "--graph", str(merged)])
     assert why.exit_code == 0, why.output
     assert "writers:" in why.output
