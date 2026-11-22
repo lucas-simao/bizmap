@@ -2041,7 +2041,8 @@ class Analyzer:
             srcs = sources(v)
             if not srcs:
                 continue
-            col = key.lower()
+            # Firestore fields keep their case (`orderId`); SQL columns are case-folded
+            col = key if _bare(target).startswith("collection:") else key.lower()
             if cols is not None:
                 snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower()
                 col = col if col in cols else (snake if snake in cols else None)

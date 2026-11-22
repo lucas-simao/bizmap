@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Added (demo repos)
+
+- **A pure rule shows where its result lands**: a changed function that
+  writes nothing itself (`DiscountCents`) lists what its direct callers
+  write — "via `PlaceOrder`: `orders (discount_cents)`" in the Writes column
+  and in the notes (`caller_writes` in the impact JSON).
+- **A changed package-level constant** (`const GoldDiscountPct = 12`, a
+  Python `GOLD_PCT = 12`, a TS `export const MAX_ITEMS = 5`) changed outside
+  any function maps to the functions that use it — Go: the same package;
+  Python / JS / TS: the same repo — instead of "No mapped function changed"
+  (`via_consts`, "uses changed `GoldDiscountPct`").
+
+### Fixed (demo repos)
+
+- Firestore field names keep their case in `feeds` column maps (`orderId`,
+  not `orderid`).
+- The repo shown for a table / collection shared by several repos no longer
+  depends on the repo order: the one that writes it most (ties alphabetical;
+  nobody writes: the top reader), with `used_by` listing every repo.
+- `bizmap why TABLE.COLUMN` no longer lists, as writers of the column,
+  functions that name other columns of the table (`UPDATE orders SET status`)
+  or derived table-level copies on callers.
+
 ### Docs
 
 - Landing pages and references caught up with 0.13–0.14.1: the home page,
