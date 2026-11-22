@@ -32,7 +32,7 @@ from bizmap.srctext import Masked, mask, match_close, split_top
 
 FS_FILE = re.compile(
     r"""['"](?:firebase/firestore(?:/lite)?|firebase/compat/firestore|firebase-admin(?:/firestore)?|@google-cloud/firestore"""
-    r"""|firebase-functions(?:/v[12])?(?:/firestore)?|@google-cloud/pubsub)['"]|\bgetFirestore\s*\(|\.firestore\s*\(\s*\)"""
+    r"""|firebase-functions(?:/v[12])?(?:/[a-z]+)?|@google-cloud/pubsub)['"]|\bgetFirestore\s*\(|\.firestore\s*\(\s*\)"""
 )
 _MOD_READ = {
     "getDoc": "doc", "getDocs": "query", "getDocFromServer": "doc", "getDocsFromServer": "query",
@@ -47,12 +47,26 @@ _CHAIN_PASS = {"where", "orderBy", "limit", "limitToLast", "offset", "startAt", 
                "withConverter", "select", "doc", "collection", "count"}
 _TX_CALL = re.compile(r"(?<![\w$])([A-Za-z_$][\w$]*)\s*\.\s*(set|update|delete|create|get)\s*\(")
 _ADMIN_START = re.compile(r"\.\s*collection\s*\(")
+_ADMIN_REF_ARG = re.compile(r"^[A-Za-z_$][\w$]*\s*\.\s*(?:doc|collection)\s*\(")
 _REF_START = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(doc|collection|where|orderBy|limit|get|set|update|delete|create|add|onSnapshot|stream)\s*\(")
 _DECL = re.compile(r"(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^=;\n]+)?=\s*(?:await\s+)?")
-_TRIGGER_V2 = re.compile(r"(?<![\w$.])(onDocumentWritten|onDocumentCreated|onDocumentUpdated|onDocumentDeleted"
+# bare (`onDocumentWritten(`) or namespaced (`firestore.onDocumentWritten(`, `firestoreV2.…`)
+_TRIGGER_V2 = re.compile(r"(?<![\w$])(onDocumentWritten|onDocumentCreated|onDocumentUpdated|onDocumentDeleted"
                          r"|onDocumentWrittenWithAuthContext|onDocumentCreatedWithAuthContext"
                          r"|onDocumentUpdatedWithAuthContext|onDocumentDeletedWithAuthContext)\s*\(")
 _TRIGGER_V1 = re.compile(r"\.\s*document\s*\(\s*(\x00\d+\x00)\s*\)\s*\.\s*(onWrite|onCreate|onUpdate|onDelete)\s*\(")
+# Cloud Functions entrypoints other than Firestore triggers (v2 bare or
+# namespaced, v1 `functions.https.onCall`): the kind each becomes
+_FN_KINDS = {
+    "onCall": "firebase_call", "onCallGenkit": "firebase_call", "onRequest": "firebase_http",
+    "onSchedule": "scheduled_job", "onMessagePublished": "pubsub", "onTaskDispatched": "firebase_task",
+    "beforeUserCreated": "auth", "beforeUserSignedIn": "auth",
+}
+_FN_V2 = re.compile(r"(?<![\w$])(?:[A-Za-z_$][\w$]*\s*\.\s*)*(" + "|".join(_FN_KINDS) + r")\s*\(")
+_FN_V1 = re.compile(
+    r"\.\s*(schedule|topic)\s*\(\s*(\x00\d+\x00)\s*\)(?:\s*\.\s*[A-Za-z_$][\w$]*\s*\([^()]*\))*\s*\.\s*(onRun|onPublish)\s*\("
+)
+_AUTH_V1 = re.compile(r"(?<![\w$])auth\s*\.\s*user\s*\(\s*\)\s*\.\s*(onCreate|onDelete)\s*\(")
 _V2_EVENT = {"Written": "written", "Created": "created", "Updated": "updated", "Deleted": "deleted"}
 _V1_EVENT = {"onWrite": "written", "onCreate": "created", "onUpdate": "updated", "onDelete": "deleted"}
 _PUBLISH = re.compile(r"\.\s*topic\s*\(\s*([^()]*?)\s*\)\s*\.\s*(publishMessage|publishJSON|publish)\s*\(")
@@ -87,6 +101,22 @@ class FsTrigger:
 
 
 @dataclass
+class FsFunction:
+    """A Cloud Function that is not a Firestore trigger (callable, HTTPS,
+    schedule, Pub/Sub, auth). ``name`` is its export name in the file."""
+
+    qual: str
+    name: str
+    file: str
+    start: int
+    end: int
+    kind: str  # firebase_call | firebase_http | scheduled_job | pubsub | firebase_task | auth
+    schedule: str | None = None
+    topic: str | None = None
+    event: str | None = None
+
+
+@dataclass
 class FsPublish:
     symbol: str
     topic: str
@@ -99,6 +129,7 @@ class FsPublish:
 class FsResult:
     accesses: list[FsAccess] = field(default_factory=list)
     triggers: list[FsTrigger] = field(default_factory=list)
+    functions: list[FsFunction] = field(default_factory=list)
     publishes: list[FsPublish] = field(default_factory=list)
 
 
@@ -398,6 +429,7 @@ def scan_files(
         fs = _FileScan(rel, fs_files[rel], by_file.get(rel, []), consts)
         scans[rel] = fs
         _triggers(fs, res)
+        _functions(fs, res)
         _collect_refs(fs)
         for kind, target, pos, fields in _sites(fs):
             line = fs.line(pos)
@@ -508,7 +540,13 @@ def _sites(fs: _FileScan) -> list[tuple[str, _Target, int, list[str]]]:
         if not args or fs.ref(recv, mm.start()) is not None:
             continue
         a0 = args[0].strip()
-        if not (a0.startswith(("doc(", "collection(")) or (re.fullmatch(r"[A-Za-z_$][\w$]*", a0) and fs.ref(a0, mm.start()))):
+        if not (
+            a0.startswith(("doc(", "collection("))
+            or (re.fullmatch(r"[A-Za-z_$][\w$]*", a0) and fs.ref(a0, mm.start()))
+            # admin SDK ref built in place: batch.update(db.doc(`orders/${id}`), …),
+            # tx.set(db.collection('orders').doc(id), …)
+            or _ADMIN_REF_ARG.match(a0)
+        ):
             continue
         fn = fs.fn_at(fs.line(mm.start()))
         t = fs.target(a0, mm.start(), fn)
@@ -567,6 +605,93 @@ def _handler_span(fs: _FileScan, call_open: int) -> tuple[int, int] | None:
     return fs.line(last), fs.line(last + end)
 
 
+def _export_name(fs: _FileScan, pos: int) -> str | None:
+    """The name a factory call at ``pos`` is exported as (`exports.x =`,
+    `export const x =`), walking back over a chain (`functions.https.onCall`)."""
+    k = pos
+    while k > 0:
+        nm = _NAME_BEFORE.search(fs.text[max(0, k - 200) : k])
+        if nm is not None:
+            return nm.group(1)
+        # `exports.x = functions.firestore.document(...)`: walk back over the chain
+        prev = fs.text[max(0, k - 200) : k]
+        dot = re.search(r"([A-Za-z_$][\w$.]*(?:\s*\.\s*)?)\s*$", prev)
+        if not dot or dot.start() == 0 or not dot.group(1).strip():
+            return None
+        k = max(0, k - 200) + dot.start()
+    return None
+
+
+def _option(fs: _FileScan, expr: str, key: str) -> str | None:
+    """A string option: the argument itself (`'every 5 minutes'`, a constant)
+    or `{ key: '…' }`."""
+    e = expr.strip()
+    lit = fs.m.lit(e)
+    if lit is not None:
+        return lit.value if not lit.dynamic else None
+    if re.fullmatch(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?", e):
+        return fs.consts.get(e)
+    om = re.search(rf"(?<![\w$]){key}\s*:\s*(\x00\d+\x00|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)", e)
+    if om:
+        lit = fs.m.lit(om.group(1))
+        return (lit.value if not lit.dynamic else None) if lit is not None else fs.consts.get(om.group(1))
+    return None
+
+
+def _functions(fs: _FileScan, res: FsResult) -> None:
+    """Callable / HTTPS / scheduled / Pub/Sub / auth Cloud Functions."""
+    found: list[tuple[int, int, str, str | None, str | None, str | None]] = []  # pos, open, kind, schedule, topic, event
+    for mm in _FN_V2.finditer(fs.text):
+        factory = mm.group(1)
+        kind = _FN_KINDS[factory]
+        open_p = mm.end() - 1
+        args = split_top(fs.text[open_p + 1 : match_close(fs.text, open_p)])
+        if not args:
+            continue
+        schedule = _option(fs, args[0], "schedule") if kind == "scheduled_job" and len(args) > 1 else None
+        topic = _option(fs, args[0], "topic") if kind == "pubsub" and len(args) > 1 else None
+        event = {"beforeUserCreated": "before_create", "beforeUserSignedIn": "before_sign_in"}.get(factory)
+        found.append((mm.start(), open_p, kind, schedule, topic, event))
+    for mm in _FN_V1.finditer(fs.text):
+        lit = fs.m.lit(mm.group(2))
+        value = lit.value if lit is not None and not lit.dynamic else None
+        if mm.group(1) == "schedule" and mm.group(3) == "onRun":
+            found.append((mm.start(), mm.end() - 1, "scheduled_job", value, None, None))
+        elif mm.group(1) == "topic" and mm.group(3) == "onPublish":
+            found.append((mm.start(), mm.end() - 1, "pubsub", None, value, None))
+    for mm in _AUTH_V1.finditer(fs.text):
+        found.append((mm.start(), mm.end() - 1, "auth", None, None, "created" if mm.group(1) == "onCreate" else "deleted"))
+    for pos, open_p, kind, schedule, topic, event in found:
+        span = _handler_span(fs, open_p)
+        if span is None:
+            continue
+        name = _export_name(fs, pos)
+        if not name:
+            continue  # not exported: not a deployed function
+        stmt_start = fs.text.rfind("\n", 0, pos) + 1
+        start = fs.line(stmt_start)
+        qual = f"{fs.module}.{name}"
+        res.functions.append(FsFunction(qual, name, fs.rel, start, span[1], kind, schedule, topic, event))
+        fs.fns.append(_Fn(qual, start, span[1], []))
+
+
+def _doc_path(fs: _FileScan, lit) -> str | None:  # noqa: ANN001 - srctext literal
+    """A trigger's document path; `${CONST}` in a template is the constant's
+    value (`${COLLECTION}/{id}`), any other `${…}` stays unresolved."""
+    if not lit.dynamic:
+        return lit.value
+    out = []
+    for part in re.split(r"(\$\{[^}]*\})", lit.value):
+        if part.startswith("${"):
+            name = part[2:-1].strip()
+            if name not in fs.consts:
+                return None
+            out.append(fs.consts[name])
+        else:
+            out.append(part)
+    return "".join(out)
+
+
 def _triggers(fs: _FileScan, res: FsResult) -> None:
     found: list[tuple[int, int, str, str]] = []  # (call pos, open paren, document path, event)
     for mm in _TRIGGER_V2.finditer(fs.text):
@@ -577,11 +702,12 @@ def _triggers(fs: _FileScan, res: FsResult) -> None:
         doc = None
         lit = fs.m.lit(args[0])
         if lit is not None:
-            doc = lit.value
+            doc = _doc_path(fs, lit)
         else:
-            dm = re.search(r"document\s*:\s*(\x00\d+\x00)", args[0])
-            lit2 = fs.m.lit(dm.group(1)) if dm else None
-            doc = lit2.value if lit2 is not None else None
+            dm = re.search(r"document\s*:\s*(\x00\d+\x00|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)", args[0])
+            if dm:
+                lit2 = fs.m.lit(dm.group(1))
+                doc = _doc_path(fs, lit2) if lit2 is not None else fs.consts.get(dm.group(1))
         if not doc:
             continue
         ev = next((v for k, v in _V2_EVENT.items() if k in mm.group(1)), "written")
@@ -596,20 +722,7 @@ def _triggers(fs: _FileScan, res: FsResult) -> None:
         if span is None:
             continue
         stmt_start = fs.text.rfind("\n", 0, pos) + 1
-        before = fs.text[stmt_start:pos]
-        nm = None
-        k = pos
-        while nm is None and k > 0:
-            nm = _NAME_BEFORE.search(fs.text[max(0, k - 200) : k])
-            if nm is None:
-                # `exports.x = functions.firestore.document(...)`: walk back over the chain
-                prev = fs.text[max(0, k - 200) : k]
-                dot = re.search(r"([A-Za-z_$][\w$.]*)\s*$", prev)
-                if not dot or dot.start() == 0:
-                    break
-                k = max(0, k - 200) + dot.start()
-        name = nm.group(1) if nm else f"{event}_{fs.line(pos)}"
-        del before
+        name = _export_name(fs, pos) or f"{event}_{fs.line(pos)}"
         parts = [p for p in doc.strip("/").split("/") if p]
         coll = parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
         if not coll or "{" in coll:
