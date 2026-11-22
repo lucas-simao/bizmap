@@ -10,6 +10,8 @@
     --bg: #ffffff; --fg: #1f2328; --muted: #656d76; --line: #d0d7de; --soft: #f6f8fa; --chip: #eaeef2;
     --accent: #0969da; --risk: #cf222e; --read: #1a7f37; --readbg: #dafbe1; --write: #a40e26; --writebg: #ffebe9;
     --sel: #ddf4ff;
+    --ctl-h: 32px; --ctl-r: 6px; --ring: 0 0 0 3px rgba(9, 105, 218, .3);
+    color-scheme: light;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     font-size: 13px; color: var(--fg); background: var(--bg);
   }
@@ -26,7 +28,20 @@
   #crumbs a { color: var(--fg); }
   #crumbs .sep { margin: 0 6px; color: var(--muted); }
   .search { position: relative; }
-  #q { width: 320px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  /* form controls: one look for every input, select and button (.ctl), a larger size for the main search (.ctl-lg) */
+  .ctl { height: var(--ctl-h); margin: 0; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--ctl-r);
+         background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; line-height: 1.2; vertical-align: middle; }
+  .ctl:hover { border-color: var(--muted); }
+  .ctl:focus, .ctl:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+  input.ctl { -webkit-appearance: none; appearance: none; }
+  input.ctl::placeholder { color: var(--muted); opacity: 1; }
+  select.ctl { -webkit-appearance: none; appearance: none; min-width: 120px; max-width: 200px; padding-right: 28px;
+               text-overflow: ellipsis; white-space: nowrap; overflow: hidden; cursor: pointer;
+               background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5l3 3 3-3' fill='none' stroke='%23656d76' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 9px center; background-size: 12px; }
+  button.ctl, summary.ctl { display: inline-flex; align-items: center; gap: 6px; background: var(--soft); cursor: pointer; white-space: nowrap; }
+  button.ctl:hover, summary.ctl:hover { background: var(--chip); }
+  .ctl-lg { height: 44px; padding: 0 14px; font-size: 16px; border-radius: 10px; }
+  #q { width: 320px; }
   #results { position: absolute; right: 0; top: 34px; width: 520px; max-height: 70vh; overflow: auto; z-index: 20;
              background: var(--bg); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.12); display: none; }
   #results .r { display: flex; gap: 8px; padding: 5px 8px; cursor: pointer; align-items: baseline; }
@@ -110,7 +125,6 @@
   .ep.use .ep-who { padding: 0 12px 8px 74px; font-size: 12px; }
   .ep.use.guess .ep-head .ep-path { border-bottom: 1px dashed #54aeff; }
   details.more { margin-top: 22px; } details.more > summary { cursor: pointer; color: var(--accent); }
-  .code-btn { font-size: 12px; }
   .tree { margin: 6px 0 10px; }
   .tree .node { display: flex; gap: 6px; align-items: baseline; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
   .tree .node:hover { background: var(--soft); }
@@ -129,7 +143,7 @@
          max-height: 220px; overflow: auto; }
   .muted { color: var(--muted); } .risk { color: var(--risk); font-weight: 600; }
   .empty { color: var(--muted); padding: 20px 0; }
-  .filter { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; font: inherit; width: 260px; margin: 0 0 10px; }
+  .filter { width: 260px; margin: 0 0 10px; }
   #map { height: calc(100vh - 160px); border: 1px solid var(--line); border-radius: 8px; }
   .tabs { display: flex; gap: 6px; margin: 4px 0 12px; }
   .tabs a { padding: 3px 10px; border: 1px solid var(--line); border-radius: 12px; color: var(--fg); }
@@ -138,9 +152,9 @@
   #app.wide { grid-template-columns: 250px minmax(0, 1fr) 0; }
   #app.wide aside#detail { display: none; }
   .det { position: relative; white-space: nowrap; }
-  .det > summary { cursor: pointer; list-style: none; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+  .det > summary { list-style: none; }
   .det > summary::-webkit-details-marker { display: none; }
-  .det-box { position: absolute; right: 0; top: 34px; z-index: 30; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px;
+  .det-box { position: absolute; right: 0; top: calc(var(--ctl-h) + 4px); z-index: 30; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px;
              box-shadow: 0 8px 24px rgba(0,0,0,.12); display: grid; gap: 6px; }
   .home { max-width: 1400px; }
   .strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
@@ -152,8 +166,8 @@
   .ask { text-align: center; margin: 10px auto 22px; max-width: 760px; }
   .ask h1 { font-size: 24px; margin-bottom: 10px; }
   .ask-box { position: relative; text-align: left; }
-  .ask-in { width: 100%; padding: 12px 14px; font: inherit; font-size: 16px; border: 2px solid var(--accent); border-radius: 10px; }
-  .answer .ask-box .ask-in { font-size: 13px; padding: 7px 10px; border-width: 1px; max-width: 520px; }
+  .ask-in { width: 100%; }
+  .answer .ask-box .ask-in { height: var(--ctl-h); padding: 0 10px; font-size: 13px; border-radius: var(--ctl-r); max-width: 520px; }
   .answer .ask-box { margin-bottom: 12px; }
   .ask-list { display: none; position: absolute; left: 0; right: 0; top: 100%; z-index: 25; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
               box-shadow: 0 8px 24px rgba(0,0,0,.12); max-height: 60vh; overflow: auto; max-width: 760px; }
@@ -167,7 +181,9 @@
   .fcard h3 .n { color: var(--risk); }
   .fcard.zero { opacity: .7; } .fcard.zero h3 .n { color: var(--muted); font-weight: normal; }
   .fcard ul { margin: 4px 0 0; padding-left: 18px; } .fcard p { margin: 4px 0 0; }
-  .mx-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; } .mx-bar .filter { margin: 0; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; } .bar .filter { margin: 0; }
+  .bar .count { line-height: var(--ctl-h); white-space: nowrap; }
+  .mx-bar { margin-bottom: 8px; }
   .mx-wrap { overflow: auto; max-height: 70vh; border: 1px solid var(--line); border-radius: 8px; }
   table.mx { border-collapse: separate; border-spacing: 0; }
   table.mx th, table.mx td { border-bottom: 1px solid var(--chip); border-right: 1px solid var(--chip); padding: 4px 8px; white-space: nowrap; }
@@ -215,11 +231,11 @@
   <header>
     <span class="brand">BizMap</span>
     <div id="crumbs"></div>
-    <details id="det" class="det"><summary><span id="det-label">Show details</span><span id="det-n"></span></summary><div class="det-box">
+    <details id="det" class="det"><summary class="ctl"><span id="det-label">Show details</span><span id="det-n"></span></summary><div class="det-box">
       <label><input type="checkbox" id="det-i"> <span id="det-i-l">intermediate functions</span></label>
       <label><input type="checkbox" id="det-c"> <span id="det-c-l">columns</span></label>
       <label><input type="checkbox" id="det-t"> <span id="det-t-l">tests and helpers</span></label></div></details>
-    <div class="search"><input id="q" type="search" autocomplete="off" spellcheck="false"><div id="results"></div></div>
+    <div class="search"><input id="q" class="ctl" type="search" autocomplete="off" spellcheck="false"><div id="results"></div></div>
   </header>
   <nav id="toc"></nav>
   <main id="read"><p class="empty">…</p></main>

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Changed (HTML export)
+
+- **One look for every form control**: the top search, the big search on the
+  start screen, the matrix filters ("Filter by name…", "Any repo", "Any
+  store", "Most accessed"), the Data flow and Tables filters, "Show details"
+  and the "Show N more" buttons share a `.ctl` style, inline in the page with
+  no external dependency: 32 px high, 1 px border, the same radius, padding
+  and inherited font, and the same focus ring. Selects drop the native look
+  for a drawn arrow (an inline SVG), 120–200 px wide, so a long repo name no
+  longer widens "Any repo". The matrix and Data flow filter bars sit on one
+  row with an even gap and the "30 of 807" count centred on it. The start
+  screen search stays larger (44 px), in the same style. The export has a
+  single light theme; the controls use its colour variables.
+
 ## 0.15.0 — 2026-11-22
 
 ### Added (demo repos)
