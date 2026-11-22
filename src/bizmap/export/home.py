@@ -240,10 +240,9 @@ def build_home(
 
     # cross-store copies (feeds whose ends are in different stores)
     mirrors = []
-    for edges in ix.out.values():
-        for edge in edges:
-            if edge.get("type") == "feeds" and ix.store(edge["from"]) != ix.store(edge["to"]):
-                mirrors.append([ix.store(edge["from"]), ix.store(edge["to"])])
+    for edge in ix.out.edges:  # every edge once (the index keeps one list, see query._Adj)
+        if edge.get("type") == "feeds" and ix.store(edge["from"]) != ix.store(edge["to"]):
+            mirrors.append([ix.store(edge["from"]), ix.store(edge["to"])])
 
     # ── summary ──
     repos = sorted({r for r in (_split(nid)[0] for nid in ix.nodes) if r}) or ([str(data.get("repo"))] if data.get("repo") else [])
@@ -577,20 +576,19 @@ def _map_graph(ix: Index, tables: list[dict[str, Any]], entities: list[dict[str,
                 add(sk, k, "rw", rw, rank, False)
             if hrw:
                 add(sk, k, "rw", hrw, hrank, True)
-    for edges_out in ix.out.values():
-        for edge in edges_out:
-            t = edge.get("type")
-            a, b = edge["from"], edge["to"]
-            if t == "feeds" and a in ent_of and b in ent_of:
-                add(ent_of[a], ent_of[b], "feeds", 0, _rank(edge.get("confidence")), False)
-            elif t == "enqueues" and not edge.get("derived") and ix.kind(b) == "queue" and svc(a) >= 0:
-                q = node("q", b, str(ix.nodes[b].get("name") or ix.label(b)), "topic")
-                add(pos["s\x00" + str(svc(a))], q, "pub", 0, _rank(edge.get("confidence")), hidden(a))
-            elif t == "triggers" and ix.kind(a) == "queue" and svc(b) >= 0:
-                q = node("q", a, str(ix.nodes[a].get("name") or ix.label(a)), "topic")
-                add(q, pos["s\x00" + str(svc(b))], "sub", 0, _rank(edge.get("confidence")), hidden(b))
-            elif t == "calls_http" and svc(a) >= 0 and svc(b) >= 0 and svc(a) != svc(b):
-                add(pos["s\x00" + str(svc(a))], pos["s\x00" + str(svc(b))], "http", 0, _rank(edge.get("confidence")), hidden(a))
+    for edge in ix.out.edges:  # every edge once (see query._Adj)
+        t = edge.get("type")
+        a, b = edge["from"], edge["to"]
+        if t == "feeds" and a in ent_of and b in ent_of:
+            add(ent_of[a], ent_of[b], "feeds", 0, _rank(edge.get("confidence")), False)
+        elif t == "enqueues" and not edge.get("derived") and ix.kind(b) == "queue" and svc(a) >= 0:
+            q = node("q", b, str(ix.nodes[b].get("name") or ix.label(b)), "topic")
+            add(pos["s\x00" + str(svc(a))], q, "pub", 0, _rank(edge.get("confidence")), hidden(a))
+        elif t == "triggers" and ix.kind(a) == "queue" and svc(b) >= 0:
+            q = node("q", a, str(ix.nodes[a].get("name") or ix.label(a)), "topic")
+            add(q, pos["s\x00" + str(svc(b))], "sub", 0, _rank(edge.get("confidence")), hidden(b))
+        elif t == "calls_http" and svc(a) >= 0 and svc(b) >= 0 and svc(a) != svc(b):
+            add(pos["s\x00" + str(svc(a))], pos["s\x00" + str(svc(b))], "http", 0, _rank(edge.get("confidence")), hidden(a))
     return {"n": nodes, "e": sorted(edges.values())}
 
 

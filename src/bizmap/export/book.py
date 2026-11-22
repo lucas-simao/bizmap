@@ -611,6 +611,7 @@ def build_book(
         )
         row = table_rows[-1]
         row["st"] = storage_of(node, row["db"])
+        row["_db"] = str(node.get("db") or "")  # the real database, for _borrow_engines (dropped there)
         flow = flow_by_table.get(t)
         if flow:
             row["fl"] = len(flow["in"]) + len(flow["out"])
@@ -673,6 +674,7 @@ def build_book(
     if table.named:
         chunks["s0"] = {"schemas": table.named}
     # every feeds edge, for the central data-flow page (its own small chunk)
+    _borrow_engines(table_rows, labels)
     flow_rows = _flow_page_rows(data, index, order, raw_nodes)
     chunks["flow"] = {"rows": flow_rows}
     # the start screen: answers by the query engine, summary, findings, matrix
@@ -770,6 +772,27 @@ def storage_of(node: dict[str, Any], db: str) -> str:
         if key in re.split(r"[^a-z]+", low) or low.startswith(key + ":"):
             return lbl
     return "SQL"
+
+
+def _borrow_engines(rows: list[dict[str, Any]], labels: list[str]) -> None:
+    """``SQL`` (engine unknown) takes the engine of the same table in another
+    repo (same kind and name, same or unknown database) when exactly one is
+    known: one entity, one label (as ``bizmap who-writes`` shows it)."""
+    by_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for r in rows:
+        by_name.setdefault((r["kind"], labels[r["i"]].lower()), []).append(r)
+    for group in by_name.values():
+        if len(group) < 2:
+            continue
+        for r in group:
+            if r.get("st") != "SQL":
+                continue
+            known = {p["st"] for p in group if p is not r and p.get("st") not in ("SQL", "Firestore")
+                     and (not r["_db"] or not p["_db"] or p["_db"] == r["_db"])}
+            if len(known) == 1:
+                r["st"] = next(iter(known))
+    for r in rows:
+        r.pop("_db", None)
 
 
 def _flow_page_rows(

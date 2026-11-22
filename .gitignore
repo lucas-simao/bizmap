@@ -16,6 +16,7 @@ htmlcov/
 
 # Scan output (generated locally)
 /bizmap.graph.json
+/bizmap.graph.idx
 /bizmap.graph.mmd
 
 # Editors / OS

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -34,6 +35,7 @@ def test_who_writes_the_table_lists_every_repo_including_the_forgotten_worker(ix
         (BILL, "repo.mark_billed"),
         (API, "Job.Run"),
         (API, "Repo.SetStatus"),
+        (API, "mirrorTx.WriteOrder"),
     }
     patch = next(x for x in r["results"] if x["function"]["label"] == "Repo.SetStatus")
     (entry,) = patch["entrypoints"]
@@ -124,9 +126,14 @@ def test_path_flag_shows_every_function(ix: Index) -> None:
 
 def test_unresolved_writes_are_counted(ix: Index) -> None:
     r = who(ix, "table:orders", "writes")
-    (u,) = r["unresolved"]
-    assert (u["kind"], u["repo"], u["count"], [f["label"] for f in u["functions"]]) == ("dynamic_table", API, 1, ["Repo.BulkFix"])
-    assert "1 write(s) with a table name built at runtime in orders-api could not be resolved: Repo.BulkFix" in render(r)
+    assert [(u["kind"], u["repo"], u["count"], [f["label"] for f in u["functions"]]) for u in r["unresolved"]] == [
+        ("dynamic_table", BILL, 1, ["app.touch"]),
+        ("dynamic_table", API, 1, ["Repo.BulkFix"]),
+    ]
+    assert ("2 write(s) with a table name built at runtime (billing-worker: 1, orders-api: 1) could not be resolved: "
+            "app.touch [billing-worker], Repo.BulkFix [orders-api]") in render(r)
+    one = who(ix, f"{BILL}/table:orders", "writes")
+    assert "1 write(s) with a table name built at runtime (billing-worker: 1) could not be resolved: app.touch" in render(one)
     # reads of the collection: nothing unresolved, and the answer says so
     assert "Nothing unresolved in these repos could change this answer." in render(who(ix, "collection:orders", "reads"))
 
@@ -141,7 +148,7 @@ def test_json_is_stable_and_versioned(ix: Index) -> None:
     assert set(doc["entity"]) == {"kind", "name", "store", "repos", "nodes"}
     row = doc["results"][0]
     assert set(row) == {"function", "repo", "entity_node", "evidence", "columns", "confidence", "entrypoints", "entrypoints_partial"}
-    assert set(row["entrypoints"][0]) == {"entrypoint", "handler", "via", "path", "confidence"}
+    assert set(row["entrypoints"][0]) == {"entrypoint", "handler", "wiring", "via", "path", "confidence"}
     assert set(row["function"]) >= {"id", "type", "label", "repo", "evidence"}
 
 
@@ -192,7 +199,7 @@ def test_trace_table_upstream_finds_the_queue_producer_and_the_collection(ix: In
     assert any(h["kind"] == "writer" and h["depth"] == 2 and h["trigger"]["label"] == "POST /orders" for h in r["upstream"])
     one = trace(ix, "table:orders", direction="up", depth=1)
     assert all(h["depth"] == 1 for h in one["upstream"])
-    assert [d["count"] for d in r["unresolved"]["dynamic_writes"]] == [1]
+    assert [(d["repo"], d["count"]) for d in r["unresolved"]["dynamic_writes"]] == [(BILL, 1), (API, 1)]
 
 
 def test_trace_down_only(ix: Index) -> None:
@@ -296,3 +303,165 @@ def test_cli_commands(tmp_path: Path) -> None:
     assert res.exit_code == 0 and "### Rastro orders" in res.output
     res = run(main, ["who-writes", "collection:orders", "--graph", str(graph), "--path", "--format", "json"])
     assert json.loads(res.output)["schema"] == "bizmap.query/v1"
+    # --no-cache / --cache-dir, and nothing written next to the graph
+    mine = tmp_path / "c"
+    res = run(main, ["trace", "collection:orders", "--graph", str(graph), "--no-cache", "--cache-dir", str(mine)])
+    assert res.exit_code == 0 and not mine.exists()
+    res = run(main, ["who-reads", "collection:orders", "--graph", str(graph), "--cache-dir", str(mine)])
+    assert res.exit_code == 0 and len(list(mine.glob("*.idx"))) == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bizmap.graph.json", "c"]
+    # a leftover 0.13.1 cache is pointed out, not used
+    (tmp_path / "bizmap.graph.idx").write_bytes(b"old")
+    res = run(main, ["who-writes", "table:orders", "--graph", str(graph)])
+    assert res.exit_code == 0 and "no longer used" in res.output  # stderr is part of `output` in CliRunner
+
+
+# ── round 2: names built at runtime in Go / TS, wiring, store label, cache ──
+
+
+def test_dynamic_collection_writes_in_go_and_ts_are_counted(ix: Index) -> None:
+    r = who(ix, "collection:orders", "writes")
+    assert [(u["kind"], u["access"], u["repo"], u["count"], [f["label"] for f in u["functions"]]) for u in r["unresolved"]] == [
+        ("dynamic_collection", "writes", API, 1, ["Service.Archive"]),
+        ("dynamic_collection", "writes", WEB, 1, ["orders.saveTo"]),
+    ]
+    text = render(r)
+    assert ("2 write(s) with a collection name built at runtime (orders-api: 1, shop-web: 1) could not be resolved: "
+            "Service.Archive [orders-api], orders.saveTo [shop-web]") in text
+    pt = render(r, "text", "pt-BR")
+    assert "2 escrita(s) com nome de coleção montado em tempo de execução (orders-api: 1, shop-web: 1)" in pt
+    t = trace(ix, "collection:orders")
+    doc = json.loads(render(t, "json"))
+    assert [(d["repo"], d["count"], [f["label"] for f in d["functions"]]) for d in doc["unresolved"]["dynamic_writes"]] == [
+        (API, 1, ["Service.Archive"]), (WEB, 1, ["orders.saveTo"]),
+    ]
+    assert "2 write(s) with a collection name built at runtime (orders-api: 1, shop-web: 1)" in render(t)
+    # the unknown collection is never an entity of its own
+    with pytest.raises(QueryError):
+        who(ix, "collection:unknown", "writes")
+
+
+def test_dynamic_collection_reads_are_counted_too() -> None:
+    data = build()
+    data["edges"].append({"id": "rd", "type": "reads", "from": f"{WEB}/function:src.orders.listOrders",
+                          "to": f"{WEB}/collection:unknown", "confidence": "unknown",
+                          "evidence": {"file": "src/orders.ts", "line": 7}})
+    r = who(Index.from_dict(data), "collection:orders", "reads")
+    assert [(u["repo"], u["count"]) for u in r["unresolved"]] == [(WEB, 1)]
+    assert "1 read(s) with a collection name built at runtime (shop-web: 1)" in render(r)
+
+
+def test_short_path_skips_main_and_wiring_to_the_real_handler(ix: Index) -> None:
+    r = who(ix, f"{API}/table:orders", "writes")
+    row = next(x for x in r["results"] if x["function"]["label"] == "mirrorTx.WriteOrder")
+    (entry,) = row["entrypoints"]
+    assert entry["entrypoint"]["label"] == "main"
+    assert (entry["wiring"], entry["handler"]["label"], entry["via"]) == (3, "Handle", 1)
+    assert "main → … → Handle → (via 1 function) → mirrorTx.WriteOrder  writes orders  [inferred]" in render(r)
+    full = render(r, show_path=True)
+    assert "main → buildRouter → RegisterEvent → RegisterEvent.func1 → Handle → Service.Sync → mirrorTx.WriteOrder" in full
+    # a route keeps its handler even when it is called `Register…`
+    patch = next(x for x in r["results"] if x["function"]["label"] == "Repo.SetStatus")
+    assert patch["entrypoints"][0]["wiring"] == 0
+
+
+def test_one_store_label_for_one_table() -> None:
+    data = build()
+    for n in data["nodes"]:
+        if n["id"] == f"{BILL}/table:orders":
+            n.pop("engine")  # billing-worker's driver was not seen
+    ix2 = Index.from_dict(data)
+    r = who(ix2, "table:orders", "writes")
+    assert r["entity"]["store"] == "Postgres"
+    assert {n["store"] for n in r["entity"]["nodes"]} == {"Postgres"}
+    with pytest.raises(QueryError) as err:
+        who(ix2, "orders", "writes")
+    assert [c["store"] for c in err.value.payload["candidates"]] == ["Firestore", "Postgres"]
+    assert "table · Postgres · billing-worker, orders-api" in render_error(err.value, "text", "en")
+    assert "SQL" not in render(r).split("Could change")[0].replace("SQL ", "")
+
+
+def test_index_cache_is_written_reused_and_invalidated(tmp_path: Path) -> None:
+    import os
+
+    from bizmap.query import cache_dir, cache_path
+
+    graph = tmp_path / "bizmap.graph.json"
+    graph.write_text(json.dumps(build()), encoding="utf-8")
+    first = Index.load(graph)
+    assert not first.loaded_from_cache
+    # outside the repo: in the cache folder, never next to the graph
+    assert cache_path(graph).parent == cache_dir() and cache_path(graph).is_file()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bizmap.graph.json"]
+    second = Index.load(graph)
+    assert second.loaded_from_cache
+    assert render(who(second, "table:orders", "writes"), "json") == render(who(first, "table:orders", "writes"), "json")
+    # a new scan (other size / mtime) rebuilds it
+    data = build()
+    data["nodes"] = [n for n in data["nodes"] if n["id"] != f"{BILL}/table:unknown"]
+    data["edges"] = [e for e in data["edges"] if e["to"] != f"{BILL}/table:unknown"]
+    graph.write_text(json.dumps(data), encoding="utf-8")
+    third = Index.load(graph)
+    assert not third.loaded_from_cache
+    assert [u["repo"] for u in who(third, "table:orders", "writes")["unresolved"]] == [API]
+    # same size and mtime, other content: the fingerprint notices
+    st = graph.stat()
+    text = graph.read_text(encoding="utf-8").replace('"status"', '"statuz"', 1)
+    graph.write_text(text, encoding="utf-8")
+    os.utime(graph, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert graph.stat().st_size == st.st_size and not Index.load(graph).loaded_from_cache
+    # a broken cache is ignored and replaced
+    cache_path(graph).write_bytes(b"not marshal")
+    assert not Index.load(graph).loaded_from_cache and Index.load(graph).loaded_from_cache
+    # no cache when asked
+    assert not Index.load(graph, use_cache=False).loaded_from_cache
+
+
+def test_cache_off_by_env_and_dir_by_option(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from bizmap.query import cache_dir, cache_path
+
+    graph = tmp_path / "repo" / "bizmap.graph.json"
+    graph.parent.mkdir()
+    graph.write_text(json.dumps(build()), encoding="utf-8")
+    monkeypatch.setenv("BIZMAP_NO_CACHE", "1")
+    Index.load(graph)
+    assert not Index.load(graph).loaded_from_cache and not cache_path(graph).exists()
+    monkeypatch.delenv("BIZMAP_NO_CACHE")
+    mine = tmp_path / "my-cache"
+    Index.load(graph, cache_directory=mine)
+    assert Index.load(graph, cache_directory=mine).loaded_from_cache
+    assert [p.suffix for p in mine.iterdir()] == [".idx"] and not cache_path(graph).exists()
+    # two repos never share a cache file
+    other = tmp_path / "other" / "bizmap.graph.json"
+    other.parent.mkdir()
+    other.write_text(graph.read_text(encoding="utf-8"), encoding="utf-8")
+    assert cache_path(other) != cache_path(graph)
+    # the default folder is the user's cache, not the repo
+    monkeypatch.delenv("BIZMAP_CACHE_DIR")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    if sys.platform not in ("win32", "darwin"):
+        assert cache_dir() == tmp_path / "xdg" / "bizmap" / "index"
+
+
+def test_old_caches_are_pruned(tmp_path: Path) -> None:
+    from bizmap.query import CACHE_KEEP, cache_dir
+
+    for k in range(CACHE_KEEP + 4):
+        g = tmp_path / f"r{k}" / "bizmap.graph.json"
+        g.parent.mkdir()
+        g.write_text(json.dumps(build()), encoding="utf-8")
+        Index.load(g)
+    (cache_dir() / "someone-else.idx").write_text("x")  # not ours: kept
+    Index.load(tmp_path / "r0" / "bizmap.graph.json")
+    ours = [p for p in cache_dir().glob("*.idx") if p.name != "someone-else.idx"]
+    assert len(ours) == CACHE_KEEP and (cache_dir() / "someone-else.idx").exists()
+
+
+def test_big_graph_cache_is_reused(tmp_path: Path) -> None:
+    graph = tmp_path / "bizmap.graph.json"
+    graph.write_text(json.dumps(_big(n_fn=20_000, n_calls=40_000)), encoding="utf-8")
+    a = Index.load(graph)
+    b = Index.load(graph)
+    assert (a.loaded_from_cache, b.loaded_from_cache) == (False, True)
+    assert render(who(a, "svc1/table:t1", "writes"), "json") == render(who(b, "svc1/table:t1", "writes"), "json")
+    assert render(trace(a, "svc1/table:t1"), "json") == render(trace(b, "svc1/table:t1"), "json")

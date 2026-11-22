@@ -400,6 +400,7 @@ def scan_cmd(
     )
     for line in scan_summary(graph, verbose=verbose):
         click.echo(line)
+    written = [out_path]
     if mermaid_flag or mermaid_focus:
         mmd_path = out_path.with_suffix(".mmd")
         mmd_path.write_text(
@@ -407,6 +408,12 @@ def scan_cmd(
             encoding="utf-8",
         )
         click.echo(f"wrote {mmd_path}")
+        written.append(mmd_path)
+    from bizmap.gitignore_hint import gitignore_hint
+
+    hint = gitignore_hint(written)
+    if hint:
+        click.echo(hint, err=True)
 
 
 def _run_discover(
@@ -459,6 +466,13 @@ def why_cmd(column: str, graph_path: Path) -> None:
 
 def _query_options(fn):
     fn = click.option(
+        "--cache-dir", type=click.Path(file_okay=False, path_type=Path), default=None,
+        help="Folder for the index cache (default: BIZMAP_CACHE_DIR, else the user's cache folder; never the repo).",
+    )(fn)
+    fn = click.option(
+        "--no-cache", is_flag=True, help="Neither read nor write the index cache (also: BIZMAP_NO_CACHE=1).",
+    )(fn)
+    fn = click.option(
         "--lang", type=click.Choice(["en", "pt-BR"]), default="en", show_default=True, help="Language of the text / md output."
     )(fn)
     fn = click.option(
@@ -472,11 +486,21 @@ def _query_options(fn):
     return fn
 
 
-def _run_query(graph_path: Path, fmt: str, lang: str, run, show_path: bool = False) -> None:
-    from bizmap.query import Index, QueryError, render, render_error
+def _run_query(
+    graph_path: Path, fmt: str, lang: str, run, show_path: bool = False, no_cache: bool = False,
+    cache_dir: Path | None = None,
+) -> None:
+    from bizmap.query import Index, QueryError, legacy_cache_path, render, render_error
 
+    legacy = legacy_cache_path(graph_path)
+    if legacy.is_file() and legacy != graph_path:
+        click.echo(
+            f"note: {legacy} was written by bizmap 0.13.1 and is no longer used "
+            "(the index cache now lives outside the repo): delete it, and keep it out of git.",
+            err=True,
+        )
     try:
-        ix = Index.load(graph_path)
+        ix = Index.load(graph_path, use_cache=not no_cache, cache_directory=cache_dir)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     try:
@@ -491,7 +515,9 @@ def _run_query(graph_path: Path, fmt: str, lang: str, run, show_path: bool = Fal
 @click.argument("entity")
 @_query_options
 @click.option("--path", "show_path", is_flag=True, help="Show every function between the entrypoint and the writer.")
-def who_writes_cmd(entity: str, graph_path: Path, fmt: str, lang: str, show_path: bool) -> None:
+def who_writes_cmd(
+    entity: str, graph_path: Path, fmt: str, lang: str, show_path: bool, no_cache: bool, cache_dir: Path | None
+) -> None:
     """Who writes ENTITY (a table, collection, view or TABLE.COLUMN), from which entrypoints.
 
     ENTITY: `orders`, `table:orders`, `collection:orders`, `orders-api/table:orders`,
@@ -499,20 +525,22 @@ def who_writes_cmd(entity: str, graph_path: Path, fmt: str, lang: str, show_path
     lists them and exits with code 2; no match exits with 1."""
     from bizmap.query import who
 
-    _run_query(graph_path, fmt, lang, lambda ix: who(ix, entity, "writes"), show_path)
+    _run_query(graph_path, fmt, lang, lambda ix: who(ix, entity, "writes"), show_path, no_cache, cache_dir)
 
 
 @main.command("who-reads")
 @click.argument("entity")
 @_query_options
 @click.option("--path", "show_path", is_flag=True, help="Show every function between the entrypoint and the reader.")
-def who_reads_cmd(entity: str, graph_path: Path, fmt: str, lang: str, show_path: bool) -> None:
+def who_reads_cmd(
+    entity: str, graph_path: Path, fmt: str, lang: str, show_path: bool, no_cache: bool, cache_dir: Path | None
+) -> None:
     """Who reads ENTITY (a table, collection, view or TABLE.COLUMN), from which entrypoints.
 
     Same ENTITY forms and exit codes as `who-writes`."""
     from bizmap.query import who
 
-    _run_query(graph_path, fmt, lang, lambda ix: who(ix, entity, "reads"), show_path)
+    _run_query(graph_path, fmt, lang, lambda ix: who(ix, entity, "reads"), show_path, no_cache, cache_dir)
 
 
 @main.command("trace")
@@ -523,12 +551,16 @@ def who_reads_cmd(entity: str, graph_path: Path, fmt: str, lang: str, show_path:
     "--direction", type=click.Choice(["up", "down", "both"]), default="both", show_default=True,
     help="up: where the data comes from; down: where it goes.",
 )
-def trace_cmd(entity: str, graph_path: Path, fmt: str, lang: str, depth: int, direction: str) -> None:
+def trace_cmd(
+    entity: str, graph_path: Path, fmt: str, lang: str, depth: int, direction: str, no_cache: bool,
+    cache_dir: Path | None,
+) -> None:
     """Where ENTITY's data comes from and where it goes: feeds between tables /
     collections, queues (publishers → consumers) and HTTP calls between services."""
     from bizmap.query import trace
 
-    _run_query(graph_path, fmt, lang, lambda ix: trace(ix, entity, depth=depth, direction=direction))
+    _run_query(graph_path, fmt, lang, lambda ix: trace(ix, entity, depth=depth, direction=direction),
+               no_cache=no_cache, cache_dir=cache_dir)
 
 
 @main.command("report")

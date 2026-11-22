@@ -41,6 +41,13 @@
   answers page 100 lines, the matrix 30 columns, suggestions 12.
 - Docs: [the start screen](docs/commands/export-home.md), with screenshots.
 
+- `--no-cache` / `BIZMAP_NO_CACHE=1` and `--cache-dir DIR` /
+  `BIZMAP_CACHE_DIR` on the three query commands.
+- `bizmap scan` says, once per file, when it wrote `bizmap.graph.json` (or the
+  `.mmd`) inside a git repo that does not ignore it, with the `.gitignore` line
+  to add (`BIZMAP_NO_GITIGNORE_HINT=1` silences it). Docs: "Generated files and
+  what to ignore" in `docs/commands/scan.md`.
+
 ### Changed
 
 - The services overview the page used to open on is **Services** (`#/system`).
@@ -52,6 +59,52 @@
 - `who-writes` / `who-reads` / `trace` (Python) accept an already resolved
   entity, and `query.unresolved_footer` gives the closing lines as the text
   output prints them (used by the export; output unchanged).
+
+- **The query index cache no longer lands in the user's repo.** `who-writes` /
+  `who-reads` / `trace` wrote `bizmap.graph.idx` next to the graph (0.13.1):
+  nothing ignored it, and on a big graph it passed 100 MB (a `git add .` then a
+  refused push). It now lives in the user cache folder (`$XDG_CACHE_HOME` or
+  `~/.cache/bizmap/index`, `~/Library/Caches/bizmap/index`,
+  `%LOCALAPPDATA%\bizmap\index`), one file per graph named after its absolute
+  path, the 16 most recent kept; it is used only while the graph keeps its
+  path, size, mtime and a content fingerprint. A leftover `bizmap.graph.idx`
+  is pointed out (not used, not deleted).
+
+## 0.13.1 — 2026-11-21
+
+### Fixed
+
+- **Firestore names built at runtime are counted** in Go and JS/TS:
+  `Collection(coll)`, `CollectionGroup(name)`, `Doc(path)` (Go) and
+  `collection(db, x)`, `doc(db, name, id)`, `db.collection(x)` (a helper whose
+  callers do not name it) now give `reads` / `writes` to `collection:unknown`
+  with evidence, kept on the function (never copied to callers, never a
+  `feeds` end, never `same_as` across repos). `bizmap who-writes` /
+  `who-reads` / `trace` list them in "Could change this answer" per repo with
+  the functions: "2 write(s) with a collection name built at runtime
+  (orders-api: 1, shop-web: 1) …". Go `Doc("orders/" + id)` now reads /
+  writes `orders`.
+- **Go publisher with the topic in a struct field**: `s.topic.Publish(…)`
+  after `&Service{topic: ps.Topic("order-created")}` or `s.topic =
+  c.Publisher(T)` (literal, constant or config) is an `enqueues` to the topic.
+
+### Changed
+
+- **Short path skips start-up wiring**: when only a `main` / job reaches the
+  writer, the functions right after it that wire things up (`buildRouter`,
+  `Register*`, `setup*`, `New*Server`, `*Router`, `run`, their closures) are
+  folded into `…`: `main → … → Handle → (via 1 function) → WriteOrder`.
+  JSON: `wiring` (count) on each entrypoint.
+- **One store label per entity**: the SQL engine is also read from
+  dependency manifests (`requirements*.txt`, `pyproject.toml`, `Pipfile`,
+  `package.json`, `go.mod`: `psycopg`, `asyncpg`, `pg`…), and a table whose
+  engine is unknown takes the one of the same table in another repo — the
+  query output and the HTML no longer say `Postgres/SQL`.
+- **Faster queries**: the first question writes `bizmap.graph.idx` next to
+  the graph (marshal, indexes prebuilt); later ones load it while the graph
+  keeps its size and mtime (~2× faster load). `orjson` is used when installed.
+- The "names built at runtime" line groups repos: `(billing-worker: 1,
+  orders-api: 1)` instead of one line per repo.
 
 ## 0.13.0 — 2026-11-21
 

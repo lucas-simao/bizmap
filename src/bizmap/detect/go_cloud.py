@@ -33,7 +33,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from bizmap.detect.js_firestore import FsAccess
+from bizmap.detect.js_firestore import UNKNOWN, FsAccess
 from bizmap.srctext import Masked, mask, match_close, split_top
 
 FS_IMPORT = re.compile(r'"cloud\.google\.com/go/firestore"')
@@ -191,6 +191,8 @@ class _Index:
         self.env_defaults: dict[str, str] = {}  # env var -> its default wherever one is given
         self.field_values: dict[str, set[str]] = {}  # struct field -> literal / constant values set to it
         self.slices: dict[str, list[tuple[_GoFile, str]]] = {}  # package var -> its `[]string{…}` elements
+        # struct field -> the topic expressions it is set to (`topic: ps.Topic("x")`, `s.topic = c.Publisher(T)`)
+        self.topic_fields: dict[str, list[tuple[_GoFile, str]]] = {}
         for gf in files.values():
             for em in _ENV_CALL.finditer(gf.text):
                 env = _lit(gf.m, em.group(1))
@@ -231,6 +233,9 @@ class _Index:
         for mm in _FIELD_START.finditer(t):
             expr = _expr_at(t, mm.end()).strip()
             fname = mm.group(1) or mm.group(2)
+            tm = re.match(r"^[\w.]*\.\s*(?:Topic|Publisher)\s*\(\s*([^()]*?)\s*\)$", expr) if fname and expr else None
+            if tm and fname:
+                self.topic_fields.setdefault(fname, []).append((gf, tm.group(1)))
             if fname and expr:
                 v = _lit(gf.m, expr)
                 if v is None and re.fullmatch(_IDENT, expr):
@@ -537,20 +542,12 @@ def _chain(gf: _GoFile, idx: _Index, start: int, base: list[str] | None) -> tupl
         j = match_close(t, mm.end() - 1)
         args = split_top(t[mm.end() : j])
         i = j + 1
-        if name == "Collection":
+        if name in ("Collection", "CollectionGroup"):
             if not args:
                 return None, i, None, []
-            a0 = args[0].strip()
-            v = _lit(gf.m, a0)
-            if v is None and re.fullmatch(_IDENT, a0):
-                v = idx.consts.get(a0)
-            if v is None:
-                fm = re.fullmatch(rf"{_IDENT}\.({_IDENT})", a0)
-                if fm:
-                    v = idx.consts.get(fm.group(1)) or idx.field_value(fm.group(1))  # pkg.Const / r.collection
-            if v is None:
-                return None, i, None, []
-            colls.append(v.strip("/").split("/")[-1] if "/" in v else v)
+            v = _coll_name(gf, idx, args[0])
+            # a name only known at runtime (`Collection(coll)`): counted as `collection:unknown`
+            colls.append(UNKNOWN if v is None else v.strip("/").split("/")[-1] if "/" in v else v)
             continue
         if name in _CHAIN_PASS:
             continue
@@ -561,6 +558,41 @@ def _chain(gf: _GoFile, idx: _Index, start: int, base: list[str] | None) -> tupl
             last = args
         break
     return (colls or None), i, op, last
+
+
+def _coll_name(gf: _GoFile, idx: _Index, arg: str) -> str | None:
+    """A collection name from a literal, a constant or a struct field holding one."""
+    a0 = arg.strip()
+    v = _lit(gf.m, a0)
+    if v is None and re.fullmatch(_IDENT, a0):
+        v = idx.consts.get(a0)
+    if v is None:
+        fm = re.fullmatch(rf"{_IDENT}\.({_IDENT})", a0)
+        if fm:
+            v = idx.consts.get(fm.group(1)) or idx.field_value(fm.group(1))  # pkg.Const / r.collection
+    return v
+
+
+def _doc_path(gf: _GoFile, idx: _Index, arg: str) -> str:
+    """The collection of ``client.Doc("orders/" + id)``: the literal (or constant)
+    before the first ``/``; ``unknown`` when the path starts with a value."""
+    parts = [p.strip() for p in re.split(r"\s*\+\s*", arg.strip())] if "+" in arg else [arg.strip()]
+    head = _coll_name(gf, idx, parts[0])
+    if head is None:
+        fm = re.fullmatch(r'(?:fmt\.)?Sprintf\s*\(\s*(\x00\d+\x00)', parts[0])
+        lit = _lit(gf.m, fm.group(1)) if fm else None
+        head = lit.split("%", 1)[0] if lit else None
+    if not head or not head.strip("/") or "%" in head.split("/", 1)[0]:
+        return UNKNOWN
+    segs = [x for x in head.strip("/").split("/") if x]
+    if len(parts) == 1 and len(segs) % 2 == 0:
+        segs = segs[:-1]  # "orders/123": the document's collection
+    elif len(parts) > 1 and not head.endswith("/"):
+        return UNKNOWN  # "orders" + suffix: the name itself is built
+    return segs[-1] if segs else UNKNOWN
+
+
+_FS_CLIENT_RECV = re.compile(r"(?:^|\.)(?:client|fs|fsClient|firestore|fireStore|db|store|firestoreClient)$", re.I)
 
 
 def _write_fields(gf: _GoFile, idx: _Index, args: list[str], body: str) -> list[str]:
@@ -645,11 +677,11 @@ def _firestore(gf: _GoFile, idx: _Index, res: GoCloudResult, helpers: dict[str, 
     helpers = helpers or {}
     sites: list[tuple[str, list[str], int, list[str]]] = []
     used: set[int] = set()
-    for mm in re.finditer(r"\.\s*Collection\s*\(", t):
+    for mm in re.finditer(r"\.\s*Collection(?:Group)?\s*\(", t):
         if mm.start() in used:
             continue
         colls, end, op, last = _chain(gf, idx, mm.start(), None)
-        for sub in re.finditer(r"\.\s*Collection\s*\(", t[mm.start() : end]):
+        for sub in re.finditer(r"\.\s*Collection(?:Group)?\s*\(", t[mm.start() : end]):
             used.add(mm.start() + sub.start())
         if colls and op:
             sites.append((op, colls, mm.start(), last))
@@ -660,12 +692,24 @@ def _firestore(gf: _GoFile, idx: _Index, res: GoCloudResult, helpers: dict[str, 
                 hop = _helper_op(gf, idx, helpers, call[0], call[1], colls)
                 if hop:
                     sites.append((hop, colls, mm.start(), []))
+    # `client.Doc("orders/" + id).Set(…)`: a document by its full path
+    for mm in re.finditer(rf"([\w.]*{_IDENT})\s*\.\s*Doc\s*\(", t):
+        if not _FS_CLIENT_RECV.search(mm.group(1)):
+            continue
+        open_paren = mm.end() - 1
+        close = match_close(t, open_paren)
+        args = split_top(t[open_paren + 1 : close])
+        if len(args) != 1:
+            continue
+        colls, _end, op, last = _chain(gf, idx, close + 1, [_doc_path(gf, idx, args[0])])
+        if colls and op:
+            sites.append((op, colls, mm.start(), last))
     # references kept in a variable (or a slice element), per function
     spans = [(gf.lines_at[f.start - 1], gf.lines_at[f.end] if f.end < len(gf.lines_at) else len(t)) for f in gf.fns] or [(0, len(t))]
     for a, b in spans:
         body = t[a:b]
         refs: dict[str, list[str]] = {}
-        for mm in re.finditer(rf"\b({_IDENT})(?:\s*\[[^\]\n]*\])?\s*(?:,\s*{_IDENT}\s*)?:?=\s*(?:append\(\s*\1\s*,\s*)?[\w.()\[\]]*?(?=\.\s*Collection\s*\()", body):
+        for mm in re.finditer(rf"\b({_IDENT})(?:\s*\[[^\]\n]*\])?\s*(?:,\s*{_IDENT}\s*)?:?=\s*(?:append\(\s*\1\s*,\s*)?[\w.()\[\]]*?(?=\.\s*Collection(?:Group)?\s*\()", body):
             colls, _end, op, _ = _chain(gf, idx, a + mm.end(), None)
             if colls and op is None:
                 refs[mm.group(1)] = colls
@@ -697,8 +741,8 @@ def _firestore(gf: _GoFile, idx: _Index, res: GoCloudResult, helpers: dict[str, 
         if fn is None:
             continue
         coll = colls[-1]
-        fields = _write_fields(gf, idx, last, gf.body(fn)) if op == "write" else []
-        path = "/{}/".join(colls) if len(colls) > 1 else coll
+        fields = _write_fields(gf, idx, last, gf.body(fn)) if op == "write" and coll != UNKNOWN else []
+        path = UNKNOWN if coll == UNKNOWN else "/{}/".join(colls) if len(colls) > 1 else coll
         res.accesses.append(FsAccess(op, coll, path, gf.rel, line, fn.qual, fields))
 
 
@@ -1123,6 +1167,7 @@ def _pubsub(files: dict[str, _GoFile], texts: dict[str, str], idx: _Index, res: 
                 ctors[f.name] = params.index(src)
                 wrappers[ret.group(1)] = f.name
                 wrapper_fns.add(fn.qual)
+    _field_publishes(infos, texts, idx, res)
     if not ctors:
         return
     # the wrapper's own Publish method: the signature a caller must match
@@ -1171,6 +1216,34 @@ def _pubsub(files: dict[str, _GoFile], texts: dict[str, str], idx: _Index, res: 
                 GoPublish(f.fn.qual, f.gf.rel, line, topics, fields, wrappers and _via(insts, wrappers),
                           candidates=len(groups) > 1, confidence=confidence)
             )
+
+
+def _field_publishes(infos: list[_FnInfo], texts: dict[str, str], idx: _Index, res: GoCloudResult) -> None:
+    """``s.topic.Publish(ctx, msg)`` where the field was set to a topic elsewhere
+    (``&Service{topic: ps.Topic("order-created")}`` / ``s.topic = c.Publisher(T)``)."""
+    if not idx.topic_fields:
+        return
+    for f in infos:
+        if not PS_IMPORT.search(texts[f.gf.rel]):
+            continue
+        body = f.body
+        for mm in re.finditer(rf"(?<![\w.])(?:{_IDENT}\s*\.\s*)?({_IDENT})\s*\.\s*Publish\s*\(", body):
+            fld = mm.group(1)
+            if fld in ("Publisher", "Topic") or fld not in idx.topic_fields:
+                continue
+            topics: list[GoTopic] = []
+            for tgf, arg in idx.topic_fields[fld]:
+                got = idx.topics(tgf, arg, "")
+                if got is None:
+                    topics = []
+                    break  # a constructor parameter (a wrapper) or a runtime value: not this pass
+                topics += got
+            if not topics:
+                continue
+            args = _publish_args(body, mm.end() - 1)
+            fields = _fields_of_data(f.gf, idx, args[1], body) if len(args) > 1 else []
+            line = f.fn.start + body.count("\n", 0, mm.start())
+            res.publishes.append(GoPublish(f.fn.qual, f.gf.rel, line, _uniq(topics), fields))
 
 
 def _via(insts: frozenset[_Inst], wrappers: dict[str, str]) -> str | None:
