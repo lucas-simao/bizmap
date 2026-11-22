@@ -24,7 +24,7 @@ CONFIDENCE_RANK = {
 }
 
 
-GRAPH_VERSION = "0.14.2"
+GRAPH_VERSION = "0.15.0"
 NODE_TYPES = (
     "entrypoint",
     "function",
