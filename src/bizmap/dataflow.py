@@ -2509,7 +2509,10 @@ def _build_feeds(ctx: RepoContext, writes: list[WriteEvent], skip_queue: bool = 
                 bucket["entries"].append(entry)
     for (src, dst), bucket in sorted(pairs.items()):
         entries = bucket["entries"]
-        if _fk_only(graph, src, dst, entries) or (_ids_only(entries) and not bucket["triggered"]):
+        # only ids copied into a SQL table is a reference (`users.id -> orders.user_id`); a Firestore
+        # document carrying the id (`order_events.orderId`) or a write made by a trigger is a feed
+        id_ref = _ids_only(entries) and not bucket["triggered"] and not _bare(dst).startswith("collection:")
+        if _fk_only(graph, src, dst, entries) or id_ref:
             continue
         paths = sorted(bucket["paths"].items(), key=lambda kv: (-_conf_rank(kv[1][0]), len(kv[0]), kv[0]))
         if not entries:

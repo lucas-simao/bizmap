@@ -249,3 +249,17 @@ def test_pure_rule_counts_callers_writes_in_summary_why_and_data() -> None:
         "its callers write: via `Service.PlaceOrder`: `orders` (discount_cents, id, subtotal_cents), "
         "`audit_log` (action, actor, at, entity)"
     ) in md, md
+
+
+def test_id_only_copy_from_a_table_into_a_collection_is_still_a_feed(tmp_path: Path) -> None:
+    files = {"internal/orders/events.go": ORDERS_API_GO["internal/orders/events.go"].replace(
+        'OrderEvent{OrderID: id, Kind: "created", Total: total}', 'OrderEvent{OrderID: id, Kind: "created"}')}
+    g, _ = _go_graph(
+        tmp_path / "orders-api", files, repo="orders-api",
+        edges=(("reads", "internal/orders.Repo.Emit", "column:orders.total_cents", "internal/orders/events.go", "r.db.QueryRowContext"),),
+        schema={"orders": ["id", "total_cents"]},
+    )
+    feeds = _feeds(g)
+    assert ("table:orders", "collection:order_events") in feeds, feeds
+    _conf, cols = feeds[("table:orders", "collection:order_events")]
+    assert {(a, b) for a, b, _c, _t in cols} == {("id", "orderId")}, cols

@@ -23,10 +23,12 @@
   not `orderid`). A Go struct written to Firestore (`Add(ctx, OrderEvent{…})`)
   is named by its `firestore:"…"` tags (`orderId`), the Go field name only
   when untagged.
-- A `feeds` edge collection → collection made by a Firestore trigger on the
-  source (`onDocumentCreated('order_events/{id}')` writing `notifications`)
-  is kept even when only an id is copied (`orderId` → `orderId`); id-only
-  copies elsewhere are still a reference, not a feed.
+- A `feeds` edge into a Firestore collection is kept even when only an id is
+  copied: `orders.id` → `order_events.orderId` (a Go `Get` then `Add`), and a
+  trigger on `order_events` writing `notifications` (`orderId` → `orderId`).
+  With field names keeping their case, `orderId` had started to look like an
+  id-only reference and these feeds were dropped. Only ids copied into a SQL
+  table (`users.id` → `orders.user_id`) are still a reference, not a feed.
 - The repo shown for a table / collection shared by several repos no longer
   depends on the repo order: the one that writes it most (ties alphabetical;
   nobody writes: the top reader), with `used_by` listing every repo.
