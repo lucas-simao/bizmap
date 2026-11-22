@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.1 — 2026-11-21
+
 ### Fixed (after #155)
 
 - **Firestore writes through a built document path** resolve their
