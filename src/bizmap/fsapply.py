@@ -29,6 +29,7 @@ from bizmap.graph import (
     Evidence,
     Graph,
     collection_id,
+    edge_id,
     entrypoint_id,
     function_id,
     queue_id,
@@ -125,6 +126,8 @@ def apply_js_firestore(
         )
         if a.fields:
             edge.attrs["fields"] = sorted(set(edge.attrs.get("fields") or []) | set(a.fields))
+        if etype == "writes":
+            note_fs_op(edge.attrs, getattr(a, "method", None))
         if not dynamic:  # a runtime name stays on the function: not copied to callers
             direct.append((etype, fid, cid))
     for p in res.publishes:
@@ -318,6 +321,23 @@ def apply_go_cloud(
     return res
 
 
+def note_fs_op(attrs: dict[str, Any], method: str | None) -> None:
+    """Record a Firestore write call on an edge: ``fs_ops`` (set / update /
+    add / create / delete); ``fs_ops_any`` when one of the writes is not known
+    (so every trigger event stays possible)."""
+    if method:
+        attrs["fs_ops"] = sorted(set(attrs.get("fs_ops") or []) | {method})
+    else:
+        attrs["fs_ops_any"] = True
+
+
+def _merge_fs_ops(dst: dict[str, Any], src: dict[str, Any]) -> None:
+    if src.get("fs_ops_any") or not src.get("fs_ops"):
+        dst["fs_ops_any"] = True
+    if src.get("fs_ops"):
+        dst["fs_ops"] = sorted(set(dst.get("fs_ops") or []) | set(src["fs_ops"]))
+
+
 def _propagate(graph: Graph, direct: list[tuple[str, str, str]]) -> None:
     """Callers (and the entrypoints that run them) reach what a function reads / writes."""
     if not direct:
@@ -334,17 +354,23 @@ def _propagate(graph: Graph, direct: list[tuple[str, str, str]]) -> None:
         if node.type == "entrypoint" and node.attrs.get("symbol"):
             by_symbol[function_id(str(node.attrs["symbol"]))].add(node.id)
     for etype, fid, cid in direct:
+        src = graph.edges.get(edge_id(etype, fid, cid))
+        src_attrs = src.attrs if src is not None and etype == "writes" else None
         seen = {fid}
         todo = deque([fid])
         while todo:
             cur = todo.popleft()
             for ep in eps.get(cur, set()) | by_symbol.get(cur, set()):
-                graph.add_edge(etype, ep, cid, confidence=Confidence.INFERRED, derived="call")
+                e = graph.add_edge(etype, ep, cid, confidence=Confidence.INFERRED, derived="call")
+                if src_attrs is not None:
+                    _merge_fs_ops(e.attrs, src_attrs)  # which trigger events this write can fire
             for parent in reverse.get(cur, ()):
                 if parent in seen:
                     continue
                 seen.add(parent)
-                graph.add_edge(etype, parent, cid, confidence=Confidence.INFERRED, derived="call")
+                e = graph.add_edge(etype, parent, cid, confidence=Confidence.INFERRED, derived="call")
+                if src_attrs is not None:
+                    _merge_fs_ops(e.attrs, src_attrs)
                 todo.append(parent)
 
 
@@ -442,3 +468,36 @@ def apply_push_subscriptions(graph: Graph, root: Path, raw_config: dict[str, Any
         for eid in hits:
             graph.add_edge("triggers", qid, eid, confidence=Confidence.INFERRED,
                            evidence=Evidence(file, line, topic), via="push_subscription")
+
+
+# which Firestore write calls can fire which document trigger
+_FS_EVENT_OPS = {
+    "created": {"add", "set", "create"},
+    "updated": {"update", "set"},
+    "deleted": {"delete"},
+}
+
+
+def link_firestore_triggers(graph: Graph) -> None:
+    writers: dict[str, list[tuple[str, Evidence | None, set[str] | None]]] = defaultdict(list)
+    for edge in graph.edges.values():
+        if edge.type != "writes" or not edge.to_id.startswith("collection:"):
+            continue
+        coll = edge.to_id.split(":", 1)[1]
+        ops = set(edge.attrs.get("fs_ops") or [])
+        # unknown write calls (Go, older passes, a helper): any event stays possible
+        known = None if edge.attrs.get("fs_ops_any") or not ops else ops
+        writers[coll].append((edge.from_id, edge.evidence, known))
+    for node in list(graph.nodes.values()):
+        if node.type != "entrypoint" or node.attrs.get("kind") != "firestore":
+            continue
+        coll = str(node.attrs.get("collection") or "")
+        if not coll:
+            continue
+        fires = _FS_EVENT_OPS.get(str(node.attrs.get("event") or ""))
+        for writer_id, ev, ops in writers.get(coll.lower(), []):
+            if writer_id == node.id:
+                continue
+            if fires is not None and ops is not None and not (ops & fires):
+                continue  # `.update()` never fires onDocumentCreated
+            graph.add_edge("triggers", writer_id, node.id, confidence=Confidence.INFERRED, evidence=ev)

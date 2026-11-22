@@ -31,6 +31,7 @@ import posixpath
 import re
 from dataclasses import dataclass, field
 
+from bizmap.graph import Graph, entrypoint_id
 from bizmap.srctext import Masked, mask, match_close, split_top
 
 _VERBS = ("GET", "POST", "PUT", "PATCH", "DELETE", "Any", "Handle")
@@ -53,6 +54,8 @@ class Helper:
     prefix: str  # literal/constant part of the path before the method value
     suffix: str
     handlers: list[str] = field(default_factory=list)  # other interface methods (`Run`, `Handle`)
+    file: str = ""  # where the helper's own `e.POST(Prefix+job.Name(), …)` is
+    line: int = 0
 
 
 @dataclass
@@ -65,6 +68,10 @@ class HelperRoute:
     type_pkg: str
     type_name: str
     handlers: list[str]
+    # the helper's own route call: the route detector's "template" route
+    # (`POST /internal/jobs/{job.Name()}`) lives there and is replaced by these
+    template_file: str = ""
+    template_line: int = 0
 
 
 class _Pkgs:
@@ -234,7 +241,7 @@ def _find_helpers(pk: _Pkgs) -> list[Helper]:
                     methods.discard(pm.group(1))
                     out.append(Helper(pkg, fm.group(1), idx, pname, iface, pm.group(1),
                                       rm.group(1).upper() if rm.group(1) not in ("Any", "Handle") else "ANY",
-                                      prefix, suffix, sorted(methods)))
+                                      prefix, suffix, sorted(methods), rel, text.count("\n", 0, ob + rm.start()) + 1))
     return out
 
 
@@ -300,5 +307,32 @@ def scan_helpers(texts: dict[str, str], module: str | None) -> list[HelperRoute]
                     continue
                 line = text.count("\n", 0, cm.start()) + 1
                 out.append(HelperRoute(h.verb, h.prefix + value + h.suffix, rel, line, f"{h.pkg}.{h.name}",
-                                       tpkg, tname, h.handlers))
+                                       tpkg, tname, h.handlers, h.file, h.line))
     return out
+
+
+def drop_template_routes(graph: Graph, routes: list[HelperRoute]) -> None:
+    """The route detector also sees the helper's own `e.POST(Prefix+job.Name(), …)`
+    as one route (`POST /internal/jobs/{job.Name()}`) holding every job's
+    tables. Once the helper is expanded for at least one call site, that
+    template is not a real route: drop it and its edges."""
+    templates = {(r.template_file, r.template_line, r.verb) for r in routes if r.template_file}
+    if not templates:
+        return
+    expanded = {entrypoint_id("http", f"{r.verb}:{r.path}") for r in routes}
+    drop = set()
+    for nid, node in graph.nodes.items():
+        if node.type != "entrypoint" or node.attrs.get("kind") != "http" or nid in expanded or node.attrs.get("helper"):
+            continue
+        ev = node.attrs.get("evidence") or {}
+        method = str(node.attrs.get("method") or "").upper()
+        key = (str(ev.get("file") or ""), int(ev.get("line") or 0))
+        if any(key == (f, ln) and method in (verb, "ANY", "") for f, ln, verb in templates):
+            drop.add(nid)
+    if not drop:
+        return
+    for eid in [k for k, e in graph.edges.items() if e.from_id in drop or e.to_id in drop]:
+        del graph.edges[eid]
+    for nid in drop:
+        del graph.nodes[nid]
+    graph.attrs.setdefault("template_routes_dropped", []).extend(sorted(drop))
