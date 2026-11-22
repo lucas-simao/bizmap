@@ -192,11 +192,15 @@
 
   // ── layout chrome ─────────────────────────────────────────────────────────
   function crumbs(parts) {
-    $("crumbs").innerHTML = [['<a href="#/">' + esc(L.system) + "</a>"]].concat(parts.map(function (p) { return [p]; }))
+    $("crumbs").innerHTML = [['<a href="' + hrefOf("") + '">' + esc(IX.home ? H.home : L.system) + "</a>"]].concat(parts.map(function (p) { return [p]; }))
       .map(function (p) { return p[0]; }).join('<span class="sep">›</span>');
   }
   function toc(active) {
     var h = "";
+    if (IX.home) {
+      h += '<h4>' + esc(H.ask) + '</h4><a href="' + hrefOf("") + '" class="' + (active === "home" ? "on" : "") + '"><span>' + esc(H.home) + "</span></a>" +
+           '<a href="' + hrefOf("system") + '" class="' + (active === "system" ? "on" : "") + '"><span>' + esc(H.servicesPage) + '</span><span class="n">' + num(SV.length) + "</span></a>";
+    }
     var groups = [["api", L.apis], ["web", L.frontends], ["worker", L.workers], ["lib", L.libs]];
     var dsvc = active && active.charAt(0) === "d" && DOM[+active.slice(1)] ? DOM[+active.slice(1)].svc : -1;
     groups.forEach(function (g) {
@@ -220,7 +224,7 @@
     });
     h += "<h4>" + esc(KT.navFlow) + '</h4><a href="#/flow" class="' + (active === "flow" ? "on" : "") + '"><span>' + esc(KT.navFlow) + '</span><span class="n">' + num(IX.flows || 0) + "</span></a>";
     h += "<h4>" + esc(L.tables) + '</h4><a href="#/t" class="' + (active === "t" ? "on" : "") + '"><span>' + esc(L.allTables) + '</span><span class="n">' + num(IX.tables.length) + "</span></a>";
-    h += '<h4>' + esc(L.map) + '</h4><a href="#/map" class="' + (active === "map" ? "on" : "") + '"><span>' + esc(L.map) + "</span></a>";
+    h += '<h4>' + esc(L.map) + '</h4><a href="' + hrefOf("map") + '" class="' + (active === "map" ? "on" : "") + '"><span>' + esc(L.map) + "</span></a>";
     $("toc").innerHTML = h;
   }
   function read(html) { $("read").innerHTML = html; $("read").scrollTop = 0; }
@@ -228,7 +232,8 @@
 
   // ── level 0: system ──────────────────────────────────────────────────────
   function pageSystem() {
-    crumbs([]); toc(null);
+    wide(false);
+    crumbs(IX.home ? ['<a href="' + hrefOf("system") + '">' + esc(H.servicesPage) + "</a>"] : []); toc("system");
     var routes = 0; SV.forEach(function (s) { routes += s.routes + s.jobs; });
     var h = "<h1>" + esc(L.system) + '</h1><p class="lead">' + esc(fmt(L.systemLead, { s: SV.length, r: num(routes), t: num(IX.tables.length) })) + "</p>";
     h += '<p class="counters"><a class="chip http" id="flow-counter" href="#/flow">' + esc(ktPlural("flowCount", IX.flows || 0)) + '</a> <a class="chip" href="#/t">' +
@@ -1248,6 +1253,8 @@
   $("results").addEventListener("click", function (e) { var r = e.target.closest("[data-i]"); if (r) go(+r.dataset.i); });
   document.addEventListener("click", function (e) { if (!e.target.closest(".search")) $("results").style.display = "none"; });
 
+/*__HOME__*/
+
   // ── router ───────────────────────────────────────────────────────────────
   $("read").addEventListener("click", function (ev) {
     if (ev.target.closest("a, summary, select, input, button, textarea, .flowrow details")) return;
@@ -1261,12 +1268,25 @@
     }
   });
   function route() {
-    var h = location.hash.replace(/^#\/?/, "").split("/");
+    var hp = location.hash.replace(/^#\/?/, ""), qp = hp.indexOf("?");
+    PRM = parseParams(qp >= 0 ? hp.slice(qp + 1) : "");
+    hp = qp >= 0 ? hp.slice(0, qp) : hp;
+    // "Show details" travels with every link: a link without it keeps the current state
+    if (PRM.d !== undefined) setDetails(PRM.d);
+    else if (detStr()) history.replaceState(null, "", hrefOf(hp, PRM));
+    var h = hp.split("/");
     var t = performance.now();
     $("read").onclick = null;
     openRoute = null;
+    wide(false);
     try {
-      if (!h[0]) pageSystem();
+      if (!h[0]) pageHome();
+      else if (h[0] === "system") pageSystem();
+      else if (h[0] === "q" && h[1]) pageAnswer(decodeURIComponent(h[1]), h[2] === "r" || h[2] === "t" ? h[2] : "w");
+      else if (h[0] === "q" && HOME) pageCandidates(PRM.n || "", null);
+      else if (h[0] === "find" && HOME) pageFind(h[1]);
+      else if (h[0] === "topic" && HOME) pageTopic(decodeURIComponent(h[1] || ""));
+      else if (h[0] === "map" && HOME) pageMap2(h[1], h[2] !== undefined ? decodeURIComponent(h[2]) : undefined);
       else if (h[0] === "s" && SV[+h[1]]) pageService(+h[1]);
       else if (h[0] === "d" && DOM[+h[1]]) pageDomain(+h[1]);
       else if (h[0] === "r" && IX.routeDomain[h[1]] !== undefined) { openRoute = +h[1]; pageDomain(IX.routeDomain[h[1]], +h[1]); }
@@ -1286,7 +1306,12 @@
     }
     window.__bizmap.lastMs = Math.round(performance.now() - t);
   }
-  window.__bizmap = { index: IX, chunk: chunk, names: getNames, search: doSearch, go: go };
+  window.__bizmap = { index: IX, chunk: chunk, names: getNames, search: doSearch, go: go,
+    // the start screen's engine (tests compare it with the CLI)
+    engine: function () { return engine(); },
+    answer: function (ref, access) { return access === "trace" ? BizQuery.trace(engine(), ref) : BizQuery.who(engine(), ref, access); },
+    footer: function (res) { return BizQuery.footer(res, IX.lang); } };
+  initDetails();
   window.addEventListener("hashchange", route);
   route();
   window.__bizmap.readyMs = Math.round(performance.now() - t0);

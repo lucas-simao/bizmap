@@ -99,6 +99,7 @@ nav:
       - registry: commands/registry.md
       - mcp: commands/mcp.md
       - export: commands/export.md
+      - export — start screen: commands/export-home.md
   - Languages and detectors: languages.md
   - MCP server: mcp.md
   - GitHub Action: github-action.md

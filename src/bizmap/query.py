@@ -748,9 +748,10 @@ def _unresolved_data(ix: Index, entity: Entity, etype: str) -> list[dict[str, An
     return out
 
 
-def who(ix: Index, ref: str, access: str) -> dict[str, Any]:
-    """``access``: ``writes`` (who-writes) or ``reads`` (who-reads)."""
-    entity = resolve(ix, ref)
+def who(ix: Index, ref: str, access: str, entity: Entity | None = None) -> dict[str, Any]:
+    """``access``: ``writes`` (who-writes) or ``reads`` (who-reads). ``entity``:
+    already resolved (``bizmap export`` precomputes every entity's answer)."""
+    entity = entity or resolve(ix, ref)
     rows = _access_rows(ix, entity, access)
     return {
         "schema": SCHEMA,
@@ -798,8 +799,10 @@ def _writes_of(ix: Index, fns: set[str]) -> list[str]:
     return sorted(out)
 
 
-def trace(ix: Index, ref: str, depth: int = 2, direction: str = "both") -> dict[str, Any]:
-    entity = resolve(ix, ref)
+def trace(
+    ix: Index, ref: str, depth: int = 2, direction: str = "both", entity: Entity | None = None
+) -> dict[str, Any]:
+    entity = entity or resolve(ix, ref)
     start = [ix.table_of_column(n) or n if ix.kind(n) == "column" else n for n in entity.nodes]
     hops_down: list[dict[str, Any]] = []
     hops_up: list[dict[str, Any]] = []
@@ -1248,14 +1251,27 @@ def _render_trace(r: dict[str, Any], fmt: str, lang: str) -> str:
                     out.append(f"{ind}{sub}{T['callers']} " + ", ".join(_node_ref(c, T) for c in h["http_callers"]))
         out.append("")
     out.append(f"**{T['unresolved']}**" if md else T["unresolved"] + ":")
-    u = r["unresolved"]
+    out += [b + line for line in _trace_unresolved(r["unresolved"], T)]
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def _trace_unresolved(u: dict[str, Any], T: dict[str, Any]) -> list[str]:
     lines = []
     lines += _dynamic_lines(u["dynamic_writes"], T)
     if u["queues"]:
         lines.append(T["unres_q"].format(n=len(u["queues"])))
     if u["http"]:
         lines.append(T["unres_http"].format(n=len(u["http"])))
-    if not lines:
-        lines = [T["nothing_unres"]]
-    out += [b + line for line in lines]
-    return "\n".join(out).rstrip("\n") + "\n"
+    return lines or [T["nothing_unres"]]
+
+
+def unresolved_footer(result: dict[str, Any], lang: str = "en") -> list[str]:
+    """The answer's closing section as the text output writes it: the title
+    ("Could change this answer:") and one line per item, without indentation.
+    ``bizmap export`` shows these same lines under each answer."""
+    T = _t(lang)
+    if result["query"]["command"] == "trace":
+        lines = _trace_unresolved(result["unresolved"], T)
+    else:
+        lines = [x.strip() for x in _render_unresolved_who(result, T, False)[1:]]
+    return [T["unresolved"] + ":", *lines]

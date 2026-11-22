@@ -58,6 +58,7 @@ def walk_export(html: Path) -> tuple[Walk, dict]:
         page.wait_for_selector('body[data-ready="1"]')
         ix = page.evaluate("() => window.__bizmap.index")
         seen["#/"] = walk.go("#/")
+        seen["#/system"] = walk.go("#/system")
         for i, sv in enumerate(ix["services"]):
             seen[f"#/s/{i}"] = walk.go(f"#/s/{i}")
             if sv.get("screen_chunk"):
@@ -170,7 +171,7 @@ def test_flow_page_filters_and_opens_the_table(tmp_path: Path) -> None:
     html = _write(tmp_path, repro_graph())
     with sync_api.sync_playwright() as p:
         browser, page, walk = _open(p, html)
-        walk.go("#/")
+        walk.go("#/system")  # the services overview (the start screen is #/)
         toc = page.inner_text("#toc")
         counter = page.get_attribute("#flow-counter", "href")
         walk.go("#/flow")

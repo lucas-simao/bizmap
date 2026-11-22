@@ -63,6 +63,8 @@ exclude = ["docs/assets", "docs/img"]
 "src/bizmap/rules/supabase.yaml" = "bizmap/rules/supabase.yaml"
 "src/bizmap/export/template.html" = "bizmap/export/template.html"
 "src/bizmap/export/book.js" = "bizmap/export/book.js"
+"src/bizmap/export/home.js" = "bizmap/export/home.js"
+"src/bizmap/export/query.js" = "bizmap/export/query.js"
 "src/bizmap/export/vendor/cytoscape.min.js" = "bizmap/export/vendor/cytoscape.min.js"
 "src/bizmap/export/vendor/cytoscape.LICENSE" = "bizmap/export/vendor/cytoscape.LICENSE"
 

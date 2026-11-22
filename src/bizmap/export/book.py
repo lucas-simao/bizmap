@@ -677,6 +677,11 @@ def build_book(
     _borrow_engines(table_rows, labels)
     flow_rows = _flow_page_rows(data, index, order, raw_nodes)
     chunks["flow"] = {"rows": flow_rows}
+    # the start screen: answers by the query engine, summary, findings, matrix
+    from bizmap.export.home import build_home  # it reuses this module's helpers
+
+    start, start_chunks = build_home(data, svc_of, services, index, lang=lang)
+    chunks.update(start_chunks)
     chunk_ids = sorted(chunks, key=lambda c: (c[0], int(c[1:]) if c[1:].isdigit() else 0))
     chunk_no = {c: n for n, c in enumerate(chunk_ids)}
     chunks["names"] = {
@@ -710,6 +715,7 @@ def build_book(
         "chunks": chunk_ids,
         "routeDomain": {str(e): d for e, d in route_domain.items()},
         "flows": len(flow_rows),
+        "home": start,
         "docs": {"spec": sum(1 for v in docs.values() if v.get("src") == "spec"),
                  "swag": sum(1 for v in docs.values() if v.get("src") == "swag"),
                  "comment": sum(1 for v in docs.values() if v.get("src") == "comment"),

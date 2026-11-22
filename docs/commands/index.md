@@ -11,7 +11,7 @@
 | [`bizmap impact`](impact.md) | Maps a diff onto the graph: the routes and columns a change reaches (the PR comment). |
 | [`bizmap registry merge`](registry.md) | Joins graphs scanned separately into one, re-linking calls between them. |
 | [`bizmap mcp`](mcp.md) | Serves the graph to coding agents over MCP (read-only, offline). |
-| [`bizmap export`](export.md) | One self-contained, offline HTML page to read the system: services, domains, route call trees, tables, front-end screens. |
+| [`bizmap export`](export.md) | One self-contained, offline HTML page: opens on *who writes / reads X?* ([start screen](export-home.md)), then services, domains, route call trees, tables, front-end screens. |
 
 Every command that reads a graph takes `--graph PATH` (default
 `bizmap.graph.json` in the current folder). `bizmap --version` prints the

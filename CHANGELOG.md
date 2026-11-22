@@ -4,6 +4,48 @@
 
 ### Added
 
+- **HTML: a start screen that asks first.** `bizmap export --format html`
+  opens on *who writes / reads X?*: a big search (focused on open) that takes
+  a table, collection, column (`orders.status`), route, topic, service or
+  function, with the kind of each suggestion (`column · Postgres`,
+  `collection · Firestore`, `route`, `topic`). A table / collection / column
+  opens **Writes**, **Reads** and **Trace** tabs: *entrypoint → handler →
+  (via N functions) → writer* with columns, confidence, repo and
+  `file:line`, the full path on click, an *unexpected writer* badge, and the
+  CLI's *Could change this answer* lines. A name that means several things
+  lists its candidates (kind · store · repos) instead of picking one.
+- The answers come from the **CLI's query engine ported to the page**
+  (`query.js`, line by line from `query.py`) on the same graph: the same
+  `bizmap.query/v1` JSON as `bizmap who-writes / who-reads / trace --format
+  json`; tests compare them for every entity of a repro, a sample of a large
+  graph, and the CLI itself.
+- **Summary strip**: repos · services · tables / collections (by store) ·
+  entrypoints (by kind) · flows between stores · unresolved links — always
+  shown, even at 0 — each opening its list.
+- **Findings cards**: unexpected writer (owner = the service with the DDL /
+  migration, else the one with most writing functions), tables written by more
+  than one service, names built at runtime per service, orphan functions;
+  data mirrored between stores and written-never-read / read-never-written
+  when there are any. A kind with no finding says "none".
+- **Services × tables / collections matrix** (R / W / RW — L / E / LE in
+  pt-BR): dashed when only heuristic, ⚡ when the service also uses runtime
+  names; sortable, filterable by text, repo and store, top 30 columns + "show
+  more", sticky headers; a cell opens the answer for that service only.
+- **Map tab** centered on one table, collection, service or topic, 1–2 hops
+  (at most 150 nodes); it never draws the whole system.
+- **Show details** (intermediate functions / columns / tests and helpers):
+  hidden by default, each turned back on from the header; the choice goes in
+  the URL (`?d=ict`) and follows every link.
+- Large graphs: the index read on open stays small (summary, cards, one
+  record per table); the engine's graph is parsed on the first question;
+  answers page 100 lines, the matrix 30 columns, suggestions 12.
+- Docs: [the start screen](docs/commands/export-home.md), with screenshots.
+- `--no-cache` / `BIZMAP_NO_CACHE=1` and `--cache-dir DIR` /
+  `BIZMAP_CACHE_DIR` on the three query commands.
+- `bizmap scan` says, once per file, when it wrote `bizmap.graph.json` (or the
+  `.mmd`) inside a git repo that does not ignore it, with the `.gitignore` line
+  to add (`BIZMAP_NO_GITIGNORE_HINT=1` silences it). Docs: "Generated files and
+  what to ignore" in `docs/commands/scan.md`.
 - **Firebase Functions entrypoints in JS/TS** (#150): `https.onCall` /
   `onCall` (`firebase_call`), `https.onRequest` / `onRequest`
   (`firebase_http`), `onSchedule` and v1 `pubsub.schedule().onRun`
@@ -29,25 +71,17 @@
   type's other interface methods (`Run`, `Handle`), with their tables rolled
   up.
 
-- `--no-cache` / `BIZMAP_NO_CACHE=1` and `--cache-dir DIR` /
-  `BIZMAP_CACHE_DIR` on the three query commands.
-- `bizmap scan` says, once per file, when it wrote `bizmap.graph.json` (or the
-  `.mmd`) inside a git repo that does not ignore it, with the `.gitignore` line
-  to add (`BIZMAP_NO_GITIGNORE_HINT=1` silences it). Docs: "Generated files and
-  what to ignore" in `docs/commands/scan.md`.
+### Changed
+
+- The services overview the page used to open on is **Services** (`#/system`).
 
 ### Fixed
 
-- **Namespaced Firestore triggers** (#149): `firestore.onDocumentCreated(…)` /
-  `firestoreV2.onDocumentUpdated(…)` were skipped; `document:` given as a
-  template with a constant (`` `${COLLECTION}/{id}` ``) is resolved.
-- **Batch / transaction writes with an in-place ref** (#154):
-  `` batch.update(db.doc(`orders/${id}`), …) `` and
-  `tx.set(db.collection('orders').doc(id), …)` are writes.
-- **Nested repos and worktrees are not walked** (#147): a directory with its
-  own `.git` (dir or file) inside a scanned repo is skipped (`skipped:
-  nested_repos`); `scan: include` brings it back.
-
+- Multi-repo graphs: shared queues (`queue:pubsub:<topic>`) no longer appear
+  as a service of their own (`app`) in the HTML.
+- `who-writes` / `who-reads` / `trace` (Python) accept an already resolved
+  entity, and `query.unresolved_footer` gives the closing lines as the text
+  output prints them (used by the export; output unchanged).
 - **The query index cache no longer lands in the user's repo.** `who-writes` /
   `who-reads` / `trace` wrote `bizmap.graph.idx` next to the graph (0.13.1):
   nothing ignored it, and on a big graph it passed 100 MB (a `git add .` then a
@@ -57,7 +91,15 @@
   path, the 16 most recent kept; it is used only while the graph keeps its
   path, size, mtime and a content fingerprint. A leftover `bizmap.graph.idx`
   is pointed out (not used, not deleted).
-
+- **Namespaced Firestore triggers** (#149): `firestore.onDocumentCreated(…)` /
+  `firestoreV2.onDocumentUpdated(…)` were skipped; `document:` given as a
+  template with a constant (`` `${COLLECTION}/{id}` ``) is resolved.
+- **Batch / transaction writes with an in-place ref** (#154):
+  `` batch.update(db.doc(`orders/${id}`), …) `` and
+  `tx.set(db.collection('orders').doc(id), …)` are writes.
+- **Nested repos and worktrees are not walked** (#147): a directory with its
+  own `.git` (dir or file) inside a scanned repo is skipped (`skipped:
+  nested_repos`); `scan: include` brings it back.
 
 ## 0.13.1 — 2026-11-21
 
