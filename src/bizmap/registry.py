@@ -92,6 +92,36 @@ def qualify_graph(graph: Graph, repo: str | None = None, *, share_data: bool = F
     return out
 
 
+_DATA_TYPES = {"table", "view", "collection", "column"}
+
+
+def _stable_owners(merged: Graph) -> None:
+    """A table / collection shared by several repos took the `repo` of
+    whichever graph came first. Make it stable: the repo that writes it most
+    (ties: alphabetical; nobody writes: the one that reads it most), and list
+    every repo that uses it in `used_by`."""
+    writes: dict[str, dict[str, int]] = {}
+    reads: dict[str, dict[str, int]] = {}
+    for e in merged.edges.values():
+        if e.type not in ("writes", "reads") or e.attrs.get("derived"):
+            continue
+        node = merged.nodes.get(e.to_id)
+        if node is None or node.type not in _DATA_TYPES or "/" in e.to_id.split(":", 1)[0]:
+            continue  # only shared (unprefixed) data nodes
+        src = merged.nodes.get(e.from_id)
+        repo = str((src.attrs.get("repo") if src else None) or e.from_id.split("/", 1)[0])
+        bucket = writes if e.type == "writes" else reads
+        bucket.setdefault(e.to_id, {})[repo] = bucket.setdefault(e.to_id, {}).get(repo, 0) + 1
+    for nid in set(writes) | set(reads):
+        node = merged.nodes[nid]
+        w, r = writes.get(nid, {}), reads.get(nid, {})
+        users = sorted(set(w) | set(r))
+        pool = w or r
+        node.attrs["repo"] = sorted(pool.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        if len(users) > 1:
+            node.attrs["used_by"] = users
+
+
 def merge_graphs(graphs: list[Graph], *, version: str | None = None) -> Graph:
     """Merge graphs. Tables/collections share ids when ``database`` matches."""
     merged = Graph()
@@ -167,6 +197,7 @@ def merge_graphs(graphs: list[Graph], *, version: str | None = None) -> Graph:
                 evidence=edge.evidence,
                 **edge.attrs,
             )
+    _stable_owners(merged)
     merged.schema = {"tables": schema_tables}
     if schema_views:
         merged.schema["views"] = schema_views

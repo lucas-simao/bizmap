@@ -140,9 +140,14 @@ class FunctionImpact:
     entrypoints: list[str] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)
     reads: list[str] = field(default_factory=list)
+    # a pure helper (writes nothing itself): what its direct callers write,
+    # caller id -> data ids ("via PlaceOrder: orders")
+    caller_writes: dict[str, list[str]] = field(default_factory=dict)
+    # reached because it uses a changed package-level constant, not because its lines changed
+    via_consts: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "function": self.function,
             "file": self.file,
             "lines": self.lines,
@@ -150,6 +155,11 @@ class FunctionImpact:
             "writes": self.writes,
             "reads": self.reads,
         }
+        if self.caller_writes:
+            out["caller_writes"] = self.caller_writes
+        if self.via_consts:
+            out["via_consts"] = self.via_consts
+        return out
 
 
 @dataclass
@@ -285,6 +295,142 @@ def _changed_functions(graph: Graph, changes: dict[str, set[int]], prefix: str) 
             _start, _end, nid = min(inside, key=lambda s: (s[1] - s[0], -s[0]))
             hits.setdefault(nid, set()).add(ln)
     return {k: sorted(v) for k, v in hits.items()}, unmapped
+
+
+def _caller_writes(
+    graph: Graph, nid: str, in_idx: dict[str, list[Any]], out_idx: dict[str, list[Any]], limit: int = 5
+) -> dict[str, list[str]]:
+    """A changed function that writes nothing (a pure rule: `DiscountCents`):
+    the data its *direct* callers write themselves (`PlaceOrder` → `orders`),
+    where the result most likely lands."""
+    out: dict[str, list[str]] = {}
+    callers = sorted({e.from_id for e in in_idx.get(nid, []) if e.type in _CALL_EDGES and not e.attrs.get("derived")})
+    for caller in callers:
+        node = graph.get(caller)
+        if node is None or node.type != "function":
+            continue
+        own = sorted({
+            e.to_id for e in out_idx.get(caller, [])
+            if e.type == "writes" and not e.attrs.get("derived") and _known([e.to_id])
+        })
+        if own:
+            out[caller] = own
+        if len(out) >= limit:
+            break
+    return out
+
+
+# a package-level constant / variable declared on a changed line
+_CONST_DECL = {
+    ".go": re.compile(r"^\s*(?:const\s+|var\s+)?([A-Za-z_]\w*)\s*(?:[\w.*\[\]]+\s*)?=(?!=)"),
+    ".py": re.compile(r"^([A-Za-z_]\w*)\s*(?::[^=]+)?=(?!=)"),
+    ".js": re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=(?!=)"),
+}
+for _ext in (".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"):
+    _CONST_DECL[_ext] = _CONST_DECL[".js"]
+_CONST_SKIP = {"_", "err", "ctx", "init", "main"}
+
+
+def _added_lines(diff_text: str) -> dict[str, dict[int, str]]:
+    """``{new_path: {new line: text}}`` of the added lines."""
+    out: dict[str, dict[int, str]] = {}
+    path: str | None = None
+    line = 0
+    for raw in diff_text.splitlines():
+        if raw.startswith("+++ "):
+            p = raw[4:].strip()
+            path = None if p == "/dev/null" else (p[2:] if p.startswith(("a/", "b/")) else p).strip('"')
+            continue
+        if raw.startswith("@@"):
+            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", raw)
+            line = int(m.group(1)) if m else 0
+            continue
+        if path is None or raw.startswith(("--- ", "diff --git", "index ")):
+            continue
+        if raw.startswith("+"):
+            out.setdefault(path, {})[line] = raw[1:]
+            line += 1
+        elif raw.startswith(" "):
+            line += 1
+    return out
+
+
+def _const_users(
+    graph: Graph, diff_text: str, changes: dict[str, set[int]], hits: dict[str, list[int]], prefix: str,
+    repo_root: Path | None, max_files: int = 2000,
+) -> dict[str, list[str]]:
+    """Functions that use a package-level constant changed outside any
+    function (`const GoldDiscountPct = 12`): function id → constant names.
+    Go: functions of the same package (folder); Python / JS / TS: of the same
+    repo. Needs the sources (``repo_root``, else the current folder)."""
+    added = _added_lines(diff_text)
+    spans: dict[str, list[tuple[int, int, str]]] = {}
+    for nid, node in graph.nodes.items():
+        if node.type != "function":
+            continue
+        start = node.attrs.get("start_line") or (node.attrs.get("evidence") or {}).get("line")
+        end = node.attrs.get("end_line")
+        path = _function_file(node, graph, prefix)
+        if path and isinstance(start, int) and isinstance(end, int) and end >= start:
+            spans.setdefault(path, []).append((start, end, nid))
+    names: dict[str, set[str]] = {}  # changed file -> const names
+    for path, lines in added.items():
+        rx = _CONST_DECL.get(PurePosixPath(path).suffix.lower())
+        file_spans = spans.get(_norm(path))
+        if rx is None or file_spans is None:
+            continue
+        for ln, text in lines.items():
+            if any(s <= ln <= e for s, e, _n in file_spans):
+                continue  # inside a function: already mapped
+            m = rx.match(text)
+            if m and m.group(1) not in _CONST_SKIP and len(m.group(1)) > 1:
+                names.setdefault(_norm(path), set()).add(m.group(1))
+    if not names:
+        return {}
+    root = Path(repo_root) if repo_root is not None else Path.cwd()
+    texts: dict[str, list[str] | None] = {}
+
+    def lines_of(path: str) -> list[str] | None:
+        if path not in texts:
+            if len(texts) >= max_files:
+                return None
+            try:
+                texts[path] = (root / path).read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                texts[path] = None
+        return texts[path]
+
+    def repo_dir(path: str) -> str:
+        roots = sorted((graph.attrs.get("repo_roots") or {}).values(), key=len, reverse=True)
+        for r in roots:
+            r = str(r).strip("/")
+            if r in ("", ".") or path == r or path.startswith(r + "/"):
+                return "" if r in ("", ".") else r
+        return ""
+
+    out: dict[str, set[str]] = {}
+    for cpath, cnames in names.items():
+        is_go = cpath.endswith(".go")
+        scope = str(PurePosixPath(cpath).parent) if is_go else repo_dir(cpath)
+        pattern = re.compile(r"(?<![\w$.])(" + "|".join(re.escape(n) for n in sorted(cnames)) + r")(?![\w$])")
+        for path, file_spans in spans.items():
+            if is_go:
+                if not path.endswith(".go") or str(PurePosixPath(path).parent) != scope:
+                    continue
+            elif scope and not path.startswith(scope + "/"):
+                continue
+            elif PurePosixPath(path).suffix.lower() == ".go":
+                continue
+            lines = lines_of(path)
+            if not lines:
+                continue
+            for start, end, nid in file_spans:
+                if nid in hits:
+                    continue
+                body = "\n".join(lines[start - 1 : end])
+                for m in pattern.finditer(body):
+                    out.setdefault(nid, set()).add(m.group(1))
+    return {k: sorted(v) for k, v in out.items()}
 
 
 def _edge_indexes(graph: Graph) -> tuple[dict[str, list[Any]], dict[str, list[Any]]]:
@@ -593,6 +739,9 @@ def compute_impact(
     hits, unmapped = _changed_functions(graph, changes, prefix)
     out: list[FunctionImpact] = []
     out_idx, in_idx = _edge_indexes(graph)
+    const_users = _const_users(graph, diff_text, changes, hits, prefix, repo_root)
+    for nid in const_users:
+        hits.setdefault(nid, [])
     for nid, lines in sorted(hits.items()):
         node = graph.nodes[nid]
         writes, reads = _data_reached(graph, nid, out_idx)
@@ -605,6 +754,8 @@ def compute_impact(
                 entrypoints=sorted(_entrypoints_reaching(graph, nid, in_idx)),
                 writes=sorted(writes),
                 reads=sorted(reads),
+                caller_writes={} if writes else _caller_writes(graph, nid, in_idx, out_idx),
+                via_consts=sorted(const_users.get(nid, [])),
             )
         )
     hint = None
@@ -756,6 +907,37 @@ def _known(ids: list[str]) -> list[str]:
     return [i for i in ids if i.rpartition("/")[2] != "table:unknown"]
 
 
+def _via_groups(graph: Graph, ids: list[str], hint: str = "") -> list[tuple[str, list[str]]]:
+    """``[(table label, columns)]`` of a caller's writes, the table and the columns that
+    look like the changed function (`DiscountCents` → `discount_cents`) first."""
+    want = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", hint.rsplit(".", 1)[-1]).lower()
+
+    def near(col: str) -> bool:
+        c = col.lower()
+        return bool(want) and len(c) >= 3 and (c == want or c in want or want in c)
+
+    cols: dict[str, set[str]] = {}
+    for nid in _known(ids):
+        col = _column_of(nid)
+        cols.setdefault(_table_of(nid), set())
+        if col:
+            cols[_table_of(nid)].add(col)
+    out = [(_label(graph, t), sorted(cs, key=lambda c: (not near(c), c))) for t, cs in cols.items()]
+    out.sort(key=lambda tc: (not any(near(c) for c in tc[1]), tc[0]))
+    return out
+
+
+def _via_text(groups: list[tuple[str, list[str]]], n_tables: int = 3, n_cols: int = 4) -> str:
+    """`orders` (discount_cents, id, …), `audit_log` (action, …)"""
+    parts = []
+    for label, cols in groups[:n_tables]:
+        shown = ", ".join(cols[:n_cols]) + (", …" if len(cols) > n_cols else "")
+        parts.append(_code(label) + (f" ({shown})" if shown else ""))
+    if len(groups) > n_tables:
+        parts.append(f"+{len(groups) - n_tables}")
+    return ", ".join(parts)
+
+
 def _tables_only(ids: list[str]) -> list[str]:
     """Collapse columns into their table for the diagram."""
     out: set[str] = set()
@@ -872,6 +1054,7 @@ class _Facts:
     """What the comment shows, gathered once from the graph."""
 
     tables: dict[str, _TableUse]
+    via_tables: dict[str, _TableUse]  # written only by the callers of a changed pure function
     services: dict[str, list[str]]  # table → services (repos) that read/write it
     ep_fns: dict[str, set[str]]  # entrypoint → changed functions it reaches
     direct: set[str]  # entrypoints whose own handler changed
@@ -1068,11 +1251,36 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
             notes.append(f"{_code(_label(graph, ep))}: route path not fully resolved")
         elif str(node.attrs.get("confidence") or "") == "unknown":
             notes.append(f"{_code(_label(graph, ep))}: handler not resolved")
+    for fi in impact.functions:
+        if fi.caller_writes:
+            via_txt = "; ".join(
+                f"via {_code(_short_fn(graph, c))}: " + _via_text(_via_groups(graph, ids, fi.function))
+                for c, ids in sorted(fi.caller_writes.items())[:3]
+            )
+            notes.append(f"{_code(_short_fn(graph, fi.function))} writes nothing itself; its callers write: {via_txt}")
+    via_tables: dict[str, _TableUse] = {}
+    for fi in impact.functions:
+        for caller, ids in fi.caller_writes.items():
+            for nid in _known(ids):
+                t = _table_of(nid)
+                if t in tables and tables[t].write:
+                    continue  # the change writes it itself
+                use = via_tables.setdefault(t, _TableUse(write=True))
+                col = _column_of(nid)
+                if col:
+                    use.written.add(col)
+                use.functions.add(caller)
+    consts: dict[str, list[str]] = {}
+    for fi in impact.functions:
+        for c in fi.via_consts:
+            consts.setdefault(c, []).append(_short_fn(graph, fi.function))
+    for c, fns in sorted(consts.items()):
+        notes.append(f"{_code(c)} changed outside any function; used by {_names(sorted(fns), 4)}")
     notes += call_notes
 
     columns = len({w for f in impact.functions for w in _known(f.writes + f.reads) if _column_of(w)})
     facts = _Facts(
-        tables=tables, services=services, ep_fns=ep_fns, direct=direct, fired=fired,
+        tables=tables, via_tables=via_tables, services=services, ep_fns=ep_fns, direct=direct, fired=fired,
         table_triggers=table_triggers,
         no_effect=no_effect,
         cannot_fire=cannot_fire,
@@ -1156,11 +1364,22 @@ def _risk(graph: Graph, impact: Impact, facts: _Facts, shared_services: int) -> 
             )
         else:
             reasons.append(("low", f"writes {len(written)} {_plural(len(written), 'table')}, not reached from any entrypoint"))
-    elif facts.tables:
-        n = len(facts.tables)
-        reasons.append(("low", f"only reads data ({n} {_plural(n, 'table')})"))
-    elif n_eps:
-        reasons.append(("low", f"reaches {n_eps} {_plural(n_eps, 'entrypoint')}, no table"))
+    else:
+        if facts.via_tables:
+            # a pure rule: its result lands where its callers write
+            n = len(facts.via_tables)
+            callers = sorted({c for u in facts.via_tables.values() for c in u.functions})
+            via = _names([_short_fn(graph, c) for c in callers], 3)
+            what = f"writes {n} {_plural(n, 'table')} via callers ({via})"
+            if n_eps:
+                reasons.append(("medium", f"{what} reached from {n_eps} {_plural(n_eps, 'entrypoint')}"))
+            else:
+                reasons.append(("low", f"{what}, not reached from any entrypoint"))
+        if facts.tables:
+            n = len(facts.tables)
+            reasons.append(("low", f"only reads data ({n} {_plural(n, 'table')})"))
+        elif n_eps and not facts.via_tables:
+            reasons.append(("low", f"reaches {n_eps} {_plural(n_eps, 'entrypoint')}, no table"))
     other_schema = [c for c in impact.schema_changes if not c.risky and c.op != "trigger"]
     if other_schema:
         ops = ", ".join(sorted({c.op for c in other_schema}))
@@ -1471,12 +1690,22 @@ def render_markdown(
     kind_txt = ", ".join(f"{c} {_plural(c, w)}" for w, c in sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0])))
     n_w = len([t for t, u in facts.tables.items() if u.write])
     n_r = len([t for t, u in facts.tables.items() if u.read_any])
+    n_v = len(facts.via_tables)
+    n_vc = sum(len(u.written) for u in facts.via_tables.values())
     n_fn = len(impact.functions)
+
+    def writes_txt(bold: bool = True) -> str:
+        b = "**" if bold else ""
+        if n_v and not n_w:
+            return f"writes {b}{n_v}{b} {_plural(n_v, 'table')} via callers"
+        return f"writes {b}{n_w}{b} {_plural(n_w, 'table')}" + (f" (+{b}{n_v}{b} via callers)" if n_v else "")
+
+    cols_txt = f"**{facts.columns}** {_plural(facts.columns, 'column')}" + (f" (+{n_vc} via callers)" if n_vc else "")
     summary = (
         f"**{len(eps)}** {_plural(len(eps), 'entrypoint')}"
         + (f" ({kind_txt})" if kind_txt else "")
-        + f" · writes **{n_w}** {_plural(n_w, 'table')} · reads **{n_r}** {_plural(n_r, 'table')}"
-        + f" · **{facts.columns}** {_plural(facts.columns, 'column')}"
+        + f" · {writes_txt()} · reads **{n_r}** {_plural(n_r, 'table')}"
+        + f" · {cols_txt}"
         + (f" — from **{n_fn}** changed {_plural(n_fn, 'function')}" if n_fn else "")
     )
     if impact.functions:
@@ -1520,8 +1749,21 @@ def render_markdown(
             labels.append(f"+{total - 8}")
         return "<br>".join(labels)
 
+    def writes_cell(fi: FunctionImpact) -> str:
+        if fi.writes or not fi.caller_writes:
+            return cell(fi.writes, data=True)
+        # a pure rule: where its result is written, by the callers that write it
+        parts = [
+            f"via {_code(_short_fn(graph, c))}: " + _via_text(_via_groups(graph, ids, fi.function), 4, 6)
+            for c, ids in sorted(fi.caller_writes.items())[:3]
+        ]
+        more = f" +{len(fi.caller_writes) - 3}" if len(fi.caller_writes) > 3 else ""
+        return "—<br><sub>" + "; ".join(parts) + more + "</sub>"
+
     def fn_cell(fi: FunctionImpact) -> str:
         label = _code(_label(graph, fi.function))
+        if fi.via_consts:
+            label += "<br><sub>uses changed " + ", ".join(_code(c) for c in fi.via_consts[:3]) + "</sub>"
         callers = sorted(via.get(fi.function, []))
         if callers:
             names = ", ".join(_code(_short_fn(graph, c)) for c in callers[:3])
@@ -1551,7 +1793,7 @@ def render_markdown(
         return _details(f"<b>Entrypoints</b> · {len(eps)}", rows)
 
     def data_section(cap: int) -> list[str]:
-        if not facts.tables:
+        if not facts.tables and not facts.via_tables:
             return []
         order = sorted(
             facts.tables,
@@ -1580,8 +1822,24 @@ def render_markdown(
             rows.append(f"| {name} | {w} | {r} | {_names(fns, 3)} |")
         if len(order) > cap:
             rows.append(f"\n+{len(order) - cap} more {_plural(len(order) - cap, 'table')}.")
+        room = max(cap - len(order[:cap]), 3)
+        hinted = [lbl for fi in impact.functions if fi.caller_writes
+                  for ids in fi.caller_writes.values() for lbl, _c in _via_groups(graph, ids, fi.function)]
+        rank = {lbl: k for k, lbl in reversed(list(enumerate(hinted)))}
+        via_order = sorted(facts.via_tables, key=lambda t: (rank.get(_label(graph, t), len(rank)), _label(graph, t)))
+        for t in via_order[:room]:
+            use = facts.via_tables[t]
+            callers = ", ".join(_code(_short_fn(graph, c)) for c in sorted(use.functions)[:2])
+            name = f"**{_code(_label(graph, t))}** <sub>via {callers}</sub>"
+            w = ", ".join(sorted(use.written)[:8]) if use.written else "_table_"
+            if len(use.written) > 8:
+                w += f", +{len(use.written) - 8}"
+            pure = sorted({fi.function for fi in impact.functions if any(c in fi.caller_writes for c in use.functions)})
+            rows.append(f"| {name} | {w} | — | {_names(_first_labels(graph, set(pure), 3), 3)} |")
+        if len(via_order) > room:
+            rows.append(f"\n+{len(via_order) - room} more via callers.")
         return _details(
-            f"<b>Data</b> · writes {n_w} · reads {n_r} · {facts.columns} {_plural(facts.columns, 'column')}", rows
+            f"<b>Data</b> · {writes_txt(False) if n_v else f'writes {n_w}'} · reads {n_r} · {facts.columns} {_plural(facts.columns, 'column')}", rows
         )
 
     def downstream_section(cap: int) -> list[str]:
@@ -1647,13 +1905,13 @@ def render_markdown(
         rows = [
             f"**{n_fn}** changed {_plural(n_fn, 'function')}{folded_note} · "
             f"**{len(impact.entrypoints)}** {_plural(len(impact.entrypoints), 'entrypoint')} · "
-            f"writes **{n_w}** {_plural(n_w, 'table')} · reads **{n_r}** {_plural(n_r, 'table')}"
+            f"{writes_txt()} · reads **{n_r}** {_plural(n_r, 'table')}"
         ]
         if shown:
             rows += ["", "| Changed function | Where | Entrypoints | Writes | Reads |", "|---|---|---|---|---|"]
             rows += [
                 f"| {fn_cell(fi)} | {fn_where(fi)} | {cell(fi.entrypoints)} | "
-                f"{cell(fi.writes, data=True)} | {cell(fi.reads, data=True)} |"
+                f"{writes_cell(fi)} | {cell(fi.reads, data=True)} |"
                 for fi in shown
             ]
         tail: list[str] = []

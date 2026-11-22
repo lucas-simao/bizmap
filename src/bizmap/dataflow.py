@@ -1807,7 +1807,7 @@ class Analyzer:
                             for t in tables:
                                 self._record_fields(t, sub, orm=True)
                     if not any(isinstance(payload.fields.get(k), Obj) for k in ("data", "create", "update", "values", "set", "$set")):
-                        flat = Obj({k: v for k, v in payload.fields.items() if k not in ("where", "select", "include")})
+                        flat = Obj({k: v for k, v in payload.fields.items() if k not in ("where", "select", "include")}, payload.type_name)
                         for t in tables:
                             self._record_fields(t, flat, orm=True)
                     return None
@@ -2037,11 +2037,17 @@ class Analyzer:
                 self.writes.append(WriteEvent(fn=self.fn.fid, target=target, col=None, srcs=srcs, file=self.fn.file, line=self.line))
             return
         cols = self.ctx.columns(target) if orm else None
+        if payload.type_name and _bare(target).startswith("collection:"):
+            # a Go struct written to Firestore: its `firestore:"…"` tags name the document fields
+            tags = self.ctx.fs_tags.get(payload.type_name) or {}
+            if tags:
+                payload = Obj({tags.get(k, k): v for k, v in payload.fields.items()}, payload.type_name)
         for key, v in payload.fields.items():
             srcs = sources(v)
             if not srcs:
                 continue
-            col = key.lower()
+            # Firestore fields keep their case (`orderId`); SQL columns are case-folded
+            col = key if _bare(target).startswith("collection:") else key.lower()
             if cols is not None:
                 snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower()
                 col = col if col in cols else (snake if snake in cols else None)
@@ -2477,7 +2483,10 @@ def _build_feeds(ctx: RepoContext, writes: list[WriteEvent], skip_queue: bool = 
             path = dedup
             direct = len(path) == 1
             key = (s.table, w.target)
-            bucket = pairs.setdefault(key, {"paths": {}, "entries": []})
+            bucket = pairs.setdefault(key, {"paths": {}, "entries": [], "triggered": False})
+            if any(_bare(f"collection:{(ctx.triggers.get(p) or {}).get('collection')}") == _bare(s.table) for p in path):
+                # a Firestore trigger on the source: the event document is what the write is made from
+                bucket["triggered"] = True
             ev = _evidence_dict(w.file, w.line, w.fn)
             pconf = "exact" if direct and not w.table_level else "heuristic"
             old = bucket["paths"].get(tuple(path))
@@ -2500,7 +2509,10 @@ def _build_feeds(ctx: RepoContext, writes: list[WriteEvent], skip_queue: bool = 
                 bucket["entries"].append(entry)
     for (src, dst), bucket in sorted(pairs.items()):
         entries = bucket["entries"]
-        if _fk_only(graph, src, dst, entries) or _ids_only(entries):
+        # only ids copied into a SQL table is a reference (`users.id -> orders.user_id`); a Firestore
+        # document carrying the id (`order_events.orderId`) or a write made by a trigger is a feed
+        id_ref = _ids_only(entries) and not bucket["triggered"] and not _bare(dst).startswith("collection:")
+        if _fk_only(graph, src, dst, entries) or id_ref:
             continue
         paths = sorted(bucket["paths"].items(), key=lambda kv: (-_conf_rank(kv[1][0]), len(kv[0]), kv[0]))
         if not entries:

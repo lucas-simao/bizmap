@@ -299,9 +299,22 @@ def format_why(graph: Graph, table_dot_column: str) -> str:
                 if nid.endswith(f"/table:{str(table).lower()}"):
                     tid = nid
                     break
+        col_prefix = tid.split("table:", 1)[0] + f"column:{str(table).lower()}."
+
+        def names_other_columns(fid: str, etype: str) -> bool:
+            """``fid`` lists its own columns of this table, and not this one
+            (`UPDATE orders SET status = …` does not write `discount_cents`)."""
+            own = [e for e in graph.outgoing(fid) if e.type == etype and e.to_id.lower().startswith(col_prefix.lower())]
+            return bool(own) and not any(e.to_id == cid for e in own)
+
         for edge in graph.incoming(tid, "writes"):
+            # a table-level copy on a caller (derived) or a writer of other columns is not this column's writer
+            if edge.attrs.get("derived") or names_other_columns(edge.from_id, "writes"):
+                continue
             writers.append(edge)
         for edge in graph.incoming(tid, "reads"):
+            if edge.attrs.get("derived") or names_other_columns(edge.from_id, "reads"):
+                continue
             readers.append(edge)
 
     def split_schema(edges):
