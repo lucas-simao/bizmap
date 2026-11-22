@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.0 — 2026-11-21
+
 ### Added
 
 - **HTML: a start screen that asks first.** `bizmap export --format html`
