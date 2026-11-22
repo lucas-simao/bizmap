@@ -907,6 +907,37 @@ def _known(ids: list[str]) -> list[str]:
     return [i for i in ids if i.rpartition("/")[2] != "table:unknown"]
 
 
+def _via_groups(graph: Graph, ids: list[str], hint: str = "") -> list[tuple[str, list[str]]]:
+    """``[(table label, columns)]`` of a caller's writes, the table and the columns that
+    look like the changed function (`DiscountCents` → `discount_cents`) first."""
+    want = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", hint.rsplit(".", 1)[-1]).lower()
+
+    def near(col: str) -> bool:
+        c = col.lower()
+        return bool(want) and len(c) >= 3 and (c == want or c in want or want in c)
+
+    cols: dict[str, set[str]] = {}
+    for nid in _known(ids):
+        col = _column_of(nid)
+        cols.setdefault(_table_of(nid), set())
+        if col:
+            cols[_table_of(nid)].add(col)
+    out = [(_label(graph, t), sorted(cs, key=lambda c: (not near(c), c))) for t, cs in cols.items()]
+    out.sort(key=lambda tc: (not any(near(c) for c in tc[1]), tc[0]))
+    return out
+
+
+def _via_text(groups: list[tuple[str, list[str]]], n_tables: int = 3, n_cols: int = 4) -> str:
+    """`orders` (discount_cents, id, …), `audit_log` (action, …)"""
+    parts = []
+    for label, cols in groups[:n_tables]:
+        shown = ", ".join(cols[:n_cols]) + (", …" if len(cols) > n_cols else "")
+        parts.append(_code(label) + (f" ({shown})" if shown else ""))
+    if len(groups) > n_tables:
+        parts.append(f"+{len(groups) - n_tables}")
+    return ", ".join(parts)
+
+
 def _tables_only(ids: list[str]) -> list[str]:
     """Collapse columns into their table for the diagram."""
     out: set[str] = set()
@@ -1023,6 +1054,7 @@ class _Facts:
     """What the comment shows, gathered once from the graph."""
 
     tables: dict[str, _TableUse]
+    via_tables: dict[str, _TableUse]  # written only by the callers of a changed pure function
     services: dict[str, list[str]]  # table → services (repos) that read/write it
     ep_fns: dict[str, set[str]]  # entrypoint → changed functions it reaches
     direct: set[str]  # entrypoints whose own handler changed
@@ -1207,10 +1239,22 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
     for fi in impact.functions:
         if fi.caller_writes:
             via_txt = "; ".join(
-                f"via {_code(_short_fn(graph, c))}: " + ", ".join(_code(_label(graph, t)) for t in ids[:4])
+                f"via {_code(_short_fn(graph, c))}: " + _via_text(_via_groups(graph, ids, fi.function))
                 for c, ids in sorted(fi.caller_writes.items())[:3]
             )
             notes.append(f"{_code(_short_fn(graph, fi.function))} writes nothing itself; its callers write: {via_txt}")
+    via_tables: dict[str, _TableUse] = {}
+    for fi in impact.functions:
+        for caller, ids in fi.caller_writes.items():
+            for nid in _known(ids):
+                t = _table_of(nid)
+                if t in tables and tables[t].write:
+                    continue  # the change writes it itself
+                use = via_tables.setdefault(t, _TableUse(write=True))
+                col = _column_of(nid)
+                if col:
+                    use.written.add(col)
+                use.functions.add(caller)
     consts: dict[str, list[str]] = {}
     for fi in impact.functions:
         for c in fi.via_consts:
@@ -1221,7 +1265,7 @@ def _gather(graph: Graph, impact: Impact, shared_services: int) -> _Facts:
 
     columns = len({w for f in impact.functions for w in _known(f.writes + f.reads) if _column_of(w)})
     facts = _Facts(
-        tables=tables, services=services, ep_fns=ep_fns, direct=direct, fired=fired,
+        tables=tables, via_tables=via_tables, services=services, ep_fns=ep_fns, direct=direct, fired=fired,
         table_triggers=table_triggers,
         no_effect=no_effect,
         cannot_fire=cannot_fire,
@@ -1295,11 +1339,22 @@ def _risk(graph: Graph, impact: Impact, facts: _Facts, shared_services: int) -> 
             )
         else:
             reasons.append(("low", f"writes {len(written)} {_plural(len(written), 'table')}, not reached from any entrypoint"))
-    elif facts.tables:
-        n = len(facts.tables)
-        reasons.append(("low", f"only reads data ({n} {_plural(n, 'table')})"))
-    elif n_eps:
-        reasons.append(("low", f"reaches {n_eps} {_plural(n_eps, 'entrypoint')}, no table"))
+    else:
+        if facts.via_tables:
+            # a pure rule: its result lands where its callers write
+            n = len(facts.via_tables)
+            callers = sorted({c for u in facts.via_tables.values() for c in u.functions})
+            via = _names([_short_fn(graph, c) for c in callers], 3)
+            what = f"writes {n} {_plural(n, 'table')} via callers ({via})"
+            if n_eps:
+                reasons.append(("medium", f"{what} reached from {n_eps} {_plural(n_eps, 'entrypoint')}"))
+            else:
+                reasons.append(("low", f"{what}, not reached from any entrypoint"))
+        if facts.tables:
+            n = len(facts.tables)
+            reasons.append(("low", f"only reads data ({n} {_plural(n, 'table')})"))
+        elif n_eps and not facts.via_tables:
+            reasons.append(("low", f"reaches {n_eps} {_plural(n_eps, 'entrypoint')}, no table"))
     other_schema = [c for c in impact.schema_changes if not c.risky and c.op != "trigger"]
     if other_schema:
         ops = ", ".join(sorted({c.op for c in other_schema}))
@@ -1610,12 +1665,22 @@ def render_markdown(
     kind_txt = ", ".join(f"{c} {_plural(c, w)}" for w, c in sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0])))
     n_w = len([t for t, u in facts.tables.items() if u.write])
     n_r = len([t for t, u in facts.tables.items() if u.read_any])
+    n_v = len(facts.via_tables)
+    n_vc = sum(len(u.written) for u in facts.via_tables.values())
     n_fn = len(impact.functions)
+
+    def writes_txt(bold: bool = True) -> str:
+        b = "**" if bold else ""
+        if n_v and not n_w:
+            return f"writes {b}{n_v}{b} {_plural(n_v, 'table')} via callers"
+        return f"writes {b}{n_w}{b} {_plural(n_w, 'table')}" + (f" (+{b}{n_v}{b} via callers)" if n_v else "")
+
+    cols_txt = f"**{facts.columns}** {_plural(facts.columns, 'column')}" + (f" (+{n_vc} via callers)" if n_vc else "")
     summary = (
         f"**{len(eps)}** {_plural(len(eps), 'entrypoint')}"
         + (f" ({kind_txt})" if kind_txt else "")
-        + f" · writes **{n_w}** {_plural(n_w, 'table')} · reads **{n_r}** {_plural(n_r, 'table')}"
-        + f" · **{facts.columns}** {_plural(facts.columns, 'column')}"
+        + f" · {writes_txt()} · reads **{n_r}** {_plural(n_r, 'table')}"
+        + f" · {cols_txt}"
         + (f" — from **{n_fn}** changed {_plural(n_fn, 'function')}" if n_fn else "")
     )
     if impact.functions:
@@ -1664,7 +1729,7 @@ def render_markdown(
             return cell(fi.writes, data=True)
         # a pure rule: where its result is written, by the callers that write it
         parts = [
-            f"via {_code(_short_fn(graph, c))}: " + ", ".join(_code(n) for n in data_labels(ids)[:4])
+            f"via {_code(_short_fn(graph, c))}: " + _via_text(_via_groups(graph, ids, fi.function), 4, 6)
             for c, ids in sorted(fi.caller_writes.items())[:3]
         ]
         more = f" +{len(fi.caller_writes) - 3}" if len(fi.caller_writes) > 3 else ""
@@ -1703,7 +1768,7 @@ def render_markdown(
         return _details(f"<b>Entrypoints</b> · {len(eps)}", rows)
 
     def data_section(cap: int) -> list[str]:
-        if not facts.tables:
+        if not facts.tables and not facts.via_tables:
             return []
         order = sorted(
             facts.tables,
@@ -1732,8 +1797,24 @@ def render_markdown(
             rows.append(f"| {name} | {w} | {r} | {_names(fns, 3)} |")
         if len(order) > cap:
             rows.append(f"\n+{len(order) - cap} more {_plural(len(order) - cap, 'table')}.")
+        room = max(cap - len(order[:cap]), 3)
+        hinted = [lbl for fi in impact.functions if fi.caller_writes
+                  for ids in fi.caller_writes.values() for lbl, _c in _via_groups(graph, ids, fi.function)]
+        rank = {lbl: k for k, lbl in reversed(list(enumerate(hinted)))}
+        via_order = sorted(facts.via_tables, key=lambda t: (rank.get(_label(graph, t), len(rank)), _label(graph, t)))
+        for t in via_order[:room]:
+            use = facts.via_tables[t]
+            callers = ", ".join(_code(_short_fn(graph, c)) for c in sorted(use.functions)[:2])
+            name = f"**{_code(_label(graph, t))}** <sub>via {callers}</sub>"
+            w = ", ".join(sorted(use.written)[:8]) if use.written else "_table_"
+            if len(use.written) > 8:
+                w += f", +{len(use.written) - 8}"
+            pure = sorted({fi.function for fi in impact.functions if any(c in fi.caller_writes for c in use.functions)})
+            rows.append(f"| {name} | {w} | — | {_names(_first_labels(graph, set(pure), 3), 3)} |")
+        if len(via_order) > room:
+            rows.append(f"\n+{len(via_order) - room} more via callers.")
         return _details(
-            f"<b>Data</b> · writes {n_w} · reads {n_r} · {facts.columns} {_plural(facts.columns, 'column')}", rows
+            f"<b>Data</b> · {writes_txt(False) if n_v else f'writes {n_w}'} · reads {n_r} · {facts.columns} {_plural(facts.columns, 'column')}", rows
         )
 
     def downstream_section(cap: int) -> list[str]:
@@ -1799,7 +1880,7 @@ def render_markdown(
         rows = [
             f"**{n_fn}** changed {_plural(n_fn, 'function')}{folded_note} · "
             f"**{len(impact.entrypoints)}** {_plural(len(impact.entrypoints), 'entrypoint')} · "
-            f"writes **{n_w}** {_plural(n_w, 'table')} · reads **{n_r}** {_plural(n_r, 'table')}"
+            f"{writes_txt()} · reads **{n_r}** {_plural(n_r, 'table')}"
         ]
         if shown:
             rows += ["", "| Changed function | Where | Entrypoints | Writes | Reads |", "|---|---|---|---|---|"]

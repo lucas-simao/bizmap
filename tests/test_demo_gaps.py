@@ -18,6 +18,8 @@ from bizmap.registry import merge_graphs
 from bizmap.why import format_why
 from test_action_comment import _diff, _ep, _fn
 from test_dataflow import PEDIDOS, _feeds, _graph
+from test_firestore_flow import _js_graph
+from test_go_cloud import _go_graph
 
 PRICING_GO = """package orders
 
@@ -61,7 +63,7 @@ def test_pure_rule_shows_what_its_callers_write() -> None:
     assert fi.writes == [] and fi.caller_writes == {"function:orders.Service.PlaceOrder": ["column:orders.discount_cents"]}
     assert fi.to_dict()["caller_writes"] == fi.caller_writes
     md = render_markdown(g, imp)
-    assert "via `Service.PlaceOrder`: `orders (discount_cents)`" in md or "via `PlaceOrder`" in md, md
+    assert "via `Service.PlaceOrder`: `orders` (discount_cents)" in md, md
     assert "writes nothing itself; its callers write" in md, md
 
 
@@ -168,3 +170,82 @@ def test_why_column_skips_writers_of_other_columns() -> None:
     writers = text.split("writers:", 1)[1].split("readers:", 1)[0]
     assert "PlaceOrder" in writers and "SetStatus" not in writers, text
     assert "Purge" in writers  # a table-level DELETE still touches every column
+
+
+# ── follow-up on #161 ─────────────────────────────────────────────────────────
+
+ORDERS_API_GO = {"internal/orders/events.go": """package orders
+
+import (
+\t"context"
+\t"cloud.google.com/go/firestore"
+)
+
+type OrderEvent struct {
+\tOrderID string `firestore:"orderId"`
+\tKind    string `firestore:"kind,omitempty"`
+\tTotal   int64
+}
+
+type Repo struct{ db *sql.DB; client *firestore.Client }
+
+func (r *Repo) Emit(ctx context.Context, id string) error {
+\tvar total int64
+\tif err := r.db.QueryRowContext(ctx, "SELECT id, total_cents FROM orders WHERE id = $1", id).Scan(&id, &total); err != nil { return err }
+\t_, _, err := r.client.Collection("order_events").Add(ctx, OrderEvent{OrderID: id, Kind: "created", Total: total})
+\treturn err
+}
+"""}
+
+SHOP_FUNCTIONS_TS = {"src/index.ts": """import { onDocumentCreated } from 'firebase-functions/v2/firestore';
+import { getFirestore } from 'firebase-admin/firestore';
+const db = getFirestore();
+export const notifyOrder = onDocumentCreated('order_events/{eventId}', async (event) => {
+  const data = event.data?.data();
+  if (!data) return;
+  await db.collection('notifications').add({ orderId: data.orderId, sentAt: new Date() });
+});
+"""}
+
+
+def test_go_struct_written_to_firestore_uses_its_firestore_tags(tmp_path: Path) -> None:
+    g, _ = _go_graph(
+        tmp_path / "orders-api", ORDERS_API_GO, repo="orders-api",
+        edges=(("reads", "internal/orders.Repo.Emit", "column:orders.total_cents", "internal/orders/events.go", "r.db.QueryRowContext"),),
+        schema={"orders": ["id", "total_cents"]},
+    )
+    (_conf, cols), = [v for k, v in _feeds(g).items() if k == ("table:orders", "collection:order_events")]
+    # the tag names the document field; an untagged field keeps the Go name
+    assert {(a, b) for a, b, _c, _t in cols} == {("id", "orderId"), ("total_cents", "Total")}, cols
+
+
+def test_trigger_feed_between_collections_survives_an_id_only_copy(tmp_path: Path) -> None:
+    g = _js_graph(tmp_path / "functions", SHOP_FUNCTIONS_TS, repo="functions")
+    feeds = _feeds(g)
+    assert ("collection:order_events", "collection:notifications") in feeds, feeds
+    _conf, cols = feeds[("collection:order_events", "collection:notifications")]
+    assert {(a, b) for a, b, _c, _t in cols} == {("orderId", "orderId")}, cols
+
+
+def test_pure_rule_counts_callers_writes_in_summary_why_and_data() -> None:
+    g = _pricing_graph()
+    place = "function:orders.Service.PlaceOrder"
+    g.add_node("table:audit_log", "table", name="audit_log")
+    for c in ("actor", "action", "at", "entity"):
+        g.add_node(f"column:audit_log.{c}", "column", table="audit_log", name=c)
+        g.add_edge("writes", place, f"column:audit_log.{c}", evidence=Evidence("orders/service.go", 25, ""))
+    for c in ("id", "subtotal_cents"):
+        g.add_node(f"column:orders.{c}", "column", table="orders", name=c)
+        g.add_edge("writes", place, f"column:orders.{c}", evidence=Evidence("orders/service.go", 30, ""))
+    md = render_markdown(g, compute_impact(g, _diff(("orders/pricing.go", 10))))
+    assert "writes **2** tables via callers" in md, md
+    assert "writes **0** tables" not in md, md
+    assert "no table" not in md, md
+    assert "writes 2 tables via callers (`Service.PlaceOrder`) reached from 1 entrypoint" in md, md
+    assert "<b>Data</b> · writes 2 tables via callers · reads 0" in md, md
+    assert "| **`orders`** <sub>via `Service.PlaceOrder`</sub> | discount_cents, id, subtotal_cents |" in md, md
+    # the note groups by table, the table the rule feeds first, nothing hidden by a column cap
+    assert (
+        "its callers write: via `Service.PlaceOrder`: `orders` (discount_cents, id, subtotal_cents), "
+        "`audit_log` (action, actor, at, entity)"
+    ) in md, md

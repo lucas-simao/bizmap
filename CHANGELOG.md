@@ -6,8 +6,11 @@
 
 - **A pure rule shows where its result lands**: a changed function that
   writes nothing itself (`DiscountCents`) lists what its direct callers
-  write — "via `PlaceOrder`: `orders (discount_cents)`" in the Writes column
-  and in the notes (`caller_writes` in the impact JSON).
+  write — "via `PlaceOrder`: `orders` (discount_cents, …), `audit_log` (…)",
+  grouped by table, the table the rule feeds first, in the Writes column and
+  the notes (`caller_writes` in the impact JSON). The summary line, the "Why"
+  reasons and the Data section count those writes, marked as via callers
+  ("writes 2 tables via callers"), instead of "writes 0 tables … no table".
 - **A changed package-level constant** (`const GoldDiscountPct = 12`, a
   Python `GOLD_PCT = 12`, a TS `export const MAX_ITEMS = 5`) changed outside
   any function maps to the functions that use it — Go: the same package;
@@ -17,7 +20,13 @@
 ### Fixed (demo repos)
 
 - Firestore field names keep their case in `feeds` column maps (`orderId`,
-  not `orderid`).
+  not `orderid`). A Go struct written to Firestore (`Add(ctx, OrderEvent{…})`)
+  is named by its `firestore:"…"` tags (`orderId`), the Go field name only
+  when untagged.
+- A `feeds` edge collection → collection made by a Firestore trigger on the
+  source (`onDocumentCreated('order_events/{id}')` writing `notifications`)
+  is kept even when only an id is copied (`orderId` → `orderId`); id-only
+  copies elsewhere are still a reference, not a feed.
 - The repo shown for a table / collection shared by several repos no longer
   depends on the repo order: the one that writes it most (ties alphabetical;
   nobody writes: the top reader), with `used_by` listing every repo.
