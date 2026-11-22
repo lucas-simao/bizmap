@@ -93,6 +93,11 @@ stderr (including the `serving …` line or the error) is in
 
 All tools are annotated read-only, idempotent and closed-world.
 
+> `who-writes`, `who-reads` and `trace` are **command-line only for now** —
+> they are not MCP tools yet. The closest tool is
+> [`table_usage`](#table_usage) (every reader and writer of a table or
+> column); `call_graph` and `function_data` cover the rest of a trace.
+
 **Naming things.** Wherever a tool takes `function`, pass an id returned by
 `search` (`function:orders.markPaid`, `api/entrypoint:http:POST:/orders`), a
 function name or its last part (`markPaid`), or a route as `METHOD /path`

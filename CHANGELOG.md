@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Docs
+
+- Landing pages and references caught up with 0.13–0.14.1: the home page,
+  getting started and the README lead with `who-writes` / `trace` and the
+  HTML start screen (new hero image); `languages.md`, `detector-rules.md` and
+  `how-it-works.md` cover Firebase Functions entrypoints, deployed names,
+  `httpsCallable` links, built Firestore doc paths, trigger events and Go
+  helper routes; `scan.md`, the FAQ and the configuration explain skipped
+  nested repos and `scan: include`; `mcp.md` says the query commands are not
+  MCP tools yet (`table_usage` is the closest).
+
 ## 0.14.1 — 2026-11-21
 
 ### Fixed (after #155)

@@ -14,9 +14,20 @@ It is static and deterministic: no LLM, no tokens, no account, no server.
 
 ```bash
 pipx install bizmap
-bizmap scan . --mermaid        # writes bizmap.graph.json (+ .mmd)
-bizmap why orders.status       # every writer, reader, trigger and caller
+bizmap scan . --mermaid               # writes bizmap.graph.json (+ .mmd)
+bizmap who-writes orders.status       # entrypoint → via N functions → the writer, file:line
+bizmap trace orders                   # where the data comes from and where it goes
+bizmap export --format html           # one offline page that opens on "who writes / reads X?"
 ```
+
+`who-writes` / `who-reads` / `trace` answer from the graph in about a second,
+in text, Markdown or JSON ([query commands](commands/query.md)). The HTML page
+asks the same question first — a big search, findings, a services × tables
+matrix and a map around what you pick ([start screen](commands/export-home.md)).
+
+![The HTML start screen answering who writes orders.status](img/home-answer.png){ .shot }
+
+`bizmap why orders.status` still prints everything around one column at once:
 
 ![bizmap scan and bizmap why on bizmap-demo](assets/demo/hero.gif){ .shot }
 
@@ -32,7 +43,7 @@ bizmap why orders.status       # every writer, reader, trigger and caller
 
 -   :material-console: **[Commands](commands/index.md)**
 
-    `scan`, `why`, `report`, `impact`, `registry`, `mcp`.
+    `scan`, `who-writes` / `who-reads` / `trace`, `export`, `why`, `report`, `impact`, `registry`, `mcp`.
 
 -   :material-source-pull: **[GitHub Action](github-action.md)**
 
@@ -70,7 +81,8 @@ and the GitHub Action running on its pull requests.
 ```bash
 git clone https://github.com/lucas-simao/bizmap-demo && cd bizmap-demo
 bizmap scan . --mermaid
-bizmap why orders.status
+bizmap who-writes orders.status
+bizmap export --format html --out bizmap.html
 ```
 
 The walk-through is in [Getting started](getting-started.md).

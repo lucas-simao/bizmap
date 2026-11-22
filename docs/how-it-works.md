@@ -164,6 +164,24 @@ Detector-by-detector detail. Graph format: [graph-schema.md](graph-schema.md). Y
    `pkg.Name`). `--exclude GLOB`
    merges with YAML. `--profile` times each scan phase.
 
+### Firebase Functions, callables and Go helpers (0.14)
+
+- **Firebase Functions (JS/TS)** become entrypoints keyed by their deployed
+  name (`orders-markPaid`), followed from the functions entry file through
+  `exports.g = require()` / `export … from`. `httpsCallable(fns,
+  'orders-markPaid')` in a web or mobile client links to that function, so
+  `who-writes` and `trace` reach from the client's function to the data the
+  callable writes.
+- **Firestore built doc paths** — `` `${ORDERS}/${id}` ``, `'notes/' + id`,
+  batch / transaction refs and a direct `db.doc(path).set()` — resolve to
+  their collection; a trigger fires only for its event.
+- **Go helper routes**: `e.POST(Prefix+job.Name(), …)` inside a helper is
+  expanded per call site, one route per concrete job, and the template route
+  is dropped.
+- **Nested repos and worktrees** (a directory with its own `.git` dir or file
+  inside a scanned repo) are not walked, so a stale worktree does not
+  duplicate the graph; they are reported as `skipped: nested_repos`.
+
 ### Performance
 
 v0.2 keeps the per-function type cache, skips `vendor`/`node_modules` during

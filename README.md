@@ -15,9 +15,9 @@ consumer, database trigger) through the functions it calls to the tables and
 columns they read and write, across repositories and languages. It is static
 and deterministic: no LLM, no tokens, no account, no server.
 
-![bizmap scan and bizmap why on the demo repository](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/assets/demo/hero.gif)
+![The HTML start screen answering who writes orders.status](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/img/home-answer.png)
 
-<sub>Recorded on [bizmap-demo](https://github.com/lucas-simao/bizmap-demo): a TypeScript shop and a Python payments service sharing one Postgres database.</sub>
+<sub>`bizmap export --format html` on a fictional three-repo shop: the page opens on *who writes / reads X?* and answers like `bizmap who-writes`.</sub>
 
 **[Documentation](https://lucas-simao.github.io/bizmap/)** ·
 **[Demo repository](https://github.com/lucas-simao/bizmap-demo)** ·
@@ -32,13 +32,18 @@ pipx install bizmap        # or: pip install bizmap   (Python 3.11+)
 ## Quickstart
 
 ```bash
-bizmap scan . --mermaid    # writes bizmap.graph.json (+ bizmap.graph.mmd)
-bizmap why orders.status   # writers, readers, what triggers them, who calls in
-bizmap who-writes table:orders   # every writer, from the route / consumer / job that runs it
+bizmap scan . --mermaid          # writes bizmap.graph.json (+ bizmap.graph.mmd)
+bizmap who-writes orders.status  # every writer, from the route / consumer / job that runs it
+bizmap who-reads orders          # every reader
 bizmap trace collection:orders   # where its data comes from and goes (feeds, queues, HTTP)
-bizmap report              # how much of the code BizMap understood
-bizmap export --format html --out bizmap.html   # one offline page to browse the graph
+bizmap export --format html --out bizmap.html   # one offline page that opens on "who writes / reads X?"
+bizmap why orders.status         # writers, readers, what triggers them, who calls in
+bizmap report                    # how much of the code BizMap understood
 ```
+
+![bizmap scan and bizmap why on the demo repository](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/assets/demo/hero.gif)
+
+<sub>Recorded on [bizmap-demo](https://github.com/lucas-simao/bizmap-demo): a TypeScript shop and a Python payments service sharing one Postgres database.</sub>
 
 Several services at once — one graph, HTTP calls between them matched:
 
@@ -173,8 +178,6 @@ Below that, it reads the system like a book: services,
 then domains (routes grouped by path), then a route's call tree down to the tables and
 columns it reads and writes. Front-ends list their screens, the routes each one uses
 and the calls that matched no route. Search finds any route, function, table or column.
-
-![bizmap export --format html: system, a domain, a route's call tree, screens](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/img/export-html.gif)
 
 Details: [export](https://lucas-simao.github.io/bizmap/commands/export/) ·
 [the start screen](https://lucas-simao.github.io/bizmap/commands/export-home/).
