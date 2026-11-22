@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -302,6 +303,17 @@ def test_cli_commands(tmp_path: Path) -> None:
     assert res.exit_code == 0 and "### Rastro orders" in res.output
     res = run(main, ["who-writes", "collection:orders", "--graph", str(graph), "--path", "--format", "json"])
     assert json.loads(res.output)["schema"] == "bizmap.query/v1"
+    # --no-cache / --cache-dir, and nothing written next to the graph
+    mine = tmp_path / "c"
+    res = run(main, ["trace", "collection:orders", "--graph", str(graph), "--no-cache", "--cache-dir", str(mine)])
+    assert res.exit_code == 0 and not mine.exists()
+    res = run(main, ["who-reads", "collection:orders", "--graph", str(graph), "--cache-dir", str(mine)])
+    assert res.exit_code == 0 and len(list(mine.glob("*.idx"))) == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bizmap.graph.json", "c"]
+    # a leftover 0.13.1 cache is pointed out, not used
+    (tmp_path / "bizmap.graph.idx").write_bytes(b"old")
+    res = run(main, ["who-writes", "table:orders", "--graph", str(graph)])
+    assert res.exit_code == 0 and "no longer used" in res.output  # stderr is part of `output` in CliRunner
 
 
 # ── round 2: names built at runtime in Go / TS, wiring, store label, cache ──
@@ -370,13 +382,17 @@ def test_one_store_label_for_one_table() -> None:
 
 
 def test_index_cache_is_written_reused_and_invalidated(tmp_path: Path) -> None:
-    from bizmap.query import cache_path
+    import os
+
+    from bizmap.query import cache_dir, cache_path
 
     graph = tmp_path / "bizmap.graph.json"
     graph.write_text(json.dumps(build()), encoding="utf-8")
     first = Index.load(graph)
-    assert not first.loaded_from_cache and cache_path(graph) == tmp_path / "bizmap.graph.idx"
-    assert cache_path(graph).is_file()
+    assert not first.loaded_from_cache
+    # outside the repo: in the cache folder, never next to the graph
+    assert cache_path(graph).parent == cache_dir() and cache_path(graph).is_file()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bizmap.graph.json"]
     second = Index.load(graph)
     assert second.loaded_from_cache
     assert render(who(second, "table:orders", "writes"), "json") == render(who(first, "table:orders", "writes"), "json")
@@ -388,11 +404,57 @@ def test_index_cache_is_written_reused_and_invalidated(tmp_path: Path) -> None:
     third = Index.load(graph)
     assert not third.loaded_from_cache
     assert [u["repo"] for u in who(third, "table:orders", "writes")["unresolved"]] == [API]
+    # same size and mtime, other content: the fingerprint notices
+    st = graph.stat()
+    text = graph.read_text(encoding="utf-8").replace('"status"', '"statuz"', 1)
+    graph.write_text(text, encoding="utf-8")
+    os.utime(graph, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert graph.stat().st_size == st.st_size and not Index.load(graph).loaded_from_cache
     # a broken cache is ignored and replaced
     cache_path(graph).write_bytes(b"not marshal")
     assert not Index.load(graph).loaded_from_cache and Index.load(graph).loaded_from_cache
     # no cache when asked
     assert not Index.load(graph, use_cache=False).loaded_from_cache
+
+
+def test_cache_off_by_env_and_dir_by_option(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from bizmap.query import cache_dir, cache_path
+
+    graph = tmp_path / "repo" / "bizmap.graph.json"
+    graph.parent.mkdir()
+    graph.write_text(json.dumps(build()), encoding="utf-8")
+    monkeypatch.setenv("BIZMAP_NO_CACHE", "1")
+    Index.load(graph)
+    assert not Index.load(graph).loaded_from_cache and not cache_path(graph).exists()
+    monkeypatch.delenv("BIZMAP_NO_CACHE")
+    mine = tmp_path / "my-cache"
+    Index.load(graph, cache_directory=mine)
+    assert Index.load(graph, cache_directory=mine).loaded_from_cache
+    assert [p.suffix for p in mine.iterdir()] == [".idx"] and not cache_path(graph).exists()
+    # two repos never share a cache file
+    other = tmp_path / "other" / "bizmap.graph.json"
+    other.parent.mkdir()
+    other.write_text(graph.read_text(encoding="utf-8"), encoding="utf-8")
+    assert cache_path(other) != cache_path(graph)
+    # the default folder is the user's cache, not the repo
+    monkeypatch.delenv("BIZMAP_CACHE_DIR")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    if sys.platform not in ("win32", "darwin"):
+        assert cache_dir() == tmp_path / "xdg" / "bizmap" / "index"
+
+
+def test_old_caches_are_pruned(tmp_path: Path) -> None:
+    from bizmap.query import CACHE_KEEP, cache_dir
+
+    for k in range(CACHE_KEEP + 4):
+        g = tmp_path / f"r{k}" / "bizmap.graph.json"
+        g.parent.mkdir()
+        g.write_text(json.dumps(build()), encoding="utf-8")
+        Index.load(g)
+    (cache_dir() / "someone-else.idx").write_text("x")  # not ours: kept
+    Index.load(tmp_path / "r0" / "bizmap.graph.json")
+    ours = [p for p in cache_dir().glob("*.idx") if p.name != "someone-else.idx"]
+    assert len(ours) == CACHE_KEEP and (cache_dir() / "someone-else.idx").exists()
 
 
 def test_big_graph_cache_is_reused(tmp_path: Path) -> None:

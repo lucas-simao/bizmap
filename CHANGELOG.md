@@ -29,6 +29,13 @@
   type's other interface methods (`Run`, `Handle`), with their tables rolled
   up.
 
+- `--no-cache` / `BIZMAP_NO_CACHE=1` and `--cache-dir DIR` /
+  `BIZMAP_CACHE_DIR` on the three query commands.
+- `bizmap scan` says, once per file, when it wrote `bizmap.graph.json` (or the
+  `.mmd`) inside a git repo that does not ignore it, with the `.gitignore` line
+  to add (`BIZMAP_NO_GITIGNORE_HINT=1` silences it). Docs: "Generated files and
+  what to ignore" in `docs/commands/scan.md`.
+
 ### Fixed
 
 - **Namespaced Firestore triggers** (#149): `firestore.onDocumentCreated(…)` /
@@ -40,6 +47,17 @@
 - **Nested repos and worktrees are not walked** (#147): a directory with its
   own `.git` (dir or file) inside a scanned repo is skipped (`skipped:
   nested_repos`); `scan: include` brings it back.
+
+- **The query index cache no longer lands in the user's repo.** `who-writes` /
+  `who-reads` / `trace` wrote `bizmap.graph.idx` next to the graph (0.13.1):
+  nothing ignored it, and on a big graph it passed 100 MB (a `git add .` then a
+  refused push). It now lives in the user cache folder (`$XDG_CACHE_HOME` or
+  `~/.cache/bizmap/index`, `~/Library/Caches/bizmap/index`,
+  `%LOCALAPPDATA%\bizmap\index`), one file per graph named after its absolute
+  path, the 16 most recent kept; it is used only while the graph keeps its
+  path, size, mtime and a content fingerprint. A leftover `bizmap.graph.idx`
+  is pointed out (not used, not deleted).
+
 
 ## 0.13.1 — 2026-11-21
 
