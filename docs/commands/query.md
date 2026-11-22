@@ -9,6 +9,7 @@ answer in a second or two even on a graph of ~70k nodes.
 bizmap who-writes ENTITY [--path] [--format text|json|md] [--lang en|pt-BR] [--graph bizmap.graph.json]
 bizmap who-reads  ENTITY [--path] [--format text|json|md] [--lang en|pt-BR] [--graph bizmap.graph.json]
 bizmap trace      ENTITY [--depth 2] [--direction up|down|both] [--format …] [--lang …] [--graph …]
+# all three: [--no-cache] [--cache-dir DIR]
 ```
 
 The examples below use a small fictional system: `orders-api` (Go) saves
@@ -141,13 +142,28 @@ it, so a short list never reads as a complete one:
 
 ## The index cache
 
-The first question on a graph writes `bizmap.graph.idx` next to
-`bizmap.graph.json`: the same nodes and edges with the indexes already built,
-in a format Python loads about twice as fast. Later questions use it while the
-graph file keeps the same size and modification time (a new scan replaces it
-on the next question); a cache from another Python version is rebuilt. Add it
-to `.gitignore` next to the graph. `orjson`, when installed, also speeds up
-the first read.
+The first question on a graph writes an index cache — the same nodes and edges
+with the indexes already built, in a format Python loads about twice as fast —
+in your **user cache folder, never in the repo**:
+
+| System | Folder |
+| --- | --- |
+| Linux | `$XDG_CACHE_HOME/bizmap/index` (default `~/.cache/bizmap/index`) |
+| macOS | `~/Library/Caches/bizmap/index` |
+| Windows | `%LOCALAPPDATA%\bizmap\index` |
+
+One file per graph, named after the graph's absolute path, so two repos never
+share one; the 16 most recent are kept. A later question uses it only while the
+graph has the same path, size, modification time and content fingerprint (the
+first and last MiB): a new scan is picked up on the next question. A cache from
+another Python version is rebuilt.
+
+- `--no-cache` (or `BIZMAP_NO_CACHE=1`): neither read nor write it.
+- `--cache-dir DIR` (or `BIZMAP_CACHE_DIR=DIR`): put it elsewhere.
+- bizmap 0.13.1 wrote `bizmap.graph.idx` next to the graph; it is no longer
+  used (the commands point it out): delete it and keep it out of git.
+
+`orjson`, when installed, also speeds up the first read.
 
 ## Output formats
 
