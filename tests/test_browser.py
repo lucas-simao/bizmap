@@ -254,3 +254,41 @@ def test_flow_page_empty_explains_and_big_graph_paginates(tmp_path: Path) -> Non
     assert "No data flow found" in empty_text and "feeds" in empty_text
     assert first == 200 and second == 400
     assert 0 < hits <= 60
+
+
+def test_home_form_controls_share_one_look(tmp_path: Path) -> None:
+    from test_flow_page import repro_graph
+
+    html = _write(tmp_path, repro_graph())
+    with sync_api.sync_playwright() as p:
+        browser, page, walk = _open(p, html)
+        walk.go("#/")
+        page.wait_for_selector(".mx-bar select")
+        boxes = page.evaluate(
+            """() => {
+                const one = el => { const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+                    return { id: el.id || el.tagName, h: Math.round(r.height), top: Math.round(r.top), mid: Math.round(r.top + r.height / 2),
+                             w: Math.round(r.width), radius: s.borderTopLeftRadius, border: s.borderTopWidth, font: s.fontFamily,
+                             app: s.appearance || s.webkitAppearance, cls: el.className }; };
+                return { bar: Array.from(document.querySelectorAll('.mx-bar > input, .mx-bar > select')).map(one),
+                         count: one(document.querySelector('.mx-bar > .count')),
+                         q: one(document.querySelector('#q')), det: one(document.querySelector('#det > summary')),
+                         ask: one(document.querySelector('#hq')), body: getComputedStyle(document.body).fontFamily };
+            }"""
+        )
+        page.focus("#mx-repo")
+        ring = page.evaluate("() => getComputedStyle(document.activeElement).boxShadow")
+        browser.close()
+    assert not walk.errors, walk.errors
+    bar = boxes["bar"]
+    assert [b["id"] for b in bar] == ["mx-q", "mx-repo", "mx-store", "mx-sort"], bar
+    for b in [*bar, boxes["q"], boxes["det"]]:
+        assert "ctl" in b["cls"] and b["h"] == 32 and b["radius"] == "6px" and b["border"] == "1px", b
+        assert b["font"] == boxes["body"], b
+    assert len({b["top"] for b in bar}) == 1, bar  # one row
+    assert abs(boxes["count"]["mid"] - bar[0]["mid"]) <= 1, (boxes["count"], bar[0])
+    selects = [b for b in bar if b["id"] != "mx-q"]
+    assert all(b["app"] == "none" for b in selects), selects
+    assert all(120 <= b["w"] <= 200 for b in selects), selects
+    assert boxes["ask"]["h"] == 44 and boxes["ask"]["border"] == "1px" and boxes["ask"]["radius"] == "10px", boxes["ask"]
+    assert "rgba(9, 105, 218" in ring, ring

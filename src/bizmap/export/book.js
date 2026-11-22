@@ -376,7 +376,7 @@
       }
     }
     h += "</tbody></table>";
-    if (f[1] > shown) h += '<p><button id="more-fns">' + esc(fmt(L.showMore, { n: num(Math.min(f[1] - shown, 1000)), t: num(f[1]) })) + "</button></p>";
+    if (f[1] > shown) h += '<p><button id="more-fns" class="ctl">' + esc(fmt(L.showMore, { n: num(Math.min(f[1] - shown, 1000)), t: num(f[1]) })) + "</button></p>";
     read(h);
     var btn = $("more-fns");
     if (btn) btn.onclick = function () { var y = $("read").scrollTop; pageFolder(s, k, limit + 1000); $("read").scrollTop = y; };
@@ -571,7 +571,7 @@
       h += "<h4>" + esc(L.consumers) + '</h4><p class="muted">' + esc(plural("calledByN", r.nc)) + "</p>";
     }
     if (r.t.length) h += "<h4>" + esc(L.dataTitleShort) + '</h4><p class="ep-data">' + dataSentence(r.t) + "</p>";
-    h += '<p><button class="code-btn" data-code="' + r.i + '">' + esc(L.seeCode) + ' ▾</button></p><div class="tree code" id="code-' + r.i + '" hidden></div>';
+    h += '<p><button class="ctl code-btn" data-code="' + r.i + '">' + esc(L.seeCode) + ' ▾</button></p><div class="tree code" id="code-' + r.i + '" hidden></div>';
     return h;
   }
   function wireEndpoint(r, dm) {
@@ -754,7 +754,7 @@
   // ── tables ───────────────────────────────────────────────────────────────
   function pageTables(filter) {
     crumbs(['<a href="#/t">' + esc(L.tables) + "</a>"]); toc("t");
-    var h = "<h1>" + esc(L.tables) + '</h1><input class="filter" id="tfilter" placeholder="' + esc(L.filterTables) + '" value="' + esc(filter || "") + '">';
+    var h = "<h1>" + esc(L.tables) + '</h1><input class="ctl filter" id="tfilter" placeholder="' + esc(L.filterTables) + '" value="' + esc(filter || "") + '">';
     h += '<table class="list"><thead><tr><th>' + esc(L.table) + "</th><th>" + esc(L.colDb) + "</th><th>" + esc(L.colServices) +
          '</th><th class="num">' + esc(L.colReaders) + '</th><th class="num">' + esc(L.colWriters) + '</th></tr></thead><tbody id="tbody"></tbody></table>';
     read(h);
@@ -893,11 +893,11 @@
     rows.forEach(function (f) {
       [f[0], f[1]].forEach(function (i) { repos[getNames().s[i]] = 1; var st = storeOf(i); if (st) stores[st] = 1; });
     });
-    h += '<p><select id="flow-repo"><option value="">' + esc(KT.anyRepo) + "</option>" + Object.keys(repos).sort(function (a, b) { return svcName(+a).localeCompare(svcName(+b)); }).map(function (s) {
+    h += '<div class="bar"><select id="flow-repo" class="ctl"><option value="">' + esc(KT.anyRepo) + "</option>" + Object.keys(repos).sort(function (a, b) { return svcName(+a).localeCompare(svcName(+b)); }).map(function (s) {
       return '<option value="' + esc(s) + '"' + (flowState.repo === s ? " selected" : "") + ">" + esc(svcName(+s)) + "</option>";
-    }).join("") + '</select> <select id="flow-store"><option value="">' + esc(KT.anyStore) + "</option>" + Object.keys(stores).sort().map(function (st) {
+    }).join("") + '</select><select id="flow-store" class="ctl"><option value="">' + esc(KT.anyStore) + "</option>" + Object.keys(stores).sort().map(function (st) {
       return '<option value="' + esc(st) + '"' + (flowState.store === st ? " selected" : "") + ">" + esc(st) + "</option>";
-    }).join("") + '</select> <input class="filter" id="flow-q" placeholder="' + esc(KT.filterText) + '" value="' + esc(flowState.q) + '"></p>';
+    }).join("") + '</select><input class="ctl filter" id="flow-q" placeholder="' + esc(KT.filterText) + '" value="' + esc(flowState.q) + '"></div>';
     h += '<p class="muted" id="flow-count"></p><table class="list"><thead><tr><th>' + esc(KT.colSource) + "</th><th></th><th>" + esc(KT.colDest) + "</th><th>" + esc(KT.colConf) +
          "</th><th>" + esc(KT.colCols) + "</th><th>" + esc(KT.colEvidence) + '</th></tr></thead><tbody id="flow-body"></tbody></table><p id="flow-more"></p>';
     read(h);
@@ -911,7 +911,7 @@
       $("flow-body").innerHTML = shown.length ? shown.map(flowRowHtml).join("") : '<tr><td colspan="6" class="empty">' + esc(KT.noMatch) + "</td></tr>";
       $("flow-count").textContent = fmt(KT.showing, { n: num(shown.length), t: num(hits.length) });
       var rest = hits.length - shown.length;
-      $("flow-more").innerHTML = rest > 0 ? '<button id="flow-more-btn">' + esc(fmt(KT.showMore, { n: num(Math.min(rest, FLOW_PAGE)) })) + "</button>" : "";
+      $("flow-more").innerHTML = rest > 0 ? '<button id="flow-more-btn" class="ctl">' + esc(fmt(KT.showMore, { n: num(Math.min(rest, FLOW_PAGE)) })) + "</button>" : "";
       var btn = $("flow-more-btn");
       if (btn) btn.onclick = function () { flowState.limit += FLOW_PAGE; fill(); };
     }

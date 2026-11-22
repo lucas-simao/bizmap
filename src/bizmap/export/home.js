@@ -205,7 +205,7 @@
     return mode === "map" ? null : hrefOf("q", { n: text.trim() });
   }
   function askBox(id, mode, value) {
-    return '<div class="ask-box"><input id="' + id + '" class="ask-in" type="search" autocomplete="off" spellcheck="false" placeholder="' + esc(H.askPh) + '" value="' + esc(value || "") +
+    return '<div class="ask-box"><input id="' + id + '" class="ctl ctl-lg ask-in" type="search" autocomplete="off" spellcheck="false" placeholder="' + esc(H.askPh) + '" value="' + esc(value || "") +
       '"><div class="ask-list" id="' + id + '-list" role="listbox"></div></div>';
   }
   function wireAsk(id, mode) {
@@ -337,12 +337,12 @@
     var shown = cols.slice(0, MX.limit);
     var rows = SV.map(function (s, i) { return i; }).filter(function (i) { return shown.some(function (e) { return cellOf(e, i); }); });
     var dyn = HOME.dyn || {};
-    var h = '<div class="mx-bar"><input id="mx-q" class="filter" placeholder="' + esc(H.filterText) + '" value="' + esc(MX.q) + '"> <select id="mx-repo"><option value="">' + esc(H.anyRepo) + "</option>" +
+    var h = '<div class="bar mx-bar"><input id="mx-q" class="ctl filter" placeholder="' + esc(H.filterText) + '" value="' + esc(MX.q) + '"><select id="mx-repo" class="ctl"><option value="">' + esc(H.anyRepo) + "</option>" +
       Object.keys(repos).sort().map(function (r) { return '<option' + (r === MX.repo ? " selected" : "") + ' value="' + esc(r) + '">' + esc(r) + "</option>"; }).join("") +
-      '</select> <select id="mx-store"><option value="">' + esc(H.anyStore) + "</option>" + Object.keys(stores).sort().map(function (r) {
+      '</select><select id="mx-store" class="ctl"><option value="">' + esc(H.anyStore) + "</option>" + Object.keys(stores).sort().map(function (r) {
         return '<option' + (r === MX.store ? " selected" : "") + ' value="' + esc(r) + '">' + esc(r) + "</option>"; }).join("") +
-      '</select> <select id="mx-sort">' + [["acc", H.sortAcc], ["svc", H.sortSvc], ["name", H.sortName]].map(function (o) {
-        return '<option value="' + o[0] + '"' + (o[0] === MX.sort ? " selected" : "") + ">" + esc(o[1]) + "</option>"; }).join("") + '</select> <span class="muted small">' +
+      '</select><select id="mx-sort" class="ctl">' + [["acc", H.sortAcc], ["svc", H.sortSvc], ["name", H.sortName]].map(function (o) {
+        return '<option value="' + o[0] + '"' + (o[0] === MX.sort ? " selected" : "") + ">" + esc(o[1]) + "</option>"; }).join("") + '</select><span class="muted small count">' +
       esc(fmt(H.colsShown, { n: num(shown.length), t: num(cols.length) })) + "</span></div>";
     h += '<div class="mx-wrap"><table class="mx" id="mx-table"><thead><tr><th class="corner"></th>' + shown.map(function (e) {
       return '<th class="col" data-ref="' + esc(e[0]) + '" title="' + esc(e[2] + " · " + kindWordOf(e[1], e[3]) + " · " + e[3] + " · " + e[4].join(", ")) + '"><div><span class="mono">' + esc(e[2]) +
@@ -360,7 +360,7 @@
       }).join("") + "</tr>";
     });
     h += "</tbody></table></div>";
-    if (cols.length > shown.length) h += '<p><button id="mx-more">' + esc(fmt(H.showMoreCols, { n: num(Math.min(30, cols.length - shown.length)), t: num(cols.length) })) + "</button></p>";
+    if (cols.length > shown.length) h += '<p><button id="mx-more" class="ctl">' + esc(fmt(H.showMoreCols, { n: num(Math.min(30, cols.length - shown.length)), t: num(cols.length) })) + "</button></p>";
     h += '<p class="muted small">' + esc(H.cellHelp) + "</p>";
     box.innerHTML = h;
     var tq = null;
@@ -483,7 +483,7 @@
           (entry && entry.via ? ' · <a href="#" class="small" data-full="1">' + esc(H.fullPath) + " / " + esc(H.shortPath) + "</a>" : "") + "</div></div>";
       });
     });
-    if (shown < rows.reduce(function (a, p) { return a + Math.max(1, p[0].entrypoints.length); }, 0)) h += '<p><button id="ans-more">+100</button></p>';
+    if (shown < rows.reduce(function (a, p) { return a + Math.max(1, p[0].entrypoints.length); }, 0)) h += '<p><button id="ans-more" class="ctl">+100</button></p>';
     if (hidden) h += '<p class="muted small hidden-note">' + esc(fmt(H.hiddenRows, { n: hidden })) + "</p>";
     return h;
   }
