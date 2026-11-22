@@ -1,8 +1,8 @@
 # `bizmap export`
 
-*Requires bizmap 0.5.0+; the reading layout (domains, call trees, screens) since 0.6.0; API docs since 0.7.0.*
+*Requires bizmap 0.5.0+; the reading layout (domains, call trees, screens) since 0.6.0; API docs since 0.7.0; the start screen since 0.14.0.*
 
-![bizmap export --format html: system, a domain, a route's call tree, screens](../img/export-html.gif)
+![The start screen: who writes orders.status?](../img/home-answer.png)
 
 ```bash
 bizmap scan . --out bizmap.graph.json            # or a --discover / registry-merged graph
@@ -205,3 +205,10 @@ cd examples/export && bizmap export --graph shop.graph.json --out shop.html
 `bizmap export` fills the template with these files and the graph data. No
 Python dependency is added and nothing is downloaded when the page is
 generated or opened.
+
+## The reading layout
+
+Below the start screen, the page reads the system like a book: services,
+domains, a route's call tree, and the screens of each front-end.
+
+![bizmap export --format html: system, a domain, a route's call tree, screens](../img/export-html.gif)

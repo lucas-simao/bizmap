@@ -66,6 +66,26 @@ hint.
 It also names what it skipped (generated code, build caches, `.gitignore`d
 paths) — see [`scan:` in the configuration](../configuration.md#exclude-and-scan).
 
+**Nested repos and worktrees are skipped.** A directory with its own `.git`
+(a directory, or the `.git` file of a `git worktree`) inside the scanned repo
+is not walked, so an old worktree or a vendored clone does not duplicate
+every node:
+
+```text
+skipped: 1 nested repos/worktrees  (scan: include / gitignore / skip_generated in bizmap.yaml)
+  nested repos/worktrees: shop-functions:.worktrees/old
+```
+
+To scan one anyway, list it in `bizmap.yaml`:
+
+```yaml
+scan:
+  include: [".worktrees/old"]
+```
+
+To scan several repos side by side, use `bizmap scan --discover .` or list
+them (`bizmap scan ./orders-api ./shop-web`) instead.
+
 ## Output
 
 - `bizmap.graph.json` — the graph: nodes, edges with `file:line` evidence and

@@ -36,15 +36,52 @@ A database trigger records every change of `orders.status`.
 ```bash
 git clone https://github.com/lucas-simao/bizmap-demo && cd bizmap-demo
 bizmap scan . --mermaid
-bizmap why orders.status
+bizmap who-writes orders.status     # who writes this column, from which entrypoint
+bizmap trace orders                 # where the data comes from and where it goes
+bizmap why orders.status            # everything around the column at once
 ```
 
 ![bizmap scan and bizmap why on bizmap-demo](assets/demo/hero.gif){ .shot }
 
 `bizmap scan .` reads the workspace `bizmap.yaml`, scans `shop` and
 `payments` together and writes `bizmap.graph.json` (plus
-`bizmap.graph.mmd` with `--mermaid`). `bizmap why` then answers from that
-file:
+`bizmap.graph.mmd` with `--mermaid`). The questions then answer from that
+file.
+
+### Ask: who writes, who reads, trace
+
+```bash
+bizmap who-writes orders.status              # add --path for the full call chain
+bizmap who-reads orders --format md          # text (default), md or json
+bizmap trace orders --depth 2                # upstream and downstream
+```
+
+Each writer is shown as *entrypoint → (via N functions) → the function that
+writes*, with the columns, the confidence, the repo and `file:line`. A name
+that matches several things (a Firestore collection and a Postgres table both
+called `orders`) lists the candidates instead of picking one, and every answer
+ends with what could change it (unresolved names, URLs and queues). Details:
+[who-writes / who-reads / trace](commands/query.md).
+
+### Open the HTML page
+
+```bash
+bizmap export --format html --out bizmap.html     # --lang pt-BR
+```
+
+One offline file that opens on *who writes / reads X?*: type `orders.status`,
+press Enter, and the writers are listed the same way as on the command line.
+Below it: a summary strip, findings (an unexpected writer, tables written by
+several services, names built at runtime, orphan functions), a services ×
+tables matrix and a **Mapa** tab around one entity. See
+[the start screen](commands/export-home.md).
+
+![The HTML start screen answering who writes orders.status](img/home-answer.png){ .shot }
+
+### Everything around one column: `why`
+
+`bizmap why orders.status` prints every writer, reader, trigger and caller at
+once:
 
 - three functions **write** `orders.status`, each with `file:line` and the
   comment above it;

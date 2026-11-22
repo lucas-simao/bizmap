@@ -222,6 +222,48 @@ paths such as `/setup` from `otherpkg.PendingPath+"/setup"` are not emitted.
   `entrypoint:http:POST:/functions/v1/<name>`, with call edges from the
   handler body into imported helpers.
 
+## Firebase Functions, callables and built doc paths (0.14)
+
+- **Entrypoints**: `onCall` → `firebase_call`, `onRequest` → `firebase_http`,
+  `onSchedule` / v1 `pubsub.schedule().onRun` → `scheduled_job`,
+  `onMessagePublished` / v1 `topic().onPublish` → `pubsub`, `onTaskDispatched`,
+  `beforeUser*` / v1 `auth.user()` → `auth`, and Firestore triggers (bare or
+  namespaced, `document:` as a literal or `` `${COLLECTION}/{id}` ``). The
+  handler passed to the factory is the function `<module>.<export>`.
+- **Deployed names**: exports are followed from the functions entry file
+  (`package.json` `main`, mapped back to `src/`) through
+  `exports.orders = require('./orders')`, `exports.n = mod.n`,
+  `export { a as b } from` and `export *`, so `src/orders/pay.ts`'s
+  `markPaid` is `orders-markPaid`.
+- **Callables**: `httpsCallable(fns, 'orders-markPaid')` (generic, across
+  lines) and `httpsCallableFromURL` become `calls_http` with
+  `via: firebase_callable` to that function in any scanned repo; an unknown
+  name is `unresolved_http` with reason `callable_not_scanned`.
+- **Built doc paths**: `` db.doc(`orders/${id}`) ``,
+  `` db.doc(`${ORDERS}/${id}`) `` (same-file string constant),
+  `db.doc('notes/' + id)` and `db.collection('payments').doc()` resolve to
+  the first segment (odd segments for subcollections) — in
+  `batch` / `tx` `.set/.update/.delete/.create` and in a direct
+  `db.doc(path).set()`. Anything else is `collection:unknown`.
+- **Trigger events**: a write fires a Firestore trigger only for its event
+  (`add` / `create` / `set` → created, `update` / `set` → updated,
+  `delete` → deleted).
+
+## Go helper routes (0.14)
+
+A function that takes an interface and mounts a route from it,
+
+```go
+func mount(e *echo.Echo, job Job) { e.POST(Prefix+job.Name(), handler(job)) }
+```
+
+is expanded per call site — `mount(e, jobs.NewTotals())`, `mount(e, &jobs.Cleanup{})`,
+or a variable assigned from one — into one route each
+(`POST /internal/jobs/order-totals`), using the literal returned by the
+concrete type's `Name()` / `Path()`. Each route triggers that type's other
+interface methods (`Run`, `Handle`) and gets their tables. Once a helper is
+expanded, the template route (`/internal/jobs/{job.Name()}`) is removed.
+
 ## Bundled rules (v0.2.9)
 
 | File | Status | What it detects |

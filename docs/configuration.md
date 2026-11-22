@@ -221,7 +221,11 @@ Never scanned unless listed in `scan: include`: `node_modules`, `vendor`,
   code (sqlc, or anything that runs `.Exec(` / `.Query…(`), which is always
   scanned.
 
-`bizmap scan` names what it skipped. `scan: include:` brings paths back;
+Nested repos and worktrees (a folder with its own `.git` inside the scanned
+repo) are skipped too and reported as `nested_repos`.
+
+`bizmap scan` names what it skipped. `scan: include:` brings paths back (a
+nested repo too);
 `skip_generated: false` and `gitignore: false` turn the defaults off;
 `include_tests: true` (or `bizmap scan --include-tests`) scans Python and Go
 tests. Calls made through an in-process test client (`TestClient`,

@@ -1,6 +1,6 @@
 # `bizmap export`: the start screen
 
-*Unreleased (after 0.13.0).*
+*Since bizmap 0.14.0.*
 
 The HTML page opens on **the question you came with** — *who writes / reads
 this?* — instead of everything BizMap knows. Under it: a summary you can click

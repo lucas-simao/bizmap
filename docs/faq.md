@@ -55,6 +55,10 @@ how many entrypoints reach data and why the rest do not.
 2. Run `bizmap report`: entrypoints that reach no table are listed.
 3. Generated code, tests, build caches and `.gitignore`d paths are skipped by
    default — bring them back with [`scan: include`](configuration.md#exclude-and-scan).
+   So are nested repos and worktrees (a folder with its own `.git` inside the
+   scanned repo, reported as `skipped: nested_repos`): list the folder in
+   `scan: include` to scan it, or scan the repos side by side with
+   `bizmap scan --discover .`.
 4. Still wrong? Open an issue with a minimal, fictional example; `bizmap
    report --redact` produces a shareable summary of a private codebase.
 
@@ -75,6 +79,8 @@ minor versions; breaking changes are called out in the
 ## Is there an HTML view?
 
 Yes, since 0.5.0: `bizmap export --format html` writes one self-contained,
-offline page to read the system: services, domains, routes and their call
-trees, tables, and the screens of each front-end —
-see [export](commands/export.md).
+offline page. Since 0.14.0 it opens on *who writes / reads X?* — the same
+answer as `bizmap who-writes` — with findings, a services × tables matrix and
+a map around one entity ([start screen](commands/export-home.md)); below
+that, services, domains, routes and their call trees, tables, and the screens
+of each front-end — see [export](commands/export.md).
