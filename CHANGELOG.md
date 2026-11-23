@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Fixed (HTML export: map)
+
+- **A hub table at 2 hops is readable again.** With every detail on, the map
+  of a much-used table grew past 200 boxes and 6000 × 16000 px. Now:
+  - **The last ring is bundled**: more than 4 tables / collections at the last
+    hop that link only to one box, on the same side, become one box
+    (`140 tables / collections`, the first names under it, all on hover).
+  - **The centre's columns are one box** (`12 columns`, a few names per line)
+    instead of one box each in a long row.
+  - **Lines end on boxes, never on a service's frame**: Mermaid inflated
+    frames that lines pointed at. A service's own lines start from its name
+    box, the first box inside its frame.
+  The same map is now about 1200 × 1500 px.
+
 ## 0.17.0 — 2026-11-23
 
 ### Changed (HTML export: diagrams)

@@ -106,7 +106,8 @@
     def.nodes.forEach(function (n, k) { ids[n.id] = "n" + k; });
     (def.groups || []).forEach(function (g, k) { gids[g.id] = "g" + k; g.nodes.forEach(function (id) { inGroup[id] = g.id; }); });
     function nodeLine(n) {
-      var t = mmText(n.label) + (n.sub ? "<br/><small>" + mmText(n.sub) + "</small>" : "");
+      var t = mmText(n.label) + (n.sub ? "<br/><small>" + mmText(n.sub) + "</small>" : "") +
+        (n.lines || []).map(function (l) { return "<br/><small>" + mmText(l) + "</small>"; }).join("");
       var m = ids[n.id];
       if (n.shape === "db") return m + '[("' + t + '")]';
       if (n.shape === "topic") return m + '(["' + t + '"])';

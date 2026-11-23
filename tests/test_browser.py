@@ -431,3 +431,45 @@ def test_architecture_folds_a_publisher_s_topics_and_opens_big_systems_on_one_la
     assert folded == ["tg:s2"], folded
     assert "shop-api · 4 topics" in label and "3 without a consumer" in label, label
     assert opened == ["q:queue:pubsub:invoice-due", "q:queue:pubsub:order-cancelled", "q:queue:pubsub:order-placed", "q:queue:pubsub:stock-low"]
+
+
+def test_big_map_stays_small_no_line_ends_on_a_group_and_columns_are_one_box(tmp_path: Path) -> None:
+    """A hub table at 2 hops with every detail on: the outer ring is bundled per
+    box, lines end on boxes (never on a service's frame, which Mermaid would
+    inflate) and the centre's columns are one box."""
+    api = "shop-api"
+    nodes = [
+        {"id": f"{api}/table:users", "type": "table", "name": "users", "engine": "postgres"},
+        {"id": f"{api}/function:users.Repo.Load", "type": "function", "name": "users.Repo.Load", "evidence": {"file": "users/repo.go", "line": 3}},
+        {"id": f"{api}/function:users.Repo.Save", "type": "function", "name": "users.Repo.Save", "evidence": {"file": "users/repo.go", "line": 9}},
+    ]
+    edges = [
+        {"id": "r", "type": "reads", "from": f"{api}/function:users.Repo.Load", "to": f"{api}/table:users", "confidence": "exact"},
+        {"id": "w", "type": "writes", "from": f"{api}/function:users.Repo.Save", "to": f"{api}/table:users", "confidence": "exact"},
+    ]
+    for c in range(12):
+        nodes.append({"id": f"{api}/column:users.c{c:02d}", "type": "column", "table": "users", "name": f"c{c:02d}"})
+        edges.append({"id": f"wc{c}", "type": "writes", "from": f"{api}/function:users.Repo.Save", "to": f"{api}/column:users.c{c:02d}",
+                      "confidence": "exact"})
+    for t in range(9):  # what else the service writes: the outer ring
+        nodes.append({"id": f"{api}/table:t{t}", "type": "table", "name": f"t{t}", "engine": "postgres"})
+        edges.append({"id": f"wt{t}", "type": "writes", "from": f"{api}/function:users.Repo.Save", "to": f"{api}/table:t{t}", "confidence": "exact"})
+    html = _write(tmp_path, {"version": "test", "nodes": nodes, "edges": edges})
+    with sync_api.sync_playwright() as p:
+        browser, page, walk = _open(p, html)
+        walk.go("#/")
+        walk.go("#/map/e/users?h=2&d=ict")
+        page.wait_for_selector("#map svg g.node")
+        text = page.evaluate("() => window.__bizmap.mermaid")
+        labels = page.eval_on_selector_all("#map svg g.node", "els => els.map(e => e.textContent.replace(/\\s+/g, ' ').trim())")
+        browser.close()
+    assert not walk.errors, walk.errors
+    groups = set(re.findall(r"subgraph (g\d+)", text))
+    for line in text.splitlines():
+        m = re.match(r"\s+(\w+) (?:-->|-\.->|<---|<-\.-|---|-\.-)(?:\|[^|]*\|)? (\w+)$", line)
+        if m:
+            assert m.group(1) not in groups and m.group(2) not in groups, line
+    assert any(lab.startswith("9 tables / collections") for lab in labels), labels
+    assert not any(lab.startswith("t3 ") or lab == "t3" for lab in labels), labels
+    assert any(lab.startswith("12 columns") and "c00" in lab for lab in labels), labels
+    assert sum(1 for lab in labels if re.fullmatch(r"c\d\d", lab)) == 0, labels
