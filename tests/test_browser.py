@@ -329,7 +329,7 @@ def test_architecture_and_event_flow_pages(tmp_path: Path) -> None:
     assert "shop-api → Postgres" in side and "orders.Service.PlaceOrder" in side
     assert any(r.startswith("order-cancelled") and "no consumer" in r for r in queue_rows), queue_rows
     assert "couponCode" in placed and "never published" in placed
-    assert any(n.endswith("index.notifyPayment") for n in flow_nodes), flow_nodes  # the chain, 3 hops
+    assert any("notify-fn/" in n for n in flow_nodes), flow_nodes  # the chain, 3 hops
     assert "order-cancelled" in cancelled and "consumes" in warn
     assert "payment_events" in trigger and "Firestore trigger" in trigger
     assert by_qid == placed

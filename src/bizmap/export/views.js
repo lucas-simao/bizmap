@@ -62,7 +62,7 @@
     return "<li><span class=mono>" + name + "</span>" + tail + (it[4] ? ' <span class="ev">' + esc(it[4]) + "</span>" : "") + "</li>";
   }
   function statusChip(st) { return '<span class="st st-' + esc(st) + '">' + esc(V["st_" + st] || st) + "</span>"; }
-  function kindWord(k) { return V["k_" + k] || k; }
+  function evKindWord(k) { return V["k_" + k] || k; }
   function svcNames(list) { return list.map(function (s) { return sv(s); }).join(", "); }
 
   // ── one Cytoscape drawing with column headers (positions from the export) ──
@@ -255,7 +255,7 @@
       var pubs = r[1] === "cron" ? '<span class="muted">' + esc(r[3] || V.schedule) + "</span>" : r[5] ? esc(svcNames(r[7])) + ' <span class="muted">(' + r[5] + ")</span>" : '<span class="muted">—</span>';
       var cons = r[6] ? esc(svcNames(r[8])) + ' <span class="muted">(' + r[6] + ")</span>" : '<span class="muted">—</span>';
       var extra = (r[9] || []).indexOf("unpublished_fields") >= 0 ? ' <span class="risk small" title="' + esc(V.fMissing) + '">⚠ ' + esc(V.fields) + "</span>" : "";
-      return '<tr class="row" data-href="' + hrefOf("topic/" + encodeURIComponent(r[0])) + '"><td class="mono"><b>' + esc(r[2]) + "</b></td><td>" + esc(kindWord(r[1])) +
+      return '<tr class="row" data-href="' + hrefOf("topic/" + encodeURIComponent(r[0])) + '"><td class="mono"><b>' + esc(r[2]) + "</b></td><td>" + esc(evKindWord(r[1])) +
              (r[1] !== "cron" && r[3] ? ' <span class="muted small">' + esc(r[3]) + "</span>" : "") + "</td><td>" + pubs + "</td><td>" + cons + "</td><td>" + statusChip(r[4]) + extra + "</td></tr>";
     }).join("") + "</tbody></table></div>";
     read(h); detail("");
@@ -287,7 +287,7 @@
     if (F.warnings.indexOf("no_publisher") >= 0) warn.push([fmt(F.kind === "firestore" ? V.w_no_writer : V.w_no_publisher, { q: q }), 0]);
     if (F.fields && F.fields.missing.length) warn.push([fmt(V.w_fields, { f: F.fields.missing.join(", ") }), 0]);
     if (F.warnings.indexOf("cross_service") >= 0) warn.push([fmt(V.w_cross, { a: svcNames(F.pubSvcs), b: svcNames(F.conSvcs) }), 1]);
-    var h = '<div class="answer"><h1><span class="topic">' + esc(q) + '</span> <span class="kind">' + esc(kindWord(F.kind) + (F.detail ? " · " + F.detail : "")) + "</span> " +
+    var h = '<div class="answer"><h1><span class="topic">' + esc(q) + '</span> <span class="kind">' + esc(evKindWord(F.kind) + (F.detail ? " · " + F.detail : "")) + "</span> " +
             statusChip(F.status) + "</h1>";
     if (warn.length) h += '<div class="vwarn" id="vwarn">' + warn.map(function (w) {
       return '<p class="' + (w[1] ? "info" : "bad") + '">' + (w[1] ? "↔ " : "⚠ ") + esc(w[0]) + "</p>";

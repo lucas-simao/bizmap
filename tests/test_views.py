@@ -296,3 +296,18 @@ def test_html_embeds_the_views() -> None:
     assert placed["publishers"][0]["fn"][2] >= 0
     for route in ('h[0] === "architecture"', 'h[0] === "queues"', "pageEvent("):
         assert route in html
+
+
+def test_inlined_scripts_declare_each_name_once() -> None:
+    """book.js, home.js and views.js share one scope: a second `function x` or
+    `var x` silently replaces the first (a flow page once lost its labels)."""
+    export = Path(views.__file__).parent / "export"
+    seen: dict[str, str] = {}
+    dupes = []
+    for name in ("book.js", "home.js", "views.js"):
+        for m in re.finditer(r"^  (?:function (\w+)\(|var (\w+)\b)", (export / name).read_text(encoding="utf-8"), re.M):
+            ident = m.group(1) or m.group(2)
+            if ident in seen:
+                dupes.append((ident, seen[ident], name))
+            seen.setdefault(ident, name)
+    assert not dupes, dupes
