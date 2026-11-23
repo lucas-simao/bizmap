@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.0 — 2026-11-23
+
 ### Added (HTML export, report, PR comment)
 
 - **Architecture view** (`#/architecture`, in the side menu and a card on the
