@@ -705,16 +705,16 @@
       (order.length > CAP ? '<p class="muted small">' + esc(fmt(H.mapCut, { n: CAP, t: order.length })) + "</p>" : "") + '<div id="map" class="mm"></div></div>';
     read(h); detail("");
     window.__bizmap.mapNodes = els.filter(function (x) { return !x.data.source; }).map(function (x) { return x.data.label.split("\n")[0] + "|" + x.data.kind; });
-    mmDraw($("map"), mapDef(els, G, center), { minScale: 0.8, node: function (id) {
+    mmDraw($("map"), mapDef(els, G, center, dist, hops), { minScale: 0.8, node: function (id) {
       if (id.charAt(0) === "n") {
         var n = G.n[+id.slice(1)];
         location.hash = n[0] === "e" ? hrefOf(qPath(n[1], "w")) : n[0] === "s" ? hrefOf("s/" + n[1]) : hrefOf("topic/" + encodeURIComponent(n[1]));
       } else if (id.charAt(0) === "f") {
         var m = meta(id.slice(1));
         if (m.bi >= 0) location.hash = "#/f/" + m.bi;
+      } else if (id.indexOf("svc:n") === 0) {
+        location.hash = hrefOf("s/" + G.n[+id.slice(5)][1]);
       }
-    }, group: function (id) {
-      if (id.charAt(0) === "n") location.hash = hrefOf("s/" + G.n[+id.slice(1)][1]);
     } });
   }
   // a function's short name: `Class.method` or `name` (the full one shows on hover)
@@ -727,15 +727,12 @@
   // the map as a Mermaid flowchart: who writes on the left, the centre, who reads on the
   // right; with details, functions sit inside their service's box (no service → function lines)
   var MAP_FN_CAP = 10;
-  function mapDef(els, G, center) {
+  var MAP_BUNDLE = 4;  // more outer-ring entities than this on one box and one side: one "N tables" box
+  function mapDef(els, G, center, dist, hops) {
     var nodesIn = els.filter(function (x) { return !x.data.source; });
     var edges = els.filter(function (x) { return x.data.source; });
-    var parentOf = {}, kids = {};
-    edges.forEach(function (x) {
-      if (x.data.rel !== "own") return;
-      parentOf[x.data.target] = x.data.source;
-      (kids[x.data.source] = kids[x.data.source] || []).push(x.data.target);
-    });
+    var kids = {};
+    edges.forEach(function (x) { if (x.data.rel === "own") (kids[x.data.source] = kids[x.data.source] || []).push(x.data.target); });
     // cap the functions per service; the rest is one "+N more" box
     var dropped = {}, more = {};
     Object.keys(kids).forEach(function (sid) {
@@ -744,46 +741,86 @@
       list.slice(MAP_FN_CAP).forEach(function (f) { dropped[f] = 1; });
       if (list.length > MAP_FN_CAP) more[sid] = list.length - MAP_FN_CAP;
     });
-    var cid = "n" + center, groups = [], nodes = [], isGroup = {};
+    var cid = "n" + center, groups = [], nodes = [], isGroup = {}, anchor = {};
     // a function that writes the centre sits left of it, one that only reads sits right:
-    // a service with both gets two boxes of the same name, so every line runs left to right
+    // a service with both gets two boxes of the same name, so every line runs left to right.
+    // Lines never end on a box of boxes (Mermaid inflates it): a service's own lines start
+    // from its name, drawn as the first box inside.
     var writes = {};
     edges.forEach(function (x) { if (x.data.rel === "rw" && x.data.target === cid && x.data.label !== H.R) writes[x.data.source] = 1; });
     Object.keys(kids).sort().forEach(function (sid) {
       var sn = G.n[+sid.slice(1)], label = sn ? sn[2] : sid;
       isGroup[sid] = 1;
+      anchor[sid] = "svc:" + sid;
+      nodes.push({ id: anchor[sid], label: label, cls: "api" });
       var w = kids[sid].filter(function (f) { return writes[f]; }), r = kids[sid].filter(function (f) { return !writes[f]; });
       if (more[sid]) (w.length ? w : r).push("more:" + sid);
+      // the box with the service's name box needs no title of its own
       if (w.length && r.length) {
-        groups.push({ id: sid, label: label, nodes: w });
-        groups.push({ id: sid + ":r", label: label, nodes: r });
-      } else groups.push({ id: sid, label: label, nodes: w.length ? w : r });
+        groups.push({ id: "grp:" + sid, label: " ", nodes: [anchor[sid]].concat(w) });
+        groups.push({ id: "grp:" + sid + ":r", label: label, nodes: r });
+      } else groups.push({ id: "grp:" + sid, label: " ", nodes: [anchor[sid]].concat(w.length ? w : r) });
     });
+    function at(id) { return anchor[id] || id; }
+    // the outer ring: entities tied to one box only, many on one side of it, become one box
+    var deg = {}, only = {};
+    edges.forEach(function (x) {
+      var d = x.data;
+      if (d.rel === "own" || d.rel === "col") return;
+      [[d.source, d.target], [d.target, d.source]].forEach(function (p) { deg[p[0]] = (deg[p[0]] || 0) + 1; only[p[0]] = p[1]; });
+    });
+    var bundleOf = {}, bundles = {};
+    nodesIn.forEach(function (x) {
+      var d = x.data, k = +String(d.id).slice(1);
+      if (d.kind !== "e" || d.id === cid || deg[d.id] !== 1 || !dist || dist[k] !== hops) return;
+      var e = edges.filter(function (y) { return y.data.rel !== "own" && y.data.rel !== "col" && (y.data.source === d.id || y.data.target === d.id); })[0];
+      var key = only[d.id] + "|" + (e.data.source === d.id ? "in" : "out") + "|" + e.data.rel;
+      (bundles[key] = bundles[key] || []).push(d.id);
+    });
+    Object.keys(bundles).forEach(function (key) {
+      if (bundles[key].length <= MAP_BUNDLE) { delete bundles[key]; return; }
+      bundles[key].forEach(function (id) { bundleOf[id] = "bundle:" + key; });
+    });
+    var labelOf = {};
+    nodesIn.forEach(function (x) { labelOf[x.data.id] = String(x.data.label).split("\n")[0]; });
     nodesIn.forEach(function (x) {
       var d = x.data, id = d.id;
-      if (isGroup[id] || dropped[id]) return;
+      if (isGroup[id] || dropped[id] || bundleOf[id] || d.kind === "c") return;
       var label = String(d.label).split("\n");
       if (d.kind === "f") nodes.push({ id: id, label: mapFnName(label[0]), title: label[0], cls: "fn" });
       else if (d.kind === "e") nodes.push({ id: id, label: label[0], sub: label[1] || "", shape: "db", cls: "store" + (id === cid ? " center" : "") });
       else if (d.kind === "q") nodes.push({ id: id, label: label[0], sub: label[1] || "", shape: "topic", cls: "topic" + (id === cid ? " center" : "") });
-      else if (d.kind === "c") nodes.push({ id: id, label: label[0], shape: "round", cls: "col" });
       else nodes.push({ id: id, label: label[0], cls: "api" + (id === cid ? " center" : "") });
     });
     Object.keys(more).forEach(function (sid) { nodes.push({ id: "more:" + sid, label: fmt(H.moreFns || "+{n} more", { n: more[sid] }), cls: "more" }); });
-    var out = [], colIds = [];
+    Object.keys(bundles).forEach(function (key) {
+      var ids = bundles[key], names = ids.map(function (id) { return labelOf[id]; }).sort();
+      nodes.push({ id: "bundle:" + key, label: fmt(H.mapBundle || "{n} tables / collections", { n: names.length }), lines: names.slice(0, 6).concat(names.length > 6 ? ["…"] : []),
+                   title: names.join(", "), shape: "db", cls: "store" });
+    });
+    // the centre's columns: one box, the names a few per line
+    var cols = [];
+    edges.forEach(function (x) { if (x.data.rel === "col") cols.push(labelOf[x.data.target] || x.data.target.slice(1)); });
+    var out = [], seenBundle = {};
     edges.forEach(function (x) {
       var d = x.data;
-      if (d.rel === "own" || dropped[d.source] || dropped[d.target]) return;
-      if (d.rel === "col") { colIds.push(d.target); return; }
-      var a = d.source, b = d.target, back = false;
+      if (d.rel === "own" || d.rel === "col" || dropped[d.source] || dropped[d.target]) return;
+      var a = bundleOf[d.source] || at(d.source), b = bundleOf[d.target] || at(d.target);
+      if (bundleOf[d.source] || bundleOf[d.target]) {
+        var bk = a + ">" + b;
+        if (seenBundle[bk]) return;
+        seenBundle[bk] = 1;
+      }
       // reads flow from the data to the reader: the reader sits right of what it reads
-      if (d.rel === "rw" && d.label === H.R && b === cid) { back = true; }
-      out.push({ from: a, to: b, label: d.label, dashed: !!d.guess, color: REL_COLOR[d.rel] || "#8c959f", width: d.rel === "rw" ? 1.8 : 1.5, back: back, rev: back });
+      var rev = d.rel === "rw" && d.label === H.R && d.target === cid;
+      out.push({ from: rev ? b : a, to: rev ? a : b, label: d.label, dashed: !!d.guess, color: REL_COLOR[d.rel] || "#8c959f", width: d.rel === "rw" ? 1.8 : 1.5 });
     });
-    // a reader drawn left to right: data → reader
-    out.forEach(function (e) { if (e.rev) { var t = e.from; e.from = e.to; e.to = t; e.back = false; } delete e.rev; });
-    if (colIds.length) {
-      groups.push({ id: "cols", label: H.columns || "columns", nodes: colIds });
+    if (cols.length) {
+      cols.sort();
+      var rows = [];
+      for (var i = 0; i < cols.length && rows.length < 10; i += 5) rows.push(cols.slice(i, i + 5).join(" · "));
+      if (cols.length > 50) rows.push(fmt(H.moreFns || "+{n} more", { n: cols.length - 50 }));
+      nodes.push({ id: "cols", label: fmt(H.mapCols || "{n} columns", { n: cols.length }), lines: rows, cls: "col" });
       out.push({ from: cid, to: "cols", label: "", dashed: true, plain: true, color: "#d0d7de" });
     }
     return { groups: groups, nodes: nodes, edges: out };

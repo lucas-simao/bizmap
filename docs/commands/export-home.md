@@ -133,6 +133,15 @@ full name shows on hover). A service that both writes and reads gets one box
 on each side. Up to 10 functions per service are shown, the rest as *+N
 more*. Hover a box to light its lines.
 
+A hub table at 2 hops stays readable:
+- **The outer ring is bundled**: more than 4 tables / collections at the last
+  hop that link only to one box, on the same side, become one box
+  (`140 tables / collections`, the first names under it, all of them on
+  hover).
+- **The centre's columns are one box** (`12 columns`, a few names per line).
+- **Lines end on boxes**, never on a service's frame: a service's own lines
+  start from its name box, the first box inside its frame.
+
 ## 6. Show details
 
 By default the page hides intermediate functions (they become *via N
