@@ -52,8 +52,7 @@ Find it in the side menu or in the *Architecture* card on the start screen.
   schedule) stays with its service: it is part of that process, not an event.
 - **Stores, not tables**: each store (Postgres, Firestore, SQL Server…) is a
   single box that shows its number of tables / collections. Click it to list
-  them with a filter. A store with up to 40 tables can also be expanded in the
-  drawing.
+  them with a filter.
 - **Lines are aggregated per pair**:
   - service → store, labelled `R`, `W` or `RW`;
   - service → topic (*publishes*);
@@ -64,18 +63,25 @@ Find it in the side menu or in the *Architecture* card on the start screen.
   Each line shows the number of accesses behind it, and its width grows with
   that number. A line is **dashed** when every link behind it is heuristic,
   as elsewhere in the page.
-- **Click a line** to see the functions behind it (`orders.Service.PlaceOrder →
-  orders W`, with `file:line`), each linking to its page.
+- **Hover a box** to light its lines; everything else fades.
+- **Click a line** (its label) to see the functions behind it
+  (`orders.Service.PlaceOrder → orders W`, with `file:line`), each linking to
+  its page.
 - **Click a box** to see a service's links. A topic box opens its flow.
-- **Stable layout**: the export computes the positions (layered columns,
-  ordered by their neighbours), so the same graph always gives the same
-  drawing. No new library: the page draws them with the Cytoscape it already
-  embeds. A line that skips columns runs at right angles, between the boxes of
-  the topic and worker columns.
+- **One layer at a time**: the tabs *All*, *Data*, *HTTP* and *Queues and
+  triggers* (with their line counts) draw one kind of line at a time. A big
+  system (more than 45 lines) opens on *Data*; a small one on *All*.
+- **Topics folded per publisher**: when one service is the only publisher of
+  3 or more topics, they are one box (`shop-api · 4 topics`, with how many
+  have no consumer). Click it, or *show its topics one by one* in the
+  service's panel, to open it.
+- **Drawn by Mermaid**, the renderer GitHub uses for the PR comment: columns
+  as frames, curved lines that avoid the boxes. Mermaid 11 is embedded in the
+  page (no network). The same graph gives the same drawing. Use + / − / fit to
+  zoom; a wide drawing scrolls sideways.
 
 With about 15 services and 800 tables the drawing still has one box per
-service, topic and store. The page grows taller and scrolls; use the + / − /
-fit buttons to zoom.
+service, topic and store.
 
 ![15 services, 800 tables: one box per store](../img/views-architecture-large.png)
 

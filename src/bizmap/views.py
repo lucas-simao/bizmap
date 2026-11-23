@@ -780,6 +780,17 @@ def _mtext(s: str) -> str:
 
 
 RW_TXT = {1: "R", 2: "W", 3: "RW"}
+# the HTML's colours (views.js MM_CLASS): front ends, APIs, libraries, workers, stores, topics
+MERMAID_CLASSES = (
+    "classDef web fill:#8250df,stroke:#8250df,color:#fff",
+    "classDef api fill:#0969da,stroke:#0969da,color:#fff",
+    "classDef lib fill:#57606a,stroke:#57606a,color:#fff",
+    "classDef worker fill:#1a7f37,stroke:#1a7f37,color:#fff",
+    "classDef store fill:#ddf4ff,stroke:#54aeff,color:#1f2328",
+    "classDef topic fill:#fff8c5,stroke:#d4a72c,color:#1f2328",
+    "classDef fn fill:#ffffff,stroke:#d0d7de,color:#1f2328",
+    "classDef warn stroke:#cf222e,stroke-width:2px",
+)
 LAYER_TITLE = {0: "Front ends", 1: "APIs / services", 2: "Topics", 3: "Workers / functions", 4: "Stores"}
 
 
@@ -815,6 +826,14 @@ def mermaid_architecture(arch: dict[str, Any]) -> str:
         lines.append("  end")
     if len(anchors) > 1:
         lines.append("  " + " ~~~ ".join(anchors))
+    lines += [f"  {c}" for c in MERMAID_CLASSES]
+    by_cls: dict[str, list[str]] = defaultdict(list)
+    for n in arch["nodes"]:
+        cls = "store" if n["kind"] == "store" else "topic" if n["kind"] == "topic" else n.get("role") or "api"
+        by_cls[cls].append(ids[n["id"]])
+        if n.get("status") not in (None, "ok"):
+            by_cls["warn"].append(ids[n["id"]])
+    lines += [f"  class {','.join(v)} {k}" for k, v in sorted(by_cls.items())]
     for e in arch["edges"]:
         lab = RW_TXT.get(e["rw"], "") if e["rel"] == "rw" else {"pub": "publishes", "sub": "consumes", "http": "HTTP",
                                                                   "trigger": "trigger"}.get(e["rel"], e["rel"])
@@ -848,6 +867,13 @@ def mermaid_flow(flow: dict[str, Any]) -> str:
         lab = {"reads": "R", "writes": "W", "pub": "publishes", "sub": "", "trigger": "trigger"}.get(e["rel"], "")
         arrow = "-.->" if e["guess"] else "-->"
         lines.append(f"  {ids[e['from']]} {arrow}{'|' + lab + '|' if lab else ''} {ids[e['to']]}")
+    lines += [f"  {c}" for c in MERMAID_CLASSES]
+    by_cls: dict[str, list[str]] = defaultdict(list)
+    for n in flow["nodes"]:
+        by_cls[{"data": "store", "event": "topic", "fn": "fn"}[n["kind"]]].append(ids[n["id"]])
+        if n["kind"] == "event" and n["key"] == flow["key"] and flow["status"] != "ok":
+            by_cls["warn"].append(ids[n["id"]])
+    lines += [f"  class {','.join(v)} {k}" for k, v in sorted(by_cls.items())]
     return "\n".join(lines)
 
 

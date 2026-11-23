@@ -68,6 +68,8 @@ exclude = ["docs/assets", "docs/img"]
 "src/bizmap/export/query.js" = "bizmap/export/query.js"
 "src/bizmap/export/vendor/cytoscape.min.js" = "bizmap/export/vendor/cytoscape.min.js"
 "src/bizmap/export/vendor/cytoscape.LICENSE" = "bizmap/export/vendor/cytoscape.LICENSE"
+"src/bizmap/export/vendor/mermaid.min.js" = "bizmap/export/vendor/mermaid.min.js"
+"src/bizmap/export/vendor/mermaid.LICENSE" = "bizmap/export/vendor/mermaid.LICENSE"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

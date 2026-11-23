@@ -205,6 +205,7 @@ cd examples/export && bizmap export --graph shop.graph.json --out shop.html
 | Part | What | License |
 | --- | --- | --- |
 | [Cytoscape.js](https://js.cytoscape.org/) 3.34.1 | the service map (inlined, minified) | MIT (notice kept at the top of the inlined file) |
+| [Mermaid](https://mermaid.js.org/) 11.16.1 | the architecture, queue-flow and map diagrams (inlined, minified; `<!--` written `<\!--`, which JavaScript reads the same, so it can sit in a `<script>`) | MIT (`vendor/mermaid.LICENSE`) |
 | `export/book.js` | BizMap's own plain JavaScript: no framework, no build step | MIT (BizMap) |
 | `export/template.html` | the page and its CSS | MIT (BizMap) |
 

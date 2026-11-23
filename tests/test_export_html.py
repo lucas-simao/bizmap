@@ -340,7 +340,13 @@ def test_screen_group_prefers_ui_folders() -> None:
 def test_html_is_self_contained_and_offline() -> None:
     html = export_graph(_demo(), "html")
     assert html.startswith("<!DOCTYPE html>")
-    assert not re.search(r'<(script|link|img)[^>]+(src|href)=', html)
+    # the inlined Mermaid bundle holds markup in strings (`'<img src="'`): nothing the page loads
+    from importlib import resources
+
+    mermaid_js = resources.files("bizmap.export").joinpath("vendor/mermaid.min.js").read_text(encoding="utf-8")
+    assert mermaid_js in html
+    page = html.replace(mermaid_js, "")
+    assert not re.search(r'<(script|link|img)[^>]+(src|href)=', page)
     assert "Cytoscape Consortium" in html  # MIT notice kept with the inlined lib
     blocks = _blocks(html)
     assert set(blocks) == {"index", "names", *blocks["index"]["chunks"]}

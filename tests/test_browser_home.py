@@ -203,7 +203,8 @@ def test_map_is_one_or_two_hops_around_an_entity(repro_html: Path) -> None:
         pg.page.click('#hops a[data-h="2"]')
         pg.page.wait_for_timeout(300)
         two = pg.page.evaluate("() => window.__bizmap.mapNodes.slice().sort()")
-        canvas = pg.page.query_selector("#map canvas") is not None
+        pg.page.wait_for_selector("#map svg g.node")
+        canvas = pg.page.query_selector("#map svg") is not None
         errors = pg.close()
     assert not errors, errors
     assert "nunca desenha o sistema inteiro" in prompt and has_input

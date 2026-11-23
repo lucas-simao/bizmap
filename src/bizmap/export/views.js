@@ -25,6 +25,8 @@
       relPub: "publishes", relSub: "consumes", relHttp: "HTTP", relTrigger: "trigger", none: "Nothing to draw: no services linked to stores or topics in this graph.",
       noFlow: "No publisher or consumer of {q} in this graph.", moreData: "+{n} more not drawn",
       cardArch: "{s} services · {d} stores · {t} topics", cardQueues: "{n} sources", cardProblems: "{n} with a problem",
+      fAll: "All", fData: "Data", fHttp: "HTTP", fEvents: "Queues and triggers", hoverHint: "Hover a box to light its lines; click a line for what is behind it.",
+      topicGroup: "{s} · {n} topics", topicGroupWarn: "{n} without a consumer", clickOpen: "click to open", unfoldTopics: "show its topics one by one", foldTopics: "fold its topics",
     },
     "pt-BR": {
       arch: "Arquitetura", archLead: "Como os serviços se ligam aos bancos e às filas: front-ends → APIs → tópicos → workers / functions → bancos. Espessura = número de acessos; tracejado = só ligações heurísticas. Clique numa caixa ou numa linha.",
@@ -47,6 +49,8 @@
       relPub: "publica", relSub: "consome", relHttp: "HTTP", relTrigger: "trigger", none: "Nada para desenhar: nenhum serviço ligado a bancos ou tópicos neste grafo.",
       noFlow: "Nenhum publicador ou consumidor de {q} neste grafo.", moreData: "+{n} não desenhados",
       cardArch: "{s} serviços · {d} bancos · {t} tópicos", cardQueues: "{n} origens", cardProblems: "{n} com problema",
+      fAll: "Tudo", fData: "Dados", fHttp: "HTTP", fEvents: "Filas e triggers", hoverHint: "Passe o mouse numa caixa para destacar as linhas dela; clique numa linha para ver o que está por trás.",
+      topicGroup: "{s} · {n} tópicos", topicGroupWarn: "{n} sem consumidor", clickOpen: "clique para abrir", unfoldTopics: "mostrar os tópicos um a um", foldTopics: "agrupar os tópicos",
     },
   };
   var V = VT[IX.lang] || VT.en;
@@ -67,87 +71,196 @@
   function evKindWord(k) { return V["k_" + k] || k; }
   function svcNames(list) { return list.map(function (s) { return sv(s); }).join(", "); }
 
-  // ── one Cytoscape drawing with column headers (positions from the export) ──
-  var VSTYLE = [
-    { selector: "node", style: { "label": "data(label)", "shape": "round-rectangle", "width": 206, "height": 46, "text-wrap": "wrap", "text-max-width": 196, "text-overflow-wrap": "anywhere",
-      "text-valign": "center", "text-halign": "center", "font-size": 11, "background-color": "#eaeef2", "border-width": 1, "border-color": "#d0d7de", "color": "#1f2328" } },
-    { selector: 'node[kind = "service"]', style: { "background-color": "#0969da", "border-color": "#0969da", "color": "#fff", "font-weight": 600 } },
-    { selector: 'node[kind = "service"][role = "web"]', style: { "background-color": "#8250df", "border-color": "#8250df" } },
-    { selector: 'node[kind = "service"][role = "worker"]', style: { "background-color": "#1a7f37", "border-color": "#1a7f37" } },
-    { selector: 'node[kind = "store"]', style: { "shape": "barrel", "height": 58, "background-color": "#ddf4ff", "border-color": "#54aeff" } },
-    { selector: 'node[kind = "topic"], node[kind = "event"]', style: { "shape": "cut-rectangle", "background-color": "#fff8c5", "border-color": "#d4a72c" } },
-    { selector: 'node[warn = 1]', style: { "border-color": "#cf222e", "border-width": 2 } },
-    { selector: 'node[kind = "data"]', style: { "shape": "barrel", "background-color": "#ddf4ff", "border-color": "#54aeff", "width": 160 } },
-    { selector: 'node[kind = "fn"]', style: { "background-color": "#fff", "width": 180 } },
-    { selector: 'node[kind = "ent"]', style: { "shape": "barrel", "height": 30, "width": 150, "font-size": 10, "background-color": "#f6f8fa", "border-color": "#54aeff" } },
-    { selector: 'node[kind = "head"]', style: { "shape": "rectangle", "background-opacity": 0, "border-width": 0, "font-weight": 600, "color": "#656d76",
-      "font-size": 12, "height": 20, "events": "no" } },
-    { selector: "node:selected", style: { "border-width": 3, "border-color": "#cf222e" } },
-    { selector: "edge", style: { "label": "data(label)", "curve-style": "bezier", "target-arrow-shape": "triangle", "width": "data(w)", "font-size": 10,
-      "line-color": "#8c959f", "target-arrow-color": "#8c959f", "text-background-color": "#fff", "text-background-opacity": 1, "text-background-padding": 2 } },
-    { selector: 'edge[rel = "pub"], edge[rel = "sub"]', style: { "line-color": "#d4a72c", "target-arrow-color": "#d4a72c" } },
-    { selector: 'edge[rel = "http"]', style: { "line-color": "#8250df", "target-arrow-color": "#8250df" } },
-    { selector: 'edge[rel = "trigger"]', style: { "line-color": "#1a7f37", "target-arrow-color": "#1a7f37" } },
-    { selector: "edge[guess = 1]", style: { "line-style": "dashed" } },
-    { selector: "edge[taxi = 1]", style: { "curve-style": "taxi", "taxi-direction": "horizontal", "taxi-turn": "data(turn)", "taxi-turn-min-distance": 10,
-      "label": "", "source-label": "data(label)", "source-text-offset": "data(lofs)", "text-background-opacity": 1 } },
-    { selector: "edge[dim = 1]", style: { "opacity": 0.2 } },
-    { selector: "edge:selected", style: { "line-color": "#cf222e", "target-arrow-color": "#cf222e" } },
+  // ── one Mermaid drawing (the renderer GitHub uses for the PR comment) ──
+  // def: { groups: [{id, label, cls, nodes: [ids], parent}], nodes: [{id, label, sub, shape, cls, title}],
+  //        edges: [{from, to, label, dashed, width, color, back}], chain: [group ids, invisible order] }
+  // Node / edge ids are ours; Mermaid gets short ones (n0, g0) so any name is safe.
+  var MM = { ready: false, seq: 0 };
+  function mmInit() {
+    if (MM.ready || typeof mermaid === "undefined") return MM.ready;
+    mermaid.initialize({ startOnLoad: false, securityLevel: "strict", maxTextSize: 5000000, maxEdges: 20000, theme: "base",
+      themeVariables: { fontFamily: getComputedStyle(document.body).fontFamily, fontSize: "13px", primaryColor: "#f6f8fa", primaryBorderColor: "#d0d7de",
+                        lineColor: "#8c959f", clusterBkg: "#f6f8fa", clusterBorder: "#d0d7de", edgeLabelBackground: "#ffffff" },
+      flowchart: { htmlLabels: true, curve: "basis", nodeSpacing: 26, rankSpacing: 64, padding: 10, useMaxWidth: false, diagramPadding: 12 } });
+    MM.ready = true;
+    return true;
+  }
+  function mmText(s) {  // a label Mermaid shows as text, never markup
+    return String(s).replace(/&/g, "#amp;").replace(/"/g, "#quot;").replace(/</g, "#lt;").replace(/>/g, "#gt;");
+  }
+  var MM_CLASS = [
+    "classDef web fill:#8250df,stroke:#8250df,color:#fff,font-weight:600",
+    "classDef api fill:#0969da,stroke:#0969da,color:#fff,font-weight:600",
+    "classDef lib fill:#57606a,stroke:#57606a,color:#fff,font-weight:600",
+    "classDef worker fill:#1a7f37,stroke:#1a7f37,color:#fff,font-weight:600",
+    "classDef store fill:#ddf4ff,stroke:#54aeff,color:#1f2328",
+    "classDef topic fill:#fff8c5,stroke:#d4a72c,color:#1f2328",
+    "classDef fn fill:#ffffff,stroke:#d0d7de,color:#1f2328",
+    "classDef col fill:#f6f8fa,stroke:#d0d7de,color:#57606a",
+    "classDef more fill:#f6f8fa,stroke:#adb5bd,color:#57606a,stroke-dasharray:3 3",
+    "classDef warn stroke:#cf222e,stroke-width:2px",
+    "classDef center stroke:#cf222e,stroke-width:3px",
   ];
-  function headers(nodes, titleOf) {
-    var cols = {}, top = Infinity;
-    nodes.forEach(function (n) { cols[n.x] = n.layer; top = Math.min(top, n.y); });
-    return Object.keys(cols).map(function (x) {
-      return { data: { id: "h" + x, label: titleOf(cols[x]), kind: "head" }, position: { x: +x, y: (top === Infinity ? 0 : top) - 56 }, selectable: false, grabbable: false };
+  function mmBuild(def) {
+    var ids = {}, gids = {}, lines = ["flowchart LR"], inGroup = {};
+    def.nodes.forEach(function (n, k) { ids[n.id] = "n" + k; });
+    (def.groups || []).forEach(function (g, k) { gids[g.id] = "g" + k; g.nodes.forEach(function (id) { inGroup[id] = g.id; }); });
+    function nodeLine(n) {
+      var t = mmText(n.label) + (n.sub ? "<br/><small>" + mmText(n.sub) + "</small>" : "");
+      var m = ids[n.id];
+      if (n.shape === "db") return m + '[("' + t + '")]';
+      if (n.shape === "topic") return m + '(["' + t + '"])';
+      if (n.shape === "round") return m + '("' + t + '")';
+      return m + '["' + t + '"]';
+    }
+    var byGroup = {};
+    def.nodes.forEach(function (n) { (byGroup[inGroup[n.id] || ""] = byGroup[inGroup[n.id] || ""] || []).push(n); });
+    function emitGroup(g, pad) {
+      lines.push(pad + "subgraph " + gids[g.id] + '["' + mmText(g.label) + '"]');
+      (def.groups || []).forEach(function (c) { if (c.parent === g.id) emitGroup(c, pad + "  "); });
+      (byGroup[g.id] || []).forEach(function (n) { lines.push(pad + "  " + nodeLine(n)); });
+      lines.push(pad + "end");
+    }
+    (def.groups || []).forEach(function (g) { if (!g.parent) emitGroup(g, "  "); });
+    (byGroup[""] || []).forEach(function (n) { lines.push("  " + nodeLine(n)); });
+    function ref(id) { return ids[id] || gids[id]; }
+    var seen = {}, edgeKeys = [];
+    def.edges.forEach(function (e) {
+      var a = ref(e.from), b = ref(e.to);
+      if (!a || !b) { edgeKeys.push(null); return; }
+      // Mermaid ranks by link direction: a link that flows right to left is written left to right with its head on the left
+      var l = e.back ? b : a, r = e.back ? a : b;
+      var arrow = e.back ? (e.dashed ? "<-.-" : "<---") : (e.dashed ? "-.->" : "-->");
+      if (e.plain) arrow = e.dashed ? "-.-" : "---";
+      lines.push("  " + l + " " + arrow + (e.label ? '|"' + mmText(e.label) + '"|' : "") + " " + r);
+      var pair = l + "_" + r;
+      seen[pair] = (seen[pair] || 0);
+      edgeKeys.push("L_" + pair + "_" + seen[pair]);
+      seen[pair]++;
     });
+    def.edges.forEach(function (e, k) {
+      if (!edgeKeys[k]) return;
+      var st = [];
+      if (e.color) st.push("stroke:" + e.color);
+      if (e.width) st.push("stroke-width:" + e.width + "px");
+      if (st.length) lines.push("  linkStyle " + edgeKeys.filter(function (x, j) { return j < k && x; }).length + " " + st.join(","));
+    });
+    var chain = (def.chain || []).map(ref).filter(Boolean);
+    if (chain.length > 1) lines.push("  " + chain.join(" ~~~ "));
+    lines = lines.concat(MM_CLASS.map(function (c) { return "  " + c; }));
+    var byCls = {};
+    def.nodes.forEach(function (n) { String(n.cls || "").split(" ").filter(Boolean).forEach(function (c) { (byCls[c] = byCls[c] || []).push(ids[n.id]); }); });
+    Object.keys(byCls).sort().forEach(function (c) { lines.push("  class " + byCls[c].join(",") + " " + c); });
+    return { text: lines.join("\n"), ids: ids, gids: gids, edgeKeys: edgeKeys };
   }
-  function draw(box, els) {
-    if (typeof cytoscape !== "function") return null;
-    // an edge that skips columns runs as a right-angled line (taxi) and turns
-    // just before its target column, so the long lines read as one bus
-    var at = {};
-    els.forEach(function (e) { if (e.position && e.data.kind !== "head") at[e.data.id] = e.position; });
-    var longBySrc = {};
-    els.forEach(function (e) {
-      var a = at[e.data.source], b = at[e.data.target];
-      if (a && b && Math.abs(b.x - a.x) > 300) (longBySrc[e.data.source] = longBySrc[e.data.source] || []).push(e);
-    });
-    // several long lines from one box: each turns a little earlier and has its label further along, so none hides another
-    Object.keys(longBySrc).forEach(function (src) {
-      var list = longBySrc[src].sort(function (p, q) { return at[p.data.target].y - at[q.data.target].y; });
-      list.forEach(function (e, k) {
-        var a = at[e.data.source], b = at[e.data.target];
-        e.data.taxi = 1;
-        e.data.turn = Math.round(Math.abs(b.x - a.x) - 70 - 16 * k);
-        e.data.lofs = 46 + 64 * k;
+  // draws def in box; on.node(id), on.group(id), on.edge(index) on click; hover a box to light its lines
+  function mmDraw(box, def, on) {
+    on = on || {};
+    var built = mmBuild(def);
+    window.__bizmap.mermaid = built.text;
+    if (!mmInit()) { box.innerHTML = '<pre class="mono small">' + esc(built.text) + "</pre>"; return Promise.resolve(null); }
+    var diag = "mm" + (++MM.seq);
+    box.innerHTML = '<p class="muted small">…</p>';
+    return mermaid.render(diag, built.text).then(function (res) {
+      if (!box.isConnected) return null;
+      box.innerHTML = res.svg;
+      var svg = box.querySelector("svg");
+      var mid2id = {}, gid2id = {};
+      Object.keys(built.ids).forEach(function (k) { mid2id[built.ids[k]] = k; });
+      Object.keys(built.gids).forEach(function (k) { gid2id[built.gids[k]] = k; });
+      var title = {};
+      def.nodes.forEach(function (n) { if (n.title) title[n.id] = n.title; });
+      // node -> its edges, edge -> its DOM parts
+      var adj = {}, parts = [];
+      def.edges.forEach(function (e, k) {
+        (adj[e.from] = adj[e.from] || []).push(k);
+        (adj[e.to] = adj[e.to] || []).push(k);
+        var key = built.edgeKeys[k];
+        parts[k] = key ? Array.prototype.slice.call(svg.querySelectorAll('[data-id="' + key + '"]')).map(function (el) {
+          return el.closest("g.edgeLabel") || el;
+        }) : [];
       });
+      var nodeEls = {};
+      Array.prototype.forEach.call(svg.querySelectorAll("g.node"), function (g) {
+        var m = /-flowchart-(n\d+)-\d+$/.exec(g.id);
+        if (!m || !mid2id[m[1]]) return;
+        var id = mid2id[m[1]];
+        nodeEls[id] = g;
+        g.setAttribute("data-node", id);
+        g.style.cursor = "pointer";
+        if (title[id]) { var t = document.createElementNS("http://www.w3.org/2000/svg", "title"); t.textContent = title[id]; g.appendChild(t); }
+      });
+      function light(id) {
+        svg.classList.toggle("hl", !!id);
+        Array.prototype.forEach.call(svg.querySelectorAll(".on"), function (el) { el.classList.remove("on"); });
+        if (!id) return;
+        if (nodeEls[id]) nodeEls[id].classList.add("on");
+        (adj[id] || []).forEach(function (k) {
+          parts[k].forEach(function (el) { el.classList.add("on"); });
+          [def.edges[k].from, def.edges[k].to].forEach(function (x) { if (nodeEls[x]) nodeEls[x].classList.add("on"); });
+        });
+      }
+      var pinned = null;
+      Object.keys(nodeEls).forEach(function (id) {
+        var g = nodeEls[id];
+        g.addEventListener("mouseenter", function () { if (!pinned) light(id); });
+        g.addEventListener("mouseleave", function () { if (!pinned) light(null); });
+        g.addEventListener("click", function () { pinned = id; light(id); if (on.node) on.node(id); });
+      });
+      Array.prototype.forEach.call(svg.querySelectorAll("g.cluster"), function (g) {
+        var gid = g.id.slice(diag.length + 1);
+        if (!gid2id[gid] || !on.group) return;
+        var lab = g.querySelector(".cluster-label");
+        if (lab) { lab.style.cursor = "pointer"; lab.addEventListener("click", function () { on.group(gid2id[gid]); }); }
+      });
+      parts.forEach(function (els, k) {
+        els.forEach(function (el) {
+          el.style.cursor = "pointer";
+          el.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            pinned = null; light(null);
+            svg.classList.add("hl");
+            els.forEach(function (x) { x.classList.add("on"); });
+            [def.edges[k].from, def.edges[k].to].forEach(function (x) { if (nodeEls[x]) nodeEls[x].classList.add("on"); });
+            if (on.edge) on.edge(k);
+          });
+        });
+      });
+      svg.addEventListener("click", function (ev) { if (ev.target === svg) { pinned = null; light(null); } });
+      // size: the natural width, shrunk to the box (not below 55%); + / − / fit buttons
+      var natural = parseFloat(svg.getAttribute("width")) || svg.getBBox().width;
+      var minScale = on.minScale || 0.55;  // narrower than this: the box scrolls sideways
+      var scale = Math.min(1, Math.max(minScale, (box.clientWidth - 16) / natural));
+      function zoom(z) {
+        scale = z;
+        svg.style.width = Math.round(natural * scale) + "px";
+        svg.style.height = "auto";
+        svg.style.maxWidth = "none";
+      }
+      zoom(scale);
+      var bar = document.createElement("div");
+      bar.className = "vzoom";
+      bar.innerHTML = '<button class="ctl" data-z="1.25" title="+">+</button><button class="ctl" data-z="0.8" title="−">−</button><button class="ctl" data-z="0" title="fit">⤢</button>';
+      if (box.previousElementSibling && box.previousElementSibling.className === "vzoom") box.parentNode.removeChild(box.previousElementSibling);
+      box.parentNode.insertBefore(bar, box);
+      bar.onclick = function (ev) {
+        var z = ev.target.closest("[data-z]");
+        if (!z) return;
+        var f = +z.getAttribute("data-z");
+        zoom(f ? Math.max(0.2, Math.min(3, scale * f)) : Math.min(1, (box.clientWidth - 16) / natural));
+      };
+      return { svg: svg, light: light, built: built };
+    }).catch(function (err) {
+      if (box.isConnected) box.innerHTML = '<p class="risk">' + esc(String(err && err.message || err)) + '</p><pre class="mono small">' + esc(built.text) + "</pre>";
+      return null;
     });
-    var ys = els.filter(function (e) { return e.position; }).map(function (e) { return e.position.y; });
-    var xs = els.filter(function (e) { return e.position; }).map(function (e) { return e.position.x; });
-    var spanY = ys.length ? Math.max.apply(null, ys) - Math.min.apply(null, ys) : 0;
-    var spanX = xs.length ? Math.max.apply(null, xs) - Math.min.apply(null, xs) : 0;
-    // tall enough for a readable zoom (the page scrolls; the wheel scrolls the page, not the drawing)
-    var w = box.clientWidth || 1000, zoom = Math.min(1, (w - 60) / (spanX + 220));
-    box.style.height = Math.max(220, Math.min(Math.round((spanY + 140) * zoom), 4000)) + "px";
-    var cy = cytoscape({ container: box, elements: els, layout: { name: "preset", fit: true, padding: 30 }, minZoom: 0.15, maxZoom: 2.5,
-      boxSelectionEnabled: false, autoungrabify: true, userZoomingEnabled: false, style: VSTYLE });
-    if (cy.zoom() > 1) { cy.zoom(1); cy.center(); }  // a small flow keeps its real size
-    var bar = document.createElement("div");
-    bar.className = "vzoom";
-    bar.innerHTML = '<button class="ctl" data-z="1.25" title="+">+</button><button class="ctl" data-z="0.8" title="−">−</button><button class="ctl" data-z="0" title="fit">⤢</button>';
-    box.parentNode.insertBefore(bar, box);
-    bar.onclick = function (ev) {
-      var z = ev.target.closest("[data-z]");
-      if (!z) return;
-      var f = +z.getAttribute("data-z");
-      if (!f) cy.fit(undefined, 30);
-      else cy.zoom({ level: cy.zoom() * f, renderedPosition: { x: box.clientWidth / 2, y: box.clientHeight / 2 } });
-    };
-    return cy;
   }
+  var REL_COLOR = { rw: "#8c959f", pub: "#d4a72c", sub: "#d4a72c", http: "#8250df", trigger: "#1a7f37", reads: "#8c959f", writes: "#8c959f", own: "#d0d7de" };
 
   // ── #/architecture ──
-  var ARCH = { open: {}, side: null };
+  var ARCH = { open: {}, side: null, layer: null };
+  var ARCH_BIG = 45;  // more lines than this: open on one layer at a time
+  var REL_GROUP = { rw: "rw", http: "http", pub: "ev", sub: "ev", trigger: "ev" };
   function pageArch() {
     wide(true); toc("arch");
     crumbs([esc(V.arch)]);
@@ -156,98 +269,135 @@
     window.__bizmap.view = A;
     var h = '<div class="answer"><h1>' + esc(V.arch) + '</h1><p class="lead">' + esc(V.archLead) + "</p>";
     if (!A.nodes.length) { read(h + '<p class="muted">' + esc(V.none) + "</p></div>"); detail(""); return; }
-    h += '<div class="vwrap"><div id="vmap" class="vmap"></div><div id="vside" class="vside"><p class="muted">' + esc(V.pick) + "</p></div></div></div>";  // side panel under the drawing
+    // one layer at a time (or all): a big system reads layer by layer
+    var counts = { rw: 0, http: 0, ev: 0 };
+    A.edges.forEach(function (e) { counts[REL_GROUP[e.rel] || "rw"]++; });
+    if (!ARCH.layer) ARCH.layer = A.edges.length > ARCH_BIG ? (counts.rw ? "rw" : counts.http ? "http" : "ev") : "all";
+    h += '<div class="bar"><div class="tabs" id="vlayers">' + [["all", V.fAll, A.edges.length], ["rw", V.fData, counts.rw], ["http", V.fHttp, counts.http], ["ev", V.fEvents, counts.ev]].map(function (f) {
+      return '<a href="#" data-l="' + f[0] + '" class="' + (ARCH.layer === f[0] ? "on" : "") + '">' + esc(f[1]) + " " + num(f[2]) + "</a>";
+    }).join("") + '</div><span class="muted small">' + esc(V.hoverHint) + "</span></div>";
+    h += '<div class="vwrap"><div id="vmap" class="vmap mm"></div><div id="vside" class="vside"><p class="muted">' + esc(V.pick) + "</p></div></div></div>";
     read(h); detail("");
+    Array.prototype.forEach.call(document.querySelectorAll("#vlayers a"), function (a) {
+      a.onclick = function (ev) { ev.preventDefault(); ARCH.layer = a.getAttribute("data-l"); pageArch(); };
+    });
     var byId = {}, edgeById = {};
     A.nodes.forEach(function (n) { byId[n.id] = n; });
     A.edges.forEach(function (e) { edgeById[e.id] = e; });
-    function nodeLabel(n) {
-      if (n.kind === "store") return n.label + "\n" + Object.keys(n.count).map(function (k) { return n.count[k] + " " + (k === "collection" ? H.kindCollection : k === "view" ? H.kindView : H.kindTable) + (n.count[k] === 1 ? "" : "s"); }).join(" · ");
-      if (n.kind === "topic") return n.label + (n.status !== "ok" ? "\n⚠ " + (V["box_" + n.status] || n.status) : "");
-      return n.label;
-    }
+    // topics only one service publishes to, three or more: one box per publisher until opened
+    var pubsOf = {}, topicsOf = {};
+    A.edges.forEach(function (e) { if (e.rel === "pub") (pubsOf[e.to] = pubsOf[e.to] || {})[e.from] = 1; });
+    Object.keys(pubsOf).forEach(function (t) { var ps = Object.keys(pubsOf[t]); if (ps.length === 1) (topicsOf[ps[0]] = topicsOf[ps[0]] || []).push(t); });
+    var groupOf = {};
+    Object.keys(topicsOf).forEach(function (sid) { if (topicsOf[sid].length >= 3 && !ARCH.open[sid]) topicsOf[sid].forEach(function (t) { groupOf[t] = "tg:" + sid; }); });
     function edgeLabel(e) {
       var rel = e.rel === "rw" ? (e.rw === 3 ? H.RW : e.rw & 2 ? H.W : H.R) : e.rel === "pub" ? V.relPub : e.rel === "sub" ? V.relSub : e.rel === "http" ? V.relHttp : V.relTrigger;
-      return rel + " · " + e.n;
+      return e.n > 1 || e.rel === "rw" || e.rel === "http" ? rel + " · " + num(e.n) : rel;
     }
-    function elements() {
-      var els = A.nodes.map(function (n) {
-        return { data: { id: n.id, label: nodeLabel(n), kind: n.kind, role: n.role || "", warn: n.status && n.status !== "ok" ? 1 : 0 }, position: { x: n.x, y: n.y } };
-      });
-      var expanded = {};
-      A.nodes.forEach(function (n) {
-        if (n.kind !== "store" || !ARCH.open[n.id] || !n.ents.length) return;
-        expanded[n.id] = 1;
-        var step = 36, y0 = n.y - (n.ents.length - 1) * step / 2;
-        n.ents.forEach(function (en, k) {
-          var id = "x:" + en[0];
-          els.push({ data: { id: id, label: en[1], kind: "ent", ref: en[0] }, position: { x: n.x + 230, y: y0 + k * step } });
-          en[3].forEach(function (c) {
-            if (!byId["s" + c[0]]) return;
-            els.push({ data: { id: "s" + c[0] + ">" + id, source: "s" + c[0], target: id, label: c[1] === 3 ? H.RW : c[1] & 2 ? H.W : H.R, w: 1, guess: c[2], rel: "rw" } });
-          });
-        });
-      });
-      A.edges.forEach(function (e) {
-        els.push({ data: { id: e.id, source: e.from, target: e.to, label: edgeLabel(e), w: e.w, guess: e.guess, rel: e.rel,
-                           dim: expanded[e.to] || expanded[e.from] ? 1 : 0 } });
-      });
-      return els.concat(headers(A.nodes, function (layer) { return V.layers[layer] || ""; }));
+    // the edges drawn: filtered, with grouped topics folded into their group box
+    var drawn = [], merged = {};
+    A.edges.forEach(function (e) {
+      if (ARCH.layer !== "all" && ARCH.layer !== (REL_GROUP[e.rel] || "rw")) return;
+      var a = groupOf[e.from] || e.from, b = groupOf[e.to] || e.to;
+      var key = a + ">" + b + ">" + e.rel;
+      if (merged[key] !== undefined) {
+        var m = drawn[merged[key]];
+        m.n += e.n; m.src.push(e); m.guess = m.guess && e.guess; m.w = Math.max(m.w, e.w);
+        return;
+      }
+      merged[key] = drawn.length;
+      drawn.push({ from: a, to: b, rel: e.rel, rw: e.rw, n: e.n, guess: e.guess, w: e.w, src: [e] });
+    });
+    var used = {};
+    drawn.forEach(function (d) { used[d.from] = 1; used[d.to] = 1; });
+    var layerOf = {}, groups = V.layers.map(function (title, k) { return { id: "L" + k, label: title, nodes: [] }; });
+    var nodes = [];
+    function addNode(n) {
+      if (!used[n.id]) return;
+      layerOf[n.id] = n.layer;
+      groups[n.layer].nodes.push(n.id);
+      nodes.push(n);
     }
-    var cy = draw($("vmap"), elements());
-    window.__bizmap.viewNodes = A.nodes.map(function (n) { return n.id; });
-    if (!cy) return;
-    cy.on("tap", "node", function (ev) {
-      var id = ev.target.id(), n = byId[id];
-      if (ev.target.data("kind") === "ent") { location.hash = hrefOf(qPath(ev.target.data("ref"), "w")); return; }
-      if (!n) return;
-      if (n.kind === "topic") { location.hash = hrefOf("topic/" + encodeURIComponent(n.key)); return; }
-      ARCH.side = n.id;
-      $("vside").innerHTML = n.kind === "store" ? storeSide(n) : serviceSide(n);
-      wireSide(n);
+    A.nodes.slice().sort(function (p, q) { return p.layer - q.layer || p.y - q.y || (p.id < q.id ? -1 : 1); }).forEach(function (n) {
+      if (groupOf[n.id]) return;
+      if (n.kind === "store") {
+        var count = Object.keys(n.count).map(function (k) { return num(n.count[k]) + " " + (k === "collection" ? H.kindCollection : k === "view" ? H.kindView : H.kindTable) + (n.count[k] === 1 ? "" : "s"); }).join(" · ");
+        addNode({ id: n.id, layer: 4, label: n.label, sub: count, shape: "db", cls: "store" });
+      } else if (n.kind === "topic") {
+        addNode({ id: n.id, layer: 2, label: n.label, sub: n.status !== "ok" ? "⚠ " + (V["box_" + n.status] || n.status) : "", shape: "topic",
+                  cls: "topic" + (n.status !== "ok" ? " warn" : "") });
+      } else {
+        addNode({ id: n.id, layer: n.layer, label: n.label, cls: n.role === "lib" ? "lib" : n.role });
+      }
     });
-    cy.on("tap", "edge", function (ev) {
-      var e = edgeById[ev.target.id()];
-      if (!e) return;
-      var a = byId[e.from], b = byId[e.to];
-      var count = e.rel === "rw" || e.rel === "trigger" ? (e.n === 1 ? V.accesses1 : fmt(V.accesses, { n: num(e.n) })) : (e.n === 1 ? V.calls1 : fmt(V.calls, { n: num(e.n) }));
-      $("vside").innerHTML = "<h3>" + esc(a.label) + " → " + esc(b.label) + '</h3><p class="muted">' + esc(edgeLabel(e).split(" · ")[0]) + " · " + esc(count) +
-        (e.guess ? " · " + esc(H.conf_heuristic) : "") + "</p><ul class=vlist>" + e.items.map(itemHtml).join("") + "</ul>" +
-        (e.more ? '<p class="muted small">' + esc(fmt(V.more, { n: num(e.more) })) + "</p>" : "");
+    Object.keys(topicsOf).forEach(function (sid) {
+      var gid = "tg:" + sid;
+      if (!used[gid] || !topicsOf[sid].length || ARCH.open[sid]) return;
+      var warn = topicsOf[sid].filter(function (t) { return byId[t] && byId[t].status !== "ok"; }).length;
+      addNode({ id: gid, layer: 2, label: fmt(V.topicGroup, { s: byId[sid].label, n: num(topicsOf[sid].length) }),
+                sub: (warn ? "⚠ " + fmt(V.topicGroupWarn, { n: num(warn) }) + " · " : "") + V.clickOpen, shape: "topic", cls: "topic" + (warn ? " warn" : "") });
     });
+    var top = 1;
+    drawn.forEach(function (d) { top = Math.max(top, d.n); });
+    var def = { groups: groups.filter(function (g) { return g.nodes.length; }), nodes: nodes,
+      edges: drawn.map(function (d) {
+        return { from: d.from, to: d.to, label: edgeLabel(d), dashed: !!d.guess, color: REL_COLOR[d.rel],
+                 width: Math.round((1.2 + 4.3 * Math.log(1 + d.n) / Math.log(1 + top)) * 10) / 10, back: layerOf[d.from] > layerOf[d.to] };
+      }) };
+    def.chain = def.groups.map(function (g) { return g.id; });
+    window.__bizmap.viewNodes = nodes.map(function (n) { return n.id; });
+    function showEdge(k) {
+      var d = drawn[k], a = byId[d.from], b = byId[d.to];
+      var la = a ? a.label : nodes.filter(function (n) { return n.id === d.from; })[0].label, lb = b ? b.label : nodes.filter(function (n) { return n.id === d.to; })[0].label;
+      var items = [], more = 0;
+      d.src.forEach(function (e) { items = items.concat(e.items); more += e.more; });
+      var count = d.rel === "rw" || d.rel === "trigger" ? (d.n === 1 ? V.accesses1 : fmt(V.accesses, { n: num(d.n) })) : (d.n === 1 ? V.calls1 : fmt(V.calls, { n: num(d.n) }));
+      $("vside").innerHTML = "<h3>" + esc(la) + " → " + esc(lb) + '</h3><p class="muted">' + esc(edgeLabel(d).split(" · ")[0]) + " · " + esc(count) +
+        (d.guess ? " · " + esc(H.conf_heuristic) : "") + "</p><ul class=vlist>" + items.slice(0, 60).map(itemHtml).join("") + "</ul>" +
+        (more || items.length > 60 ? '<p class="muted small">' + esc(fmt(V.more, { n: num(more + Math.max(0, items.length - 60)) })) + "</p>" : "");
+    }
     function serviceSide(n) {
       var lines = A.edges.filter(function (e) { return e.from === n.id || e.to === n.id; }).map(function (e) {
         var other = byId[e.from === n.id ? e.to : e.from];
         return "<li>" + (e.from === n.id ? "→ " : "← ") + esc(other.label) + " <b>" + esc(edgeLabel(e)) + "</b></li>";
       });
-      return "<h3>" + esc(n.label) + ' <span class="kind">' + esc(n.role) + '</span></h3><p><a href="#/s/' + n.svc + '">' + esc(V.openService) + "</a></p><ul class=vlist>" + lines.join("") + "</ul>";
+      return "<h3>" + esc(n.label) + ' <span class="kind">' + esc(n.role) + '</span></h3><p><a href="#/s/' + n.svc + '">' + esc(V.openService) + "</a>" +
+        (topicsOf[n.id] && topicsOf[n.id].length >= 3 ? ' · <a href="#" id="vtg">' + esc(ARCH.open[n.id] ? V.foldTopics : V.unfoldTopics) + "</a>" : "") +
+        "</p><ul class=vlist>" + lines.join("") + "</ul>";
     }
     function storeSide(n) {
-      var h = "<h3>" + esc(n.label) + '</h3><p class="muted">' + esc(fmt(V.store, { n: num(n.n) })) + "</p>";
-      if (n.ents.length) h += '<p><button id="vexp" class="ctl">' + esc(ARCH.open[n.id] ? V.collapse : V.expand) + "</button></p>";
-      else if (n.n) h += '<p class="muted small">' + esc(fmt(V.tooMany, { n: num(n.n) })) + "</p>";
-      h += '<input id="vfil" class="ctl filter" placeholder="' + esc(V.filter) + '"><ul class="vlist" id="vents"></ul>';
-      return h;
+      return "<h3>" + esc(n.label) + '</h3><p class="muted">' + esc(fmt(V.store, { n: num(n.n) })) + "</p>" +
+        '<input id="vfil" class="ctl filter" placeholder="' + esc(V.filter) + '"><ul class="vlist" id="vents"></ul>';
     }
-    function wireSide(n) {
-      if (n.kind !== "store") return;
-      function list(q) {
-        q = (q || "").toLowerCase();
-        var rows = n.all.filter(function (e) { return !q || e[1].toLowerCase().indexOf(q) >= 0; });
-        $("vents").innerHTML = rows.slice(0, 200).map(function (e) {
-          return '<li><a href="' + hrefOf(qPath(e[0], "w")) + '">' + esc(e[1]) + '</a> <span class="kind">' + esc(e[2]) + "</span></li>";
-        }).join("") + (rows.length > 200 ? '<li class="muted">' + esc(fmt(V.more, { n: num(rows.length - 200) })) + "</li>" : "");
+    function side(id) {
+      var n = byId[id];
+      if (!n) return;
+      ARCH.side = id;
+      $("vside").innerHTML = n.kind === "store" ? storeSide(n) : serviceSide(n);
+      if (n.kind === "store") {
+        var list = function (q) {
+          q = (q || "").toLowerCase();
+          var rows = n.all.filter(function (e) { return !q || e[1].toLowerCase().indexOf(q) >= 0; });
+          $("vents").innerHTML = rows.slice(0, 200).map(function (e) {
+            return '<li><a href="' + hrefOf(qPath(e[0], "w")) + '">' + esc(e[1]) + '</a> <span class="kind">' + esc(e[2]) + "</span></li>";
+          }).join("") + (rows.length > 200 ? '<li class="muted">' + esc(fmt(V.more, { n: num(rows.length - 200) })) + "</li>" : "");
+        };
+        list("");
+        $("vfil").oninput = function () { list(this.value); };
       }
-      list("");
-      $("vfil").oninput = function () { list(this.value); };
-      var b = $("vexp");
-      if (b) b.onclick = function () { ARCH.open[n.id] = !ARCH.open[n.id]; pageArch(); };
+      var tg = $("vtg");
+      if (tg) tg.onclick = function (ev) { ev.preventDefault(); ARCH.open[id] = !ARCH.open[id]; pageArch(); };
     }
-    if (ARCH.side && byId[ARCH.side]) {  // the panel stays open across a redraw (expand / collapse)
-      var keep = byId[ARCH.side];
-      $("vside").innerHTML = keep.kind === "store" ? storeSide(keep) : serviceSide(keep);
-      wireSide(keep);
-    }
+    mmDraw($("vmap"), def, {
+      node: function (id) {
+        if (id.indexOf("tg:") === 0) { ARCH.open[id.slice(3)] = 1; pageArch(); return; }
+        var n = byId[id];
+        if (n && n.kind === "topic") { location.hash = hrefOf("topic/" + encodeURIComponent(n.key)); return; }
+        side(id);
+      },
+      edge: showEdge,
+      group: function () {},
+    }).then(function () { if (ARCH.side && byId[ARCH.side] && $("vside")) side(ARCH.side); });
   }
 
   // ── #/queues ──
@@ -333,30 +483,33 @@
       }).join(", ") : "") + "</li>";
     }).join("") + "</ul>" : '<p class="muted">' + esc(V.noOne) + "</p>");
     read(h + "</div>"); detail("");
-    var els = F.nodes.map(function (n) {
-      var warnNode = n.kind === "event" && n.key === F.key && F.status !== "ok";
-      return { data: { id: n.id, label: n.label + (n.sub ? "\n" + n.sub : ""), kind: n.kind, warn: warnNode ? 1 : 0 }, position: { x: n.x, y: n.y } };
-    });
-    F.edges.forEach(function (e) {
-      var lab = e.rel === "reads" ? H.R : e.rel === "writes" ? H.W : e.rel === "trigger" ? V.relTrigger : "";
-      els.push({ data: { id: e.id, source: e.from, target: e.to, label: lab, w: 1.6, guess: e.guess, rel: e.rel } });
-    });
-    els = els.concat(headers(F.nodes, function (layer) {
-      if (layer < 5) return V.flowCols[layer];
-      return [V.next, V.nextC, V.nextW][(layer - 5) % 3];
-    }));
+    var cols = {};
+    F.nodes.forEach(function (n) { (cols[n.layer] = cols[n.layer] || []).push(n); });
+    var layers = Object.keys(cols).map(Number).sort(function (a, b) { return a - b; });
+    function colTitle(layer) { return layer < 5 ? V.flowCols[layer] : [V.next, V.nextC, V.nextW][(layer - 5) % 3]; }
+    var def = {
+      groups: layers.map(function (l) { return { id: "C" + l, label: colTitle(l), nodes: cols[l].slice().sort(function (p, q) { return p.y - q.y; }).map(function (n) { return n.id; }) }; }),
+      nodes: F.nodes.map(function (n) {
+        var warnNode = n.kind === "event" && n.key === F.key && F.status !== "ok";
+        return { id: n.id, label: n.label, sub: n.sub || "", shape: n.kind === "data" ? "db" : n.kind === "event" ? "topic" : "box",
+                 cls: n.kind === "data" ? "store" : n.kind === "event" ? "topic" + (warnNode ? " warn" : "") : n.svc >= 0 && SV[n.svc] ? (SV[n.svc].kind === "lib" ? "lib" : SV[n.svc].kind) : "fn" };
+      }),
+      edges: F.edges.map(function (e) {
+        var lab = e.rel === "reads" ? H.R : e.rel === "writes" ? H.W : e.rel === "trigger" ? V.relTrigger : "";
+        return { from: e.from, to: e.to, label: lab, dashed: !!e.guess, color: REL_COLOR[e.rel] || "#8c959f", width: 1.6 };
+      }),
+    };
+    def.chain = def.groups.map(function (g) { return g.id; });
     var byId = {};
     F.nodes.forEach(function (n) { byId[n.id] = n; });
     window.__bizmap.viewNodes = F.nodes.map(function (n) { return n.id; });
-    var cy = draw($("vmap"), els);
-    if (!cy) return;
-    cy.on("tap", "node", function (ev) {
-      var n = byId[ev.target.id()];
+    mmDraw($("vmap"), def, { minScale: 0.8, node: function (id) {
+      var n = byId[id];
       if (!n) return;
       if (n.kind === "data") location.hash = hrefOf(qPath(n.ref, "w"));
       else if (n.kind === "event" && n.key !== F.key) location.hash = hrefOf("topic/" + encodeURIComponent(n.key));
       else if (n.kind === "fn") { var href = viewLink(n.link, n.fk); if (href) location.hash = href; }
-    });
+    } });
   }
 
   // ── start screen: two cards that open the views ──

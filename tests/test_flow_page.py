@@ -110,6 +110,10 @@ def test_new_fields_are_escaped_in_the_page_data() -> None:
     data["nodes"][4]["evidence"] = {"file": f"{bad}.go", "line": 1}
     html = export_graph(data, "html")
     html = html if isinstance(html, str) else html[0]
+    from importlib import resources
+
+    # the inlined Mermaid bundle holds `<img` in its own strings; the page data must not
+    html = html.replace(resources.files("bizmap.export").joinpath("vendor/mermaid.min.js").read_text(encoding="utf-8"), "")
     assert "<img" not in html  # names, column_map and evidence travel as escaped JSON
     assert "\\u003cimg" in html
 

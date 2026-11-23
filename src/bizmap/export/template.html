@@ -148,6 +148,15 @@
   /* architecture and event-flow views */
   .vwrap { display: flex; flex-direction: column; gap: 10px; }
   .vmap { width: 100%; height: 420px; border: 1px solid var(--line); border-radius: 8px; }
+  /* Mermaid diagrams (architecture, queue flow, map): hover / click lights one box's lines */
+  .mm { overflow: auto; padding: 8px; background: var(--bg); }
+  .vmap.mm, #map.mm { height: auto; min-height: 120px; max-height: calc(100vh - 150px); }
+  .mm svg { display: block; margin: 0 auto; }
+  .mm svg g.node, .mm svg g.edgeLabel, .mm svg path.flowchart-link { transition: opacity .12s; }
+  .mm svg.hl g.node:not(.on), .mm svg.hl g.edgeLabel:not(.on), .mm svg.hl path.flowchart-link:not(.on) { opacity: .12; }
+  .mm svg.hl path.flowchart-link.on { stroke-width: 3px !important; }
+  .mm svg g.cluster rect { rx: 8px; ry: 8px; }
+  .mm svg .cluster-label { fill: var(--muted); color: var(--muted); }
   .vzoom { display: flex; gap: 4px; justify-content: flex-end; margin: 0 0 -4px; } .vzoom .ctl { width: 32px; padding: 0; justify-content: center; }
   .vside { max-width: 900px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
   .vside h3 { margin: 2px 0 6px; font-size: 14px; } .vside .filter { width: 100%; margin: 4px 0 6px; }
@@ -256,6 +265,7 @@
 </div>
 <!--__DATA__-->
 <script>/*__CYTOSCAPE__*/</script>
+<script>/*__MERMAID__*/</script>
 <script>/*__QUERY__*/</script>
 <script>/*__APP__*/</script>
 </body>

@@ -304,20 +304,33 @@ def test_architecture_and_event_flow_pages(tmp_path: Path) -> None:
         walk.go("#/")
         cards = page.eval_on_selector_all("#vcards .fcard", "els => els.map(e => e.getAttribute('data-href'))")
         walk.go("#/architecture")
-        page.wait_for_timeout(200)
+        page.wait_for_selector("#vmap svg g.node")
         arch_nodes = page.evaluate("() => window.__bizmap.viewNodes")
-        canvas = page.query_selector("#vmap canvas")
+        drawn = page.eval_on_selector_all("#vmap svg g.node", "els => els.map(e => e.getAttribute('data-node')).sort()")
+        tabs = page.eval_on_selector_all("#vlayers a", "els => els.map(e => e.innerText + (e.classList.contains('on') ? '*' : ''))")
         toc = page.inner_text("#toc")
-        # a click on a line opens what is behind it
+        # hovering a box lights its lines and fades the rest
+        page.hover('#vmap svg g.node[data-node="s2"]')
+        lit = page.evaluate("""() => ({ hl: document.querySelector('#vmap svg').classList.contains('hl'),
+            on: Array.from(document.querySelectorAll('#vmap svg g.node.on')).map(e => e.getAttribute('data-node')).sort() })""")
+        page.mouse.move(2, 2)
+        # a click on a line's label opens what is behind it
         page.evaluate("""() => {
-            const cy = document.querySelector('#vmap')._cyreg.cy;
-            cy.getElementById('s2>db:Postgres>rw').emit('tap');
+            const lab = Array.from(document.querySelectorAll('#vmap svg g.edgeLabel')).find(e => e.textContent.includes('RW · 6'));
+            lab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         }""")
         side = page.inner_text("#vside")
+        # one layer at a time
+        page.click('#vlayers a[data-l="http"]')
+        page.wait_for_selector("#vmap svg g.node")
+        http_nodes = page.evaluate("() => window.__bizmap.viewNodes.slice().sort()")
+        page.click('#vlayers a[data-l="all"]')
         walk.go("#/queues")
         queue_rows = page.eval_on_selector_all("#qtable tbody tr", "els => els.map(e => e.innerText.replace(/\\s+/g, ' ').trim())")
         placed = walk.go("#/topic/order-placed")
+        page.wait_for_selector("#vmap svg g.node")
         flow_nodes = page.evaluate("() => window.__bizmap.viewNodes")
+        flow_drawn = page.eval_on_selector_all("#vmap svg g.node", "els => els.length")
         cancelled = walk.go("#/topic/order-cancelled")
         warn = page.inner_text("#vwarn")
         trigger = walk.go("#/topic/" + "firestore%3Apayment_events")
@@ -325,12 +338,16 @@ def test_architecture_and_event_flow_pages(tmp_path: Path) -> None:
         browser.close()
     assert not walk.errors, walk.errors
     assert cards == ["#/architecture", "#/queues"]
-    assert canvas is not None and len(arch_nodes) == 8
+    assert len(arch_nodes) == 8 and drawn == sorted(arch_nodes), (arch_nodes, drawn)
+    assert tabs == ["All 9*", "Data 4", "HTTP 1", "Queues and triggers 4"], tabs
+    assert lit["hl"] and lit["on"] == ["db:Postgres", "q:queue:pubsub:order-cancelled", "q:queue:pubsub:order-placed", "s2", "s3"], lit
+    assert http_nodes == ["s2", "s3"], http_nodes
     assert "Architecture" in toc and "Queues and events" in toc
     assert "shop-api → Postgres" in side and "orders.Service.PlaceOrder" in side
     assert any(r.startswith("order-cancelled") and "no consumer" in r for r in queue_rows), queue_rows
     assert "couponCode" in placed and "never published" in placed
     assert any("notify-fn/" in n for n in flow_nodes), flow_nodes  # the chain, 3 hops
+    assert flow_drawn == len(flow_nodes)
     assert "order-cancelled" in cancelled and "consumes" in warn
     assert "payment_events" in trigger and "Firestore trigger" in trigger
     assert by_qid == placed
@@ -338,8 +355,8 @@ def test_architecture_and_event_flow_pages(tmp_path: Path) -> None:
 
 def _mermaid_js() -> Path | None:
     """Mermaid's browser build: BIZMAP_MERMAID_JS (CI installs it), else a local npm copy."""
-    for cand in (os.environ.get("BIZMAP_MERMAID_JS"), "/opt/npm-tools/node_modules/mermaid/dist/mermaid.min.js",
-                 "node_modules/mermaid/dist/mermaid.min.js"):
+    vendored = Path(__file__).resolve().parents[1] / "src" / "bizmap" / "export" / "vendor" / "mermaid.min.js"
+    for cand in (os.environ.get("BIZMAP_MERMAID_JS"), str(vendored)):
         if cand and Path(cand).is_file():
             return Path(cand)
     return None
@@ -387,3 +404,30 @@ def test_mermaid_architecture_renders_in_the_html_column_order() -> None:
             for left, right in zip(layers, layers[1:], strict=False):
                 assert max(layer_x[left]) < min(layer_x[right]), (left, right, layer_x, text)
         browser.close()
+
+
+
+def test_architecture_folds_a_publisher_s_topics_and_opens_big_systems_on_one_layer(tmp_path: Path) -> None:
+    from fixtures.arch_demo import arch_graph
+
+    data = arch_graph()
+    for k, name in enumerate(("invoice-due", "stock-low")):  # shop-api publishes 4 topics now
+        q = f"queue:pubsub:{name}"
+        data["nodes"].append({"id": q, "type": "queue", "kind": "pubsub", "name": name})
+        data["edges"].append({"id": f"enq-x{k}", "type": "enqueues", "from": "shop-api/function:orders.Service.Get", "to": q,
+                              "confidence": "exact"})
+    html = _write(tmp_path, data)
+    with sync_api.sync_playwright() as p:
+        browser, page, walk = _open(p, html)
+        walk.go("#/architecture")
+        page.wait_for_selector("#vmap svg g.node")
+        folded = page.evaluate("() => window.__bizmap.viewNodes.filter(n => n.indexOf('q') === 0 || n.indexOf('tg:') === 0)")
+        label = page.text_content('#vmap svg g.node[data-node="tg:s2"]')
+        page.click('#vmap svg g.node[data-node="tg:s2"]')
+        page.wait_for_selector('#vmap svg g.node[data-node="q:queue:pubsub:stock-low"]')
+        opened = sorted(page.evaluate("() => window.__bizmap.viewNodes.filter(n => n.indexOf('q') === 0 || n.indexOf('tg:') === 0)"))
+        browser.close()
+    assert not walk.errors, walk.errors
+    assert folded == ["tg:s2"], folded
+    assert "shop-api · 4 topics" in label and "3 without a consumer" in label, label
+    assert opened == ["q:queue:pubsub:invoice-due", "q:queue:pubsub:order-cancelled", "q:queue:pubsub:order-placed", "q:queue:pubsub:stock-low"]
