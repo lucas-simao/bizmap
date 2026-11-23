@@ -316,7 +316,7 @@
    "label": "Firestore",
    "layer": 4,
    "n": 2,
-   "x": 960,
+   "x": 1080,
    "y": 0
   },
   {
@@ -400,7 +400,7 @@
    "label": "Postgres",
    "layer": 4,
    "n": 4,
-   "x": 960,
+   "x": 1080,
    "y": 72
   },
   {
@@ -410,7 +410,7 @@
    "label": "order-cancelled",
    "layer": 2,
    "status": "no_consumer",
-   "x": 480,
+   "x": 540,
    "y": 0
   },
   {
@@ -420,7 +420,7 @@
    "label": "order-placed",
    "layer": 2,
    "status": "ok",
-   "x": 480,
+   "x": 540,
    "y": 72
   },
   {
@@ -430,7 +430,7 @@
    "layer": 3,
    "role": "worker",
    "svc": 0,
-   "x": 720,
+   "x": 810,
    "y": 72
   },
   {
@@ -440,7 +440,7 @@
    "layer": 3,
    "role": "worker",
    "svc": 1,
-   "x": 720,
+   "x": 810,
    "y": 0
   },
   {
@@ -450,7 +450,7 @@
    "layer": 1,
    "role": "api",
    "svc": 2,
-   "x": 240,
+   "x": 270,
    "y": 36
   },
   {

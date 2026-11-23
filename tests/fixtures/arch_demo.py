@@ -154,3 +154,64 @@ def front_functions_graph() -> dict[str, Any]:
         _e("writes", f"{WEB}/function:functions.notifyOnOrderEvent", f"{WEB}/collection:notifications", evidence={"file": "functions/src/index.ts", "line": 9}),
     ]
     return {"version": "test", "nodes": nodes, "edges": edges}
+
+
+def mixed_kinds_graph() -> dict[str, Any]:
+    """Entrypoint kinds a real workspace mixes (all names made up):
+
+    - `ingest` (Python): only HTTP Cloud Functions (`firebase_http`) and a
+      Firestore trigger the scan also stored as a `firestore` queue node; two
+      Cloud Tasks producers on a queue named `cloud-tasks`.
+    - `assistant` (Python): HTTP routes; its own `cloud-tasks` queue.
+    - `portal` (TS front end): screens, plus an HTTP Cloud Function.
+    - `core` (Go): routes, and a goroutine loop the scan marks `scheduled_job`
+      with no schedule.
+    """
+    ex, asst, portal, core = "ingest", "assistant", "portal", "core"
+    nodes: list[dict[str, Any]] = [
+        _n(f"{ex}/entrypoint:firebase_http:POST:/produce", "entrypoint", kind="firebase_http", path="/produce", symbol="main.produce",
+           evidence={"file": "src/main.py", "line": 3}),
+        _fn(ex, "main.produce", "src/main.py", 3),
+        _fn(ex, "tasks.enqueue", "src/tasks.py", 10),
+        _n(f"{ex}/entrypoint:firestore:jobs:written", "entrypoint", kind="firestore", collection="jobs", event="written",
+           path="jobs/{id}", symbol="main.on_job", evidence={"file": "src/main.py", "line": 20}),
+        _fn(ex, "main.on_job", "src/main.py", 20),
+        _n(f"{ex}/queue:firestore:jobs", "queue", kind="firestore", name="jobs", repo=ex),
+        _n(f"{ex}/queue:cloud_tasks:cloud-tasks", "queue", kind="cloud_tasks", name="cloud-tasks", repo=ex),
+        _n(f"{ex}/collection:jobs", "collection", name="jobs", db="firestore:default"),
+        _n(f"{asst}/entrypoint:http:POST:/ask", "entrypoint", kind="http", method="POST", path="/ask", handler="app.ask",
+           evidence={"file": "app.py", "line": 5}),
+        _fn(asst, "app.ask", "app.py", 5),
+        _n(f"{asst}/queue:cloud_tasks:cloud-tasks", "queue", kind="cloud_tasks", name="cloud-tasks", repo=asst),
+        _fn(portal, "src.pages.Home", "src/pages/Home.tsx", 3),
+        _fn(portal, "src.api.ask", "src/api/ask.ts", 3),
+        _n(f"{portal}/entrypoint:firebase_http:rss", "entrypoint", kind="firebase_http", path="/rss", symbol="functions.rss",
+           evidence={"file": "functions/src/rss.ts", "line": 2}),
+        _fn(portal, "functions.rss", "functions/src/rss.ts", 2),
+        _n(f"{portal}/collection:posts", "collection", name="posts", db="firestore:default"),
+        _n(f"{core}/entrypoint:http:GET:/health", "entrypoint", kind="http", method="GET", path="/health", handler="health",
+           evidence={"file": "main.go", "line": 4}),
+        _fn(core, "health", "main.go", 4),
+        _n(f"{core}/entrypoint:job:hub.Run", "entrypoint", kind="scheduled_job", symbol="hub.Run", handler="hub.Run",
+           why="Run pumps messages until ctx ends.", evidence={"file": "hub.go", "line": 9}),
+        _fn(core, "hub.Run", "hub.go", 9),
+    ]
+    edges = [
+        _e("triggers", f"{ex}/entrypoint:firebase_http:POST:/produce", f"{ex}/function:main.produce"),
+        _e("calls", f"{ex}/function:main.produce", f"{ex}/function:tasks.enqueue"),
+        _e("enqueues", f"{ex}/function:tasks.enqueue", f"{ex}/queue:cloud_tasks:cloud-tasks", "inferred"),
+        _e("writes", f"{ex}/function:main.produce", f"{ex}/collection:jobs", evidence={"file": "src/main.py", "line": 6}),
+        _e("triggers", f"{ex}/entrypoint:firestore:jobs:written", f"{ex}/function:main.on_job"),
+        _e("triggers", f"{ex}/queue:firestore:jobs", f"{ex}/entrypoint:firestore:jobs:written", "inferred"),
+        _e("reads", f"{ex}/function:main.on_job", f"{ex}/collection:jobs", evidence={"file": "src/main.py", "line": 21}),
+        _e("triggers", f"{asst}/entrypoint:http:POST:/ask", f"{asst}/function:app.ask"),
+        _e("enqueues", f"{asst}/function:app.ask", f"{asst}/queue:cloud_tasks:cloud-tasks", "inferred"),
+        _e("calls", f"{portal}/function:src.pages.Home", f"{portal}/function:src.api.ask"),
+        _e("calls_http", f"{portal}/function:src.api.ask", f"{asst}/entrypoint:http:POST:/ask", "inferred"),
+        _e("triggers", f"{portal}/entrypoint:firebase_http:rss", f"{portal}/function:functions.rss"),
+        _e("reads", f"{portal}/function:functions.rss", f"{portal}/collection:posts", evidence={"file": "functions/src/rss.ts", "line": 4}),
+        _e("reads", f"{portal}/function:src.pages.Home", f"{portal}/collection:posts", evidence={"file": "src/pages/Home.tsx", "line": 5}),
+        _e("triggers", f"{core}/entrypoint:http:GET:/health", f"{core}/function:health"),
+        _e("triggers", f"{core}/entrypoint:job:hub.Run", f"{core}/function:hub.Run"),
+    ]
+    return {"version": "test", "nodes": nodes, "edges": edges}

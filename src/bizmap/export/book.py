@@ -106,6 +106,44 @@ def node_label(node: dict[str, Any]) -> str:
     return str(node.get("name") or leaf.split(":", 1)[-1])
 
 
+def classify_service(files: list[str], calls_out: int, routes: int, jobs: int) -> str:
+    """web / api / worker / lib: the side menu's groups, and the architecture
+    view's columns (HTML and Mermaid). A JS/TS code base that calls APIs is a
+    front end (or client) when it has UI files or no routes of its own (a Vite
+    app with only .ts files counts); else `http` routes make an API; else any
+    other entrypoint (consumer, trigger, job, Firebase function) a worker."""
+    front = sum(1 for f in files if f.endswith(FRONT_EXT))
+    ui = any(f.endswith(UI_EXT) for f in files) or any(f"/{d}/" in f"/{f}" for f in files for d in ("pages", "screens", "components"))
+    if files and front / len(files) >= 0.6 and calls_out and (ui or not routes):
+        return "web"
+    if routes:
+        return "api"
+    if jobs:
+        return "worker"
+    return "lib"
+
+
+def service_kinds(data: dict[str, Any], svc_of: dict[str, str | None]) -> list[str]:
+    """:func:`classify_service` for every service (sorted names), from the graph
+    alone: what the CLI's Mermaid uses, so it matches the HTML's side menu."""
+    overview = build_overview(data, svc_of)
+    names = [row["name"] for row in overview["services"]]
+    pos = {n: i for i, n in enumerate(names)}
+    files: dict[int, list[str]] = defaultdict(list)
+    unresolved: set[str] = {str(u.get("from")) for u in data.get("unresolved_http") or [] if isinstance(u, dict) and u.get("from")}
+    with_unresolved: dict[int, int] = defaultdict(int)
+    for node in data.get("nodes") or []:
+        s = pos.get(svc_of.get(node["id"]) or "")
+        if s is None:
+            continue
+        if node.get("type") == "function" and _file(node):
+            files[s].append(_file(node))
+        if node["id"] in unresolved or any(isinstance(u, dict) for u in node.get("unresolved_http") or []):
+            with_unresolved[s] += 1
+    return [classify_service(files[s], row["calls_out"] + with_unresolved[s], row["routes"], row["jobs"])
+            for s, row in enumerate(overview["services"])]
+
+
 def _file(node: dict[str, Any]) -> str:
     ev = node.get("evidence")
     return str(ev.get("file")) if isinstance(ev, dict) and ev.get("file") else ""
@@ -266,20 +304,8 @@ def build_book(
     svc_rows = []
     for s, row in enumerate(overview["services"]):
         files = [f for f in files_by_svc.get(s, []) if f]
-        front = sum(1 for f in files if f.endswith(FRONT_EXT))
-        ui = any(f.endswith(UI_EXT) for f in files) or any(f"/{d}/" in f"/{f}" for f in files for d in ("pages", "screens", "components"))
         calls_out = row["calls_out"] + sum(1 for i in range(n_nodes) if nsvc[i] == s and i in unresolved_by)
-        # a JS/TS code base that calls APIs is a front end (or client) when it has UI
-        # files or no routes of its own (a Vite app with only .ts files counts)
-        if files and front / len(files) >= 0.6 and calls_out and (ui or not row["routes"]):
-            kind = "web"
-        elif row["routes"]:
-            kind = "api"
-        elif row["jobs"]:
-            kind = "worker"
-        else:
-            kind = "lib"
-        svc_rows.append({**row, "kind": kind})
+        svc_rows.append({**row, "kind": classify_service(files, calls_out, row["routes"], row["jobs"])})
 
     files = [_file(n) for n in nodes]
     noise = [is_noise(f) for f in files]
@@ -680,7 +706,7 @@ def build_book(
     # the start screen: answers by the query engine, summary, findings, matrix
     from bizmap.export.home import build_home  # it reuses this module's helpers
 
-    start, start_chunks = build_home(data, svc_of, services, index, lang=lang)
+    start, start_chunks = build_home(data, svc_of, services, index, lang=lang, roles=[r["kind"] for r in svc_rows])
     chunks.update(start_chunks)
     chunk_ids = sorted(chunks, key=lambda c: (c[0], int(c[1:]) if c[1:].isdigit() else 0))
     chunk_no = {c: n for n, c in enumerate(chunk_ids)}

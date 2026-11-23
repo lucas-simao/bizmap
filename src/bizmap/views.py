@@ -49,7 +49,7 @@ MAX_HOPS = 3  # event hops in a flow (the topic itself is the first)
 MAX_ITEMS = 30  # functions listed behind one aggregated edge
 MAX_EXPAND = 40  # a store expands into one node per entity up to this many
 MAX_FLOW_DATA = 8  # entities per column of a flow before "+N more"
-COL_W = 240
+COL_W = 270
 ROW_H = 72
 QUEUE_KINDS = ("pubsub", "topic", "celery_task", "celery", "rq", "cloud_task", "sqs", "sns", "kafka", "rabbitmq", "queue")
 
@@ -95,8 +95,11 @@ def context_from_data(data: dict[str, Any], svc_of: dict[str, str | None] | None
             h = hidden_cache[nid] = is_hidden(str(ev.get("file") or "") if isinstance(ev, dict) else "")
         return h
 
+    from bizmap.export.book import service_kinds
+
     ent_of, ents = entities_of(ix)
-    return Ctx(ix, services, guess_roles(ix, services, svc), svc, hidden, ent_of, ents)
+    # the HTML side menu's rule, from the same function: both outputs draw the same columns
+    return Ctx(ix, services, service_kinds(data, svc_of), svc, hidden, ent_of, ents)
 
 
 def entities_of(ix: Index, refs: dict[tuple[str, ...], str] | None = None) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
@@ -126,80 +129,47 @@ def entities_of(ix: Index, refs: dict[tuple[str, ...], str] | None = None) -> tu
 
 
 def _ep_kind(node: dict[str, Any]) -> str:
+    """http (a route) · fn_http (an HTTP / callable Cloud Function) · trigger
+    (Firestore / database) · cron (a schedule) · queue (a consumer) · process
+    (a background loop or worker process: `job`, `worker`)."""
     k = str(node.get("kind") or "other")
-    if k == "http" or k.startswith("firebase_http") or k == "firebase_call":
+    if k == "http":
         return "http"
+    if k.startswith("firebase_http") or k == "firebase_call":
+        return "fn_http"
     if k == "firestore" or "trigger" in k:
         return "trigger"
-    if k in ("scheduled_job", "job", "cron") or "cron" in k or "schedule" in k:
-        return "cron"
+    if k in ("scheduled_job", "cron") or "schedule" in k or "cron" in k:
+        # a Go loop started at boot (`go hub.Run(ctx)`) is a `scheduled_job` with no
+        # schedule: a background process, not something a schedule triggers
+        return "cron" if node.get("schedule") or k == "cron" else "process"
+    if k in ("job", "worker", "other", "cli", "main", "script"):
+        return "process"
     return "queue"
 
 
-def guess_roles(ix: Index, services: list[str], svc: Callable[[str], int]) -> list[str]:
-    """web / api / worker / lib per service, the HTML side menu's rule: a JS/TS
-    code base that calls APIs is a front end when it has UI files or no routes
-    of its own; else routes make an API, consumers / triggers / jobs a worker.
-    The HTML and the Mermaid output both use this; the functions of a front end
-    or an API that run on a trigger, a queue or a schedule get their own
-    "· functions" box (see :func:`worker_parts`)."""
-    from bizmap.export.book import FRONT_EXT, SCREEN_DIRS, UI_EXT
-
-    routes: dict[int, int] = defaultdict(int)
-    jobs: dict[int, int] = defaultdict(int)
-    calls_out: dict[int, int] = defaultdict(int)
-    files: dict[int, list[str]] = defaultdict(list)
-    for nid, node in ix.nodes.items():
-        s = svc(nid)
-        if node.get("type") == "entrypoint":
-            if _ep_kind(node) == "http":
-                routes[s] += 1
-            else:
-                jobs[s] += 1
-        elif node.get("type") == "function":
-            ev = node.get("evidence")
-            f = str(ev.get("file") or "") if isinstance(ev, dict) else ""
-            if f:
-                files[s].append(f)
-            if node.get("unresolved_http"):
-                calls_out[s] += 1
-    for edge in ix.out.edges:
-        if edge.get("type") == "calls_http":
-            calls_out[svc(edge["from"])] += 1
-    for u in ix.unresolved_http or []:
-        if isinstance(u, dict) and u.get("from"):
-            calls_out[svc(str(u["from"]))] += 1
-    roles = []
-    for s in range(len(services)):
-        fs = files[s]
-        front = sum(1 for f in fs if f.endswith(FRONT_EXT))
-        ui = any(f.endswith(UI_EXT) for f in fs) or any(f"/{d}/" in f"/{f}" for f in fs for d in SCREEN_DIRS[:3] + ("components",))
-        if fs and front / len(fs) >= 0.6 and calls_out[s] and (ui or not routes[s]):
-            roles.append("web")
-        elif routes[s]:
-            roles.append("api")
-        elif jobs[s]:
-            roles.append("worker")
-        else:
-            roles.append("lib")
-    return roles
+EVENT_KINDS = ("trigger", "cron", "queue")  # what runs on an event: the "· functions" box
 
 
 def worker_parts(ctx: Ctx) -> set[str]:
-    """Entrypoints and functions of a front end / API / library that run on a
-    trigger, a queue or a schedule (and nothing its routes or screens reach):
-    they are drawn in the workers column as "<service> · functions"."""
+    """Entrypoints and functions of a front end or an API that run on a trigger,
+    a queue or a schedule (and nothing its routes or screens reach): they are
+    drawn in the workers column as "<service> · functions". In a front end,
+    its server code (HTTP / callable Cloud Functions) goes there too: a front
+    end serves no routes. Background processes (`job`, `worker`) stay with
+    their service."""
     ix = ctx.ix
     out: set[str] = set()
     for s, role in enumerate(ctx.roles):
-        if role == "worker":
+        if role not in ("web", "api"):
             continue
+        moved = EVENT_KINDS + (("http", "fn_http") if role == "web" else ())
         event_eps, main_starts = [], []
         for nid, node in ix.nodes.items():
             if ctx.svc(nid) != s or ctx.hidden(nid):
                 continue
             if node.get("type") == "entrypoint":
-                (main_starts if _ep_kind(node) == "http" else event_eps).append(nid)
+                (event_eps if _ep_kind(node) in moved else main_starts).append(nid)
         if not event_eps:
             continue
         from bizmap.export.book import is_ui_file
@@ -342,7 +312,7 @@ def architecture(ctx: Ctx) -> dict[str, Any]:
             add(owner(a), sid, "rw", bit, rank, [*_fn_item(ctx, a), ctx.ents[ref]["name"], bit], f"{a}\x00{ref}")
     # topics: publishers and consumers
     for qid, qnode in sorted(ix.nodes.items()):
-        if qnode.get("type") != "queue":
+        if qnode.get("type") != "queue" or _fs_queue(qnode):
             continue
         tid = f"q:{qid}"
         pubs, subs = set(), set()
@@ -357,7 +327,7 @@ def architecture(ctx: Ctx) -> dict[str, Any]:
         if not pubs and not subs:
             continue
         status = "ok" if pubs and subs else "no_consumer" if pubs else "no_publisher"
-        nodes[tid] = {"id": tid, "kind": "topic", "label": str(qnode.get("name") or ix.label(qid)), "key": source_key(ix, qid),
+        nodes[tid] = {"id": tid, "kind": "topic", "label": topic_label(ix, qid), "key": source_key(ix, qid),
                       "layer": 2, "status": status, "order": 0}
     # Firestore triggers: the collection's store → the function's service
     for eid, enode in sorted(ix.nodes.items()):
@@ -427,11 +397,31 @@ def _collection_ref(ctx: Ctx, name: str, near: str) -> str | None:
 # ── event sources and their flows ────────────────────────────────────────────
 
 
+def _fs_queue(node: dict[str, Any]) -> bool:
+    """A "queue" the scan made for a Firestore trigger: drawn as the trigger
+    (store → function), not as a topic."""
+    return str(node.get("kind") or "") == "firestore"
+
+
+def _same_name(ix: Index, qid: str) -> list[str]:
+    name = str(ix.nodes[qid].get("name") or ix.label(qid))
+    return [q for q, n in ix.nodes.items() if n.get("type") == "queue" and not _fs_queue(n) and str(n.get("name") or ix.label(q)) == name]
+
+
+def topic_label(ix: Index, qid: str) -> str:
+    """The topic's name, with its repo when another queue has the same name
+    (`cloud-tasks (worker-a)`)."""
+    name = str(ix.nodes[qid].get("name") or ix.label(qid))
+    if len(_same_name(ix, qid)) > 1:
+        repo = ix.nodes[qid].get("repo") or ix.repo_of(qid)
+        return f"{name} ({repo})" if repo else name
+    return name
+
+
 def source_key(ix: Index, qid: str) -> str:
     """URL key of a topic: its name, or the node id when two queues share it."""
     name = str(ix.nodes[qid].get("name") or ix.label(qid))
-    same = [q for q, n in ix.nodes.items() if n.get("type") == "queue" and str(n.get("name") or ix.label(q)) == name]
-    return name if len(same) <= 1 else qid
+    return name if len(_same_name(ix, qid)) <= 1 else qid
 
 
 def _norm(name: str) -> str:
@@ -475,8 +465,8 @@ def event_sources(ctx: Ctx) -> list[_Src]:
     ix = ctx.ix
     out: list[_Src] = []
     for qid, node in sorted(ix.nodes.items()):
-        if node.get("type") == "queue":
-            out.append(_Src(source_key(ix, qid), "topic", str(node.get("name") or ix.label(qid)), qid, str(node.get("kind") or "")))
+        if node.get("type") == "queue" and not _fs_queue(node):
+            out.append(_Src(source_key(ix, qid), "topic", topic_label(ix, qid), qid, str(node.get("kind") or "")))
     fs: dict[str, list[str]] = defaultdict(list)
     for eid, node in sorted(ix.nodes.items()):
         if node.get("type") != "entrypoint" or ctx.hidden(eid):

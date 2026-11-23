@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Fixed (architecture view, queues, Python scan)
+
+- **Same columns as the side menu**: the architecture (HTML and Mermaid) and
+  the menu now call one function (`book.classify_service`). Only `http`
+  entrypoints count as routes, so a repo of HTTP / callable Cloud Functions is
+  a worker in both. Before, the architecture counted `firebase_http` /
+  `firebase_call` as routes and drew such a repo as an API.
+- **A front end's server code** (HTTP Cloud Functions next to the screens)
+  joins its `<service> · functions` box. A **background loop** (a Go goroutine
+  the scan marks `scheduled_job` without a schedule) stays with its service
+  and is no longer listed as a scheduled job.
+- **Firestore-trigger queues** (`kind: firestore` queue nodes) are no longer
+  drawn as topics with "no publisher": the trigger is already the store →
+  function line and its own event source.
+- **Topics with the same name** in different repos (`cloud-tasks`) show their
+  repo (`cloud-tasks (worker-a)`) instead of two identical boxes.
+- **Python: `asyncio.create_task(coro)` is not Cloud Tasks**. Before, any
+  `create_task` call was taken as Google Cloud Tasks, including asyncio,
+  `loop.create_task`, `TaskGroup.create_task` and `self._tasks.create_task`,
+  which gave a `cloud-tasks` topic with fake producers. Now it takes a Cloud
+  Tasks client (`tasks_v2`, `CloudTasksClient`, a `tasks_client`) or its
+  arguments (`parent=`, `task=`, `request=`, or two positional arguments).
+  Rescan to drop the fake producers from an existing graph.
+- Boxes are wider and wrap long names without spaces; columns are a little
+  further apart.
+
 ## 0.16.1 — 2026-11-23
 
 ### Fixed (architecture view, Mermaid)
