@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.17.1 — 2026-11-23
+
 ### Fixed (HTML export: map)
 
 - **A hub table at 2 hops is readable again.** With every detail on, the map
