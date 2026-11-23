@@ -680,7 +680,7 @@ def build_book(
     # the start screen: answers by the query engine, summary, findings, matrix
     from bizmap.export.home import build_home  # it reuses this module's helpers
 
-    start, start_chunks = build_home(data, svc_of, services, index, lang=lang)
+    start, start_chunks = build_home(data, svc_of, services, index, lang=lang, roles=[r["kind"] for r in svc_rows])
     chunks.update(start_chunks)
     chunk_ids = sorted(chunks, key=lambda c: (c[0], int(c[1:]) if c[1:].isdigit() else 0))
     chunk_no = {c: n for n, c in enumerate(chunk_ids)}

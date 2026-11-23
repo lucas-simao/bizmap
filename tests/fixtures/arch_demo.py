@@ -1,0 +1,124 @@
+"""Fictional workspace for the architecture and event-flow views (tests, docs).
+
+- shop-api (Go, Postgres `orders`, `customers`, `order_items`): routes to place,
+  cancel and read an order; publishes `order-placed` and `order-cancelled`.
+- shop-web (TS): pages calling shop-api over HTTP.
+- billing-worker (Python): consumes `order-placed`, writes `invoices`
+  (Postgres) and `payment_events` (Firestore).
+- notify-fn (Cloud Function): Firestore trigger on `payment_events`, writes
+  `notifications`.
+
+`order-cancelled` has no consumer. All names are made up.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def _n(nid: str, ntype: str, **attrs: Any) -> dict[str, Any]:
+    return {"id": nid, "type": ntype, **attrs}
+
+
+def _e(etype: str, a: str, b: str, conf: str = "exact", **attrs: Any) -> dict[str, Any]:
+    return {"id": f"{etype}:{a}->{b}", "type": etype, "from": a, "to": b, "confidence": conf, **attrs}
+
+
+def _fn(repo: str, name: str, file: str, line: int, **attrs: Any) -> dict[str, Any]:
+    return _n(f"{repo}/function:{name}", "function", name=name, evidence={"file": file, "line": line},
+              start_line=line, end_line=line + 9, **attrs)
+
+
+API, WEB, BILL, FN = "shop-api", "shop-web", "billing-worker", "notify-fn"
+Q_PLACED, Q_CANCEL = "queue:pubsub:order-placed", "queue:pubsub:order-cancelled"
+
+
+def arch_graph() -> dict[str, Any]:
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    # shop-api
+    for t, cols in {"orders": ["id", "customer_id", "status", "total_cents"], "customers": ["id", "email", "tier"],
+                    "order_items": ["id", "order_id", "sku", "qty"]}.items():
+        nodes.append(_n(f"{API}/table:{t}", "table", name=t, engine="postgres", db="shop"))
+        for c in cols:
+            nodes.append(_n(f"{API}/column:{t}.{c}", "column", table=t, name=c))
+    for method, path, handler in (("POST", "/orders", "handlers.Orders.Create"), ("POST", "/orders/{id}/cancel", "handlers.Orders.Cancel"),
+                                  ("GET", "/orders/{id}", "handlers.Orders.Get")):
+        eid = f"{API}/entrypoint:http:{method}:{path}"
+        nodes.append(_n(eid, "entrypoint", kind="http", method=method, path=path, handler=handler,
+                        evidence={"file": "internal/http/routes.go", "line": 10}))
+        nodes.append(_fn(API, handler, "internal/http/orders.go", 20))
+        edges.append(_e("triggers", eid, f"{API}/function:{handler}"))
+    svc = [("orders.Service.PlaceOrder", 30), ("orders.Service.Cancel", 60), ("orders.Service.Get", 80),
+           ("events.Publisher.OrderPlaced", 12), ("events.Publisher.OrderCancelled", 30)]
+    for name, line in svc:
+        nodes.append(_fn(API, name, f"internal/{name.split('.')[0]}/{name.split('.')[0]}.go", line))
+    nodes.append(_n(Q_PLACED, "queue", kind="pubsub", name="order-placed"))
+    nodes.append(_n(Q_CANCEL, "queue", kind="pubsub", name="order-cancelled"))
+    f = lambda n: f"{API}/function:{n}"  # noqa: E731
+    edges += [
+        _e("calls", f("handlers.Orders.Create"), f("orders.Service.PlaceOrder")),
+        _e("calls", f("handlers.Orders.Cancel"), f("orders.Service.Cancel")),
+        _e("calls", f("handlers.Orders.Get"), f("orders.Service.Get")),
+        _e("calls", f("orders.Service.PlaceOrder"), f("events.Publisher.OrderPlaced")),
+        _e("calls", f("orders.Service.Cancel"), f("events.Publisher.OrderCancelled")),
+        _e("reads", f("orders.Service.PlaceOrder"), f"{API}/table:customers", evidence={"file": "internal/orders/orders.go", "line": 33}),
+        _e("writes", f("orders.Service.PlaceOrder"), f"{API}/column:orders.total_cents", evidence={"file": "internal/orders/orders.go", "line": 40}),
+        _e("writes", f("orders.Service.PlaceOrder"), f"{API}/table:order_items", evidence={"file": "internal/orders/orders.go", "line": 44}),
+        _e("writes", f("orders.Service.Cancel"), f"{API}/column:orders.status", evidence={"file": "internal/orders/orders.go", "line": 62}),
+        _e("reads", f("orders.Service.Get"), f"{API}/table:orders", evidence={"file": "internal/orders/orders.go", "line": 82}),
+        _e("reads", f("orders.Service.Get"), f"{API}/table:order_items", "inferred", evidence={"file": "internal/orders/orders.go", "line": 84}),
+        _e("enqueues", f("events.Publisher.OrderPlaced"), Q_PLACED, fields=["customerId", "orderId", "totalCents"],
+           evidence={"file": "internal/events/events.go", "line": 14}),
+        _e("enqueues", f("events.Publisher.OrderCancelled"), Q_CANCEL, fields=["orderId", "reason"],
+           evidence={"file": "internal/events/events.go", "line": 32}),
+    ]
+    # shop-web
+    nodes.append(_fn(WEB, "src.api.orders.placeOrder", "src/api/orders.ts", 5))
+    nodes.append(_fn(WEB, "src.api.orders.getOrder", "src/api/orders.ts", 12))
+    nodes.append(_fn(WEB, "src.pages.Checkout", "src/pages/Checkout.tsx", 8))
+    nodes.append(_fn(WEB, "src.pages.OrderPage", "src/pages/OrderPage.tsx", 8))
+    edges += [
+        _e("calls", f"{WEB}/function:src.pages.Checkout", f"{WEB}/function:src.api.orders.placeOrder"),
+        _e("calls", f"{WEB}/function:src.pages.OrderPage", f"{WEB}/function:src.api.orders.getOrder"),
+        _e("calls_http", f"{WEB}/function:src.api.orders.placeOrder", f"{API}/entrypoint:http:POST:/orders", "inferred"),
+        _e("calls_http", f"{WEB}/function:src.api.orders.getOrder", f"{API}/entrypoint:http:GET:/orders/{{id}}", "inferred"),
+    ]
+    # billing-worker
+    ep = f"{BILL}/entrypoint:pubsub:order-placed"
+    on = f"{BILL}/function:billing.handlers.on_order_placed"
+    nodes += [
+        _n(ep, "entrypoint", kind="pubsub", topic="order-placed", handler="billing.handlers.on_order_placed",
+           evidence={"file": "billing/main.py", "line": 9}),
+        _fn(BILL, "billing.handlers.on_order_placed", "billing/handlers.py", 14,
+            dataflow_in=[{"topic": "order-placed", "fields": {
+                "orderId": [{"table": "table:invoices", "column": "order_id"}],
+                "totalCents": [{"table": "table:invoices", "column": "amount_cents"}],
+                "couponCode": [{"table": "collection:payment_events", "column": "coupon"}],
+            }, "evidence": {"file": "billing/handlers.py", "line": 20}}]),
+        _n(f"{BILL}/table:invoices", "table", name="invoices", engine="postgres", db="billing"),
+        _n(f"{BILL}/collection:payment_events", "collection", name="payment_events", db="firestore:default"),
+    ]
+    edges += [
+        _e("triggers", Q_PLACED, ep),
+        _e("triggers", ep, on),
+        _e("writes", on, f"{BILL}/table:invoices", evidence={"file": "billing/handlers.py", "line": 22}),
+        _e("writes", on, f"{BILL}/collection:payment_events", evidence={"file": "billing/handlers.py", "line": 26},
+           fields=["invoiceId", "orderId", "status"]),
+    ]
+    # notify-fn
+    tep = f"{FN}/entrypoint:firestore:payment_events:create"
+    nf = f"{FN}/function:index.notifyPayment"
+    nodes += [
+        _n(tep, "entrypoint", kind="firestore", method="CREATE", path="payment_events/{id}", symbol="index.notifyPayment",
+           collection="payment_events", document="payment_events/{id}", event="create", evidence={"file": "src/index.ts", "line": 6}),
+        _fn(FN, "index.notifyPayment", "src/index.ts", 6),
+        _n(f"{FN}/collection:payment_events", "collection", name="payment_events", db="firestore:default"),
+        _n(f"{FN}/collection:notifications", "collection", name="notifications", db="firestore:default"),
+    ]
+    edges += [
+        _e("triggers", tep, nf),
+        _e("reads", nf, f"{FN}/collection:payment_events", evidence={"file": "src/index.ts", "line": 7}, fields=["orderId", "status"]),
+        _e("writes", nf, f"{FN}/collection:notifications", evidence={"file": "src/index.ts", "line": 12}),
+    ]
+    return {"version": "test", "nodes": nodes, "edges": edges}

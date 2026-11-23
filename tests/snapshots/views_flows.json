@@ -1,0 +1,429 @@
+[
+ {
+  "conSvcs": [],
+  "consumers": [],
+  "detail": "pubsub",
+  "edges": [
+   {
+    "from": "1:shop-api/function:events.Publisher.OrderCancelled",
+    "guess": 0,
+    "id": "1:shop-api/function:events.Publisher.OrderCancelled>2:ev:order-cancelled",
+    "rel": "pub",
+    "to": "2:ev:order-cancelled"
+   }
+  ],
+  "fields": {
+   "missing": [],
+   "pub": [
+    "orderId",
+    "reason"
+   ],
+   "read": []
+  },
+  "key": "order-cancelled",
+  "kind": "topic",
+  "label": "order-cancelled",
+  "more": {},
+  "node": "queue:pubsub:order-cancelled",
+  "nodes": [
+   {
+    "fk": "function",
+    "id": "1:shop-api/function:events.Publisher.OrderCancelled",
+    "kind": "fn",
+    "label": "events.Publisher.OrderCancelled",
+    "layer": 1,
+    "link": -1,
+    "sub": "shop-api",
+    "svc": 2,
+    "x": 0,
+    "y": 0
+   },
+   {
+    "ek": "topic",
+    "id": "2:ev:order-cancelled",
+    "key": "order-cancelled",
+    "kind": "event",
+    "label": "order-cancelled",
+    "layer": 2,
+    "sub": "topic · pubsub",
+    "x": 200,
+    "y": 0
+   }
+  ],
+  "pubSvcs": [
+   2
+  ],
+  "publishers": [
+   {
+    "entry": [
+     "POST /orders/{id}/cancel"
+    ],
+    "fn": [
+     "events.Publisher.OrderCancelled",
+     2,
+     -1,
+     "function",
+     "internal/events/events.go:30"
+    ],
+    "reads": []
+   }
+  ],
+  "status": "no_consumer",
+  "warnings": [
+   "no_consumer"
+  ]
+ },
+ {
+  "conSvcs": [
+   0
+  ],
+  "consumers": [
+   {
+    "fn": [
+     "pubsub order-placed",
+     0,
+     -1,
+     "entrypoint",
+     "billing/main.py:9"
+    ],
+    "writes": [
+     "billing-worker/table:invoices",
+     "collection:payment_events"
+    ]
+   }
+  ],
+  "detail": "pubsub",
+  "edges": [
+   {
+    "from": "0:shop-api/table:customers",
+    "guess": 0,
+    "id": "0:shop-api/table:customers>1:shop-api/function:events.Publisher.OrderPlaced",
+    "rel": "reads",
+    "to": "1:shop-api/function:events.Publisher.OrderPlaced"
+   },
+   {
+    "from": "1:shop-api/function:events.Publisher.OrderPlaced",
+    "guess": 0,
+    "id": "1:shop-api/function:events.Publisher.OrderPlaced>2:ev:order-placed",
+    "rel": "pub",
+    "to": "2:ev:order-placed"
+   },
+   {
+    "from": "2:ev:order-placed",
+    "guess": 0,
+    "id": "2:ev:order-placed>3:billing-worker/entrypoint:pubsub:order-placed",
+    "rel": "sub",
+    "to": "3:billing-worker/entrypoint:pubsub:order-placed"
+   },
+   {
+    "from": "3:billing-worker/entrypoint:pubsub:order-placed",
+    "guess": 0,
+    "id": "3:billing-worker/entrypoint:pubsub:order-placed>4:billing-worker/table:invoices",
+    "rel": "writes",
+    "to": "4:billing-worker/table:invoices"
+   },
+   {
+    "from": "3:billing-worker/entrypoint:pubsub:order-placed",
+    "guess": 0,
+    "id": "3:billing-worker/entrypoint:pubsub:order-placed>4:collection:payment_events",
+    "rel": "writes",
+    "to": "4:collection:payment_events"
+   },
+   {
+    "from": "4:collection:payment_events",
+    "guess": 0,
+    "id": "4:collection:payment_events>5:ev:firestore:payment_events",
+    "rel": "trigger",
+    "to": "5:ev:firestore:payment_events"
+   },
+   {
+    "from": "5:ev:firestore:payment_events",
+    "guess": 0,
+    "id": "5:ev:firestore:payment_events>6:notify-fn/entrypoint:firestore:payment_events:create",
+    "rel": "sub",
+    "to": "6:notify-fn/entrypoint:firestore:payment_events:create"
+   },
+   {
+    "from": "6:notify-fn/entrypoint:firestore:payment_events:create",
+    "guess": 0,
+    "id": "6:notify-fn/entrypoint:firestore:payment_events:create>7:notify-fn/collection:notifications",
+    "rel": "writes",
+    "to": "7:notify-fn/collection:notifications"
+   }
+  ],
+  "fields": {
+   "missing": [
+    "couponCode"
+   ],
+   "pub": [
+    "customerId",
+    "orderId",
+    "totalCents"
+   ],
+   "read": [
+    "couponCode",
+    "orderId",
+    "totalCents"
+   ]
+  },
+  "key": "order-placed",
+  "kind": "topic",
+  "label": "order-placed",
+  "more": {},
+  "node": "queue:pubsub:order-placed",
+  "nodes": [
+   {
+    "id": "0:shop-api/table:customers",
+    "kind": "data",
+    "label": "customers",
+    "layer": 0,
+    "ref": "shop-api/table:customers",
+    "sub": "table · Postgres",
+    "x": 0,
+    "y": 32
+   },
+   {
+    "fk": "function",
+    "id": "1:shop-api/function:events.Publisher.OrderPlaced",
+    "kind": "fn",
+    "label": "events.Publisher.OrderPlaced",
+    "layer": 1,
+    "link": -1,
+    "sub": "shop-api",
+    "svc": 2,
+    "x": 200,
+    "y": 32
+   },
+   {
+    "ek": "topic",
+    "id": "2:ev:order-placed",
+    "key": "order-placed",
+    "kind": "event",
+    "label": "order-placed",
+    "layer": 2,
+    "sub": "topic · pubsub",
+    "x": 400,
+    "y": 32
+   },
+   {
+    "fk": "entrypoint",
+    "id": "3:billing-worker/entrypoint:pubsub:order-placed",
+    "kind": "fn",
+    "label": "billing.handlers.on_order_placed",
+    "layer": 3,
+    "link": -1,
+    "sub": "billing-worker",
+    "svc": 0,
+    "x": 600,
+    "y": 32
+   },
+   {
+    "id": "4:billing-worker/table:invoices",
+    "kind": "data",
+    "label": "invoices",
+    "layer": 4,
+    "ref": "billing-worker/table:invoices",
+    "sub": "table · Postgres",
+    "x": 800,
+    "y": 0
+   },
+   {
+    "id": "4:collection:payment_events",
+    "kind": "data",
+    "label": "payment_events",
+    "layer": 4,
+    "ref": "collection:payment_events",
+    "sub": "collection · Firestore",
+    "x": 800,
+    "y": 64
+   },
+   {
+    "ek": "firestore",
+    "id": "5:ev:firestore:payment_events",
+    "key": "firestore:payment_events",
+    "kind": "event",
+    "label": "payment_events",
+    "layer": 5,
+    "sub": "Firestore trigger · create",
+    "x": 1000,
+    "y": 32
+   },
+   {
+    "fk": "entrypoint",
+    "id": "6:notify-fn/entrypoint:firestore:payment_events:create",
+    "kind": "fn",
+    "label": "index.notifyPayment",
+    "layer": 6,
+    "link": -1,
+    "sub": "notify-fn",
+    "svc": 1,
+    "x": 1200,
+    "y": 32
+   },
+   {
+    "id": "7:notify-fn/collection:notifications",
+    "kind": "data",
+    "label": "notifications",
+    "layer": 7,
+    "ref": "notify-fn/collection:notifications",
+    "sub": "collection · Firestore",
+    "x": 1400,
+    "y": 32
+   }
+  ],
+  "pubSvcs": [
+   2
+  ],
+  "publishers": [
+   {
+    "entry": [
+     "POST /orders"
+    ],
+    "fn": [
+     "events.Publisher.OrderPlaced",
+     2,
+     -1,
+     "function",
+     "internal/events/events.go:12"
+    ],
+    "reads": [
+     "shop-api/table:customers"
+    ]
+   }
+  ],
+  "status": "ok",
+  "warnings": [
+   "cross_service",
+   "unpublished_fields"
+  ]
+ },
+ {
+  "conSvcs": [
+   1
+  ],
+  "consumers": [
+   {
+    "fn": [
+     "firestore payment_events/{id}",
+     1,
+     -1,
+     "entrypoint",
+     "src/index.ts:6"
+    ],
+    "writes": [
+     "notify-fn/collection:notifications"
+    ]
+   }
+  ],
+  "detail": "create",
+  "edges": [
+   {
+    "from": "1:billing-worker/function:billing.handlers.on_order_placed",
+    "guess": 0,
+    "id": "1:billing-worker/function:billing.handlers.on_order_placed>2:ev:firestore:payment_events",
+    "rel": "writes",
+    "to": "2:ev:firestore:payment_events"
+   },
+   {
+    "from": "2:ev:firestore:payment_events",
+    "guess": 0,
+    "id": "2:ev:firestore:payment_events>3:notify-fn/entrypoint:firestore:payment_events:create",
+    "rel": "sub",
+    "to": "3:notify-fn/entrypoint:firestore:payment_events:create"
+   },
+   {
+    "from": "3:notify-fn/entrypoint:firestore:payment_events:create",
+    "guess": 0,
+    "id": "3:notify-fn/entrypoint:firestore:payment_events:create>4:notify-fn/collection:notifications",
+    "rel": "writes",
+    "to": "4:notify-fn/collection:notifications"
+   }
+  ],
+  "fields": {
+   "missing": [],
+   "pub": [
+    "invoiceId",
+    "orderId",
+    "status"
+   ],
+   "read": [
+    "orderId",
+    "status"
+   ]
+  },
+  "key": "firestore:payment_events",
+  "kind": "firestore",
+  "label": "payment_events",
+  "more": {},
+  "node": "payment_events",
+  "nodes": [
+   {
+    "fk": "function",
+    "id": "1:billing-worker/function:billing.handlers.on_order_placed",
+    "kind": "fn",
+    "label": "billing.handlers.on_order_placed",
+    "layer": 1,
+    "link": -1,
+    "sub": "billing-worker",
+    "svc": 0,
+    "x": 0,
+    "y": 0
+   },
+   {
+    "ek": "firestore",
+    "id": "2:ev:firestore:payment_events",
+    "key": "firestore:payment_events",
+    "kind": "event",
+    "label": "payment_events",
+    "layer": 2,
+    "sub": "Firestore trigger · create",
+    "x": 200,
+    "y": 0
+   },
+   {
+    "fk": "entrypoint",
+    "id": "3:notify-fn/entrypoint:firestore:payment_events:create",
+    "kind": "fn",
+    "label": "index.notifyPayment",
+    "layer": 3,
+    "link": -1,
+    "sub": "notify-fn",
+    "svc": 1,
+    "x": 400,
+    "y": 0
+   },
+   {
+    "id": "4:notify-fn/collection:notifications",
+    "kind": "data",
+    "label": "notifications",
+    "layer": 4,
+    "ref": "notify-fn/collection:notifications",
+    "sub": "collection · Firestore",
+    "x": 600,
+    "y": 0
+   }
+  ],
+  "pubSvcs": [
+   0
+  ],
+  "publishers": [
+   {
+    "entry": [
+     "pubsub order-placed"
+    ],
+    "fn": [
+     "billing.handlers.on_order_placed",
+     0,
+     -1,
+     "function",
+     "billing/handlers.py:14"
+    ],
+    "reads": []
+   }
+  ],
+  "status": "ok",
+  "warnings": [
+   "cross_service"
+  ]
+ }
+]
