@@ -48,7 +48,8 @@ def enqueue_positional(client, parent, task):
 
 
 def enqueue_client():
-    tasks_v2.CloudTasksClient().create_task(task={"http_request": {"http_method": "POST", "url": "https://w/y"}})
+    # no parent and no url: the queue name stays "cloud-tasks"; the client alone makes it Cloud Tasks
+    tasks_v2.CloudTasksClient().create_task(task={"http_request": {"http_method": "POST"}})
 '''
 
 
