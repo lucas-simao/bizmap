@@ -592,6 +592,12 @@ def trace_cmd(
 @click.option("--json", "as_json", is_flag=True, help="Print the report as JSON.")
 @click.option("--limit", type=int, default=20, show_default=True, help="Max rows per list.")
 @click.option(
+    "--mermaid",
+    "mermaid_views",
+    is_flag=True,
+    help="Append the architecture and each queue / trigger flow as Mermaid diagrams (Markdown, for GitHub).",
+)
+@click.option(
     "--cross-service",
     "cross_service",
     is_flag=True,
@@ -614,6 +620,7 @@ def report_cmd(
     limit: int,
     config_path: Path | None,
     cross_service: bool,
+    mermaid_views: bool,
 ) -> None:
     """Coverage report: entrypoints reaching data, HTTP links, unresolved reasons.
 
@@ -635,6 +642,8 @@ def report_cmd(
             data = json.loads(graph_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise click.ClickException(f"invalid graph JSON: {exc}") from exc
+    if mermaid_views and (redact or as_json):
+        raise click.UsageError("--mermaid prints names: it cannot be combined with --redact or --json")
     if redact and not salt and salt_file is not None:
         import secrets
 
@@ -668,6 +677,10 @@ def report_cmd(
         click.echo(json.dumps(rep, indent=2, sort_keys=True))
     else:
         click.echo(format_report(rep, limit=limit), nl=False)
+        if mermaid_views:
+            from bizmap.views import context_from_data, mermaid_markdown
+
+            click.echo("\n" + mermaid_markdown(context_from_data(data)))
 
 
 @main.command("impact")
@@ -862,17 +875,18 @@ def mcp_cmd(graph_path: Path, repo_root: Path | None) -> None:
 @click.option(
     "--format",
     "fmt",
-    type=click.Choice(["html", "llm"]),
+    type=click.Choice(["html", "mermaid", "llm"]),
     default="html",
     show_default=True,
-    help="html: one self-contained, offline page to read the system (services, domains, routes, tables). llm: not available yet.",
+    help="html: one self-contained, offline page to read the system (services, domains, routes, tables). "
+    "mermaid: Markdown with the architecture and each queue / trigger flow as Mermaid diagrams. llm: not available yet.",
 )
 @click.option(
     "--out",
     "out_path",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Output file (default: bizmap.html for --format html).",
+    help="Output file (default: bizmap.html for --format html, bizmap-architecture.md for --format mermaid).",
 )
 @click.option(
     "--lang",
@@ -925,10 +939,13 @@ def export_cmd(
             click.echo(note, err=True)
     except ExportError as exc:
         raise click.ClickException(str(exc)) from exc
-    out = out_path or Path("bizmap.html")
+    out = out_path or Path("bizmap-architecture.md" if fmt == "mermaid" else "bizmap.html")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     size = out.stat().st_size
+    if fmt == "mermaid":
+        click.echo(f"wrote {out}  ({size / 1024:.1f} KB) — Mermaid diagrams GitHub renders")
+        return
     click.echo(
         f"wrote {out}  ({size / 1_048_576:.1f} MB, {len(data['nodes'])} nodes, "
         f"{len(data['edges'])} edges) — open it in a browser, no server needed"

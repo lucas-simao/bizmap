@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Added (HTML export, report, PR comment)
+
+- **Architecture view** (`#/architecture`, in the side menu and a card on the
+  start screen): front ends → APIs / services → topics → workers / functions
+  → stores, one box per store (Postgres, Firestore…) with its table /
+  collection count, never one node per table. Lines are aggregated per pair
+  (service → store R / W / RW, service → topic, topic → consumer, front end →
+  API over HTTP, store → function for a Firestore trigger), with the number of
+  accesses and a width that grows with it; dashed when only heuristic. A click
+  on a line lists the functions behind it; a click on a store lists its tables
+  (and expands them in the drawing up to 40). Positions are computed at export
+  time (layered, ordered by neighbours): the same graph gives the same drawing,
+  drawn by the Cytoscape already embedded (no new dependency). Long lines run
+  at right angles between the boxes of the middle columns; with ~15 services
+  and ~800 tables the page grows and scrolls, with + / − / fit buttons.
+- **Queues and events** (`#/queues`): every topic, Firestore trigger and
+  scheduled job with its publishers, consumers and status (ok / no consumer /
+  no publisher), and a ⚠ when the consumer reads a field no publisher sends.
+- **One flow per event source** (`#/topic/<name>`, replacing the topic page):
+  what the publisher reads → publishing function → topic → consumers → what
+  they write → the next events (a Firestore trigger on a written collection, a
+  topic the consumer publishes to), up to 3 hops. The message fields when the
+  scan saw them (published vs read; read-but-never-published flagged) and
+  warnings: no consumer, no publisher, publisher and consumer in different
+  services. `#/topic/<queue id>` (search, map) still works.
+- **Mermaid**: `bizmap export --format mermaid` writes the architecture and
+  every flow as `flowchart LR` blocks (default `bizmap-architecture.md`);
+  `bizmap report --mermaid` appends them to the report (not with `--redact` /
+  `--json`).
+- **PR comment**: an *Event flow* section (notes and the Mermaid flow) when a
+  changed function publishes, consumes or handles a trigger, through its calls
+  too; at most two flows, the ones with a problem first.
+- Docs: [architecture and queues](docs/commands/export-views.md), with
+  screenshots of the fictional workspace (`tests/fixtures/arch_demo.py`).
+
 ## 0.15.1 — 2026-11-22
 
 ### Changed (HTML export)

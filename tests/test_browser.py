@@ -292,3 +292,44 @@ def test_home_form_controls_share_one_look(tmp_path: Path) -> None:
     assert all(120 <= b["w"] <= 200 for b in selects), selects
     assert boxes["ask"]["h"] == 44 and boxes["ask"]["border"] == "1px" and boxes["ask"]["radius"] == "10px", boxes["ask"]
     assert "rgba(9, 105, 218" in ring, ring
+
+
+def test_architecture_and_event_flow_pages(tmp_path: Path) -> None:
+    from fixtures.arch_demo import arch_graph
+
+    html = _write(tmp_path, arch_graph())
+    with sync_api.sync_playwright() as p:
+        browser, page, walk = _open(p, html)
+        walk.go("#/")
+        cards = page.eval_on_selector_all("#vcards .fcard", "els => els.map(e => e.getAttribute('data-href'))")
+        walk.go("#/architecture")
+        page.wait_for_timeout(200)
+        arch_nodes = page.evaluate("() => window.__bizmap.viewNodes")
+        canvas = page.query_selector("#vmap canvas")
+        toc = page.inner_text("#toc")
+        # a click on a line opens what is behind it
+        page.evaluate("""() => {
+            const cy = document.querySelector('#vmap')._cyreg.cy;
+            cy.getElementById('s2>db:Postgres>rw').emit('tap');
+        }""")
+        side = page.inner_text("#vside")
+        walk.go("#/queues")
+        queue_rows = page.eval_on_selector_all("#qtable tbody tr", "els => els.map(e => e.innerText.replace(/\\s+/g, ' ').trim())")
+        placed = walk.go("#/topic/order-placed")
+        flow_nodes = page.evaluate("() => window.__bizmap.viewNodes")
+        cancelled = walk.go("#/topic/order-cancelled")
+        warn = page.inner_text("#vwarn")
+        trigger = walk.go("#/topic/" + "firestore%3Apayment_events")
+        by_qid = walk.go("#/topic/" + "queue%3Apubsub%3Aorder-placed")
+        browser.close()
+    assert not walk.errors, walk.errors
+    assert cards == ["#/architecture", "#/queues"]
+    assert canvas is not None and len(arch_nodes) == 8
+    assert "Architecture" in toc and "Queues and events" in toc
+    assert "shop-api → Postgres" in side and "orders.Service.PlaceOrder" in side
+    assert any(r.startswith("order-cancelled") and "no consumer" in r for r in queue_rows), queue_rows
+    assert "couponCode" in placed and "never published" in placed
+    assert any(n.endswith("index.notifyPayment") for n in flow_nodes), flow_nodes  # the chain, 3 hops
+    assert "order-cancelled" in cancelled and "consumes" in warn
+    assert "payment_events" in trigger and "Firestore trigger" in trigger
+    assert by_qid == placed

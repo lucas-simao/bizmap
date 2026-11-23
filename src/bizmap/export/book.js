@@ -227,6 +227,11 @@
     h += "<h4>" + esc(KT.navFlow) + '</h4><a href="#/flow" class="' + (active === "flow" ? "on" : "") + '"><span>' + esc(KT.navFlow) + '</span><span class="n">' + num(IX.flows || 0) + "</span></a>";
     h += "<h4>" + esc(L.tables) + '</h4><a href="#/t" class="' + (active === "t" ? "on" : "") + '"><span>' + esc(L.allTables) + '</span><span class="n">' + num(IX.tables.length) + "</span></a>";
     h += '<h4>' + esc(L.map) + '</h4><a href="' + hrefOf("map") + '" class="' + (active === "map" ? "on" : "") + '"><span>' + esc(L.map) + "</span></a>";
+    if (IX.home && IX.home.views) {
+      h += '<a href="' + hrefOf("architecture") + '" class="' + (active === "arch" ? "on" : "") + '"><span>' + esc(V.arch) + "</span></a>" +
+           '<a href="' + hrefOf("queues") + '" class="' + (active === "queues" ? "on" : "") + (IX.home.views.problems ? " warn" : "") + '"><span>' + esc(V.queues) +
+           '</span><span class="n">' + num(IX.home.views.events.length) + "</span></a>";
+    }
     $("toc").innerHTML = h;
   }
   function read(html) { $("read").innerHTML = html; $("read").scrollTop = 0; }
@@ -1287,7 +1292,9 @@
       else if (h[0] === "q" && h[1]) pageAnswer(decodeURIComponent(h[1]), h[2] === "r" || h[2] === "t" ? h[2] : "w");
       else if (h[0] === "q" && HOME) pageCandidates(PRM.n || "", null);
       else if (h[0] === "find" && HOME) pageFind(h[1]);
-      else if (h[0] === "topic" && HOME) pageTopic(decodeURIComponent(h[1] || ""));
+      else if (h[0] === "topic" && HOME) pageEvent(decodeURIComponent(hp.slice(6)));
+      else if (h[0] === "architecture" && HOME) pageArch();
+      else if (h[0] === "queues" && HOME) pageQueues();
       else if (h[0] === "map" && HOME) pageMap2(h[1], h[2] !== undefined ? decodeURIComponent(h[2]) : undefined);
       else if (h[0] === "s" && SV[+h[1]]) pageService(+h[1]);
       else if (h[0] === "d" && DOM[+h[1]]) pageDomain(+h[1]);

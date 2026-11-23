@@ -65,6 +65,7 @@ def build_home(
     services: list[str],
     book_index: dict[str, int],
     lang: str = "en",
+    roles: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """-> (the ``home`` part of the page index, {chunk id: chunk})."""
     ix = Index.from_dict(data)
@@ -299,8 +300,27 @@ def build_home(
         "mirrors": _pairs(mirrors), "nmirrors": len(mirrors),
         "neverRead": len(never_read), "neverWritten": len(never_written),
     }
+    # ── architecture and event flows (#/architecture, #/queues, #/topic/<name>) ──
+    from bizmap.views import Ctx, architecture, entities_of, event_flows, guess_roles, queue_rows
+
+    ent_of, ents = entities_of(ix, {tuple(sorted(e["ids"])): e["ref"] for e in tables})
+    vctx = Ctx(ix, services, roles or guess_roles(ix, services, svc), svc, hidden, ent_of, ents,
+               link=lambda nid: [book_index.get(nid, -1), ix.kind(nid)])
+    arch = architecture(vctx)
+    flows = event_flows(vctx)
+    chunks["ar"] = arch
+    chunks["ev"] = {"flows": flows}
+    events = queue_rows(flows)
+    views = {
+        "services": sum(1 for n in arch["nodes"] if n["kind"] == "service"),
+        "stores": sum(1 for n in arch["nodes"] if n["kind"] == "store"),
+        "topics": sum(1 for n in arch["nodes"] if n["kind"] == "topic"),
+        "events": events,
+        "problems": sum(1 for r in events if r[4] != "ok"),
+    }
     home = {
         "summary": summary,
+        "views": views,
         "cards": cards,
         "dyn": {str(s): v for s, v in sorted(dynamic.items())},
         "ents": [

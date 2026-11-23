@@ -3,6 +3,9 @@
 Formats:
 
 - ``html`` — one self-contained interactive page (offline, no server).
+- ``mermaid`` — Markdown with the architecture and every event flow (topics,
+  Firestore triggers, scheduled jobs) as ``flowchart LR`` blocks, for GitHub
+  (:mod:`bizmap.views`).
 - ``llm`` — planned (compact text overview for an AI assistant),
   built on the same :mod:`bizmap.export.overview`.
 
@@ -16,7 +19,7 @@ from typing import Any
 
 from bizmap.export.services import ExportConfigError, assign_services, load_export_config
 
-FORMATS = ("html", "llm")
+FORMATS = ("html", "mermaid", "llm")
 PLANNED = {"llm": "a later release"}
 
 
@@ -40,7 +43,7 @@ def export_graph(
     bad one found that way is skipped. Messages for the user go to `notes`."""
     if fmt in PLANNED:
         raise ExportError(f"--format {fmt} is not available yet (planned for {PLANNED[fmt]}); use --format html")
-    if fmt != "html":
+    if fmt not in FORMATS:
         raise ExportError(f"unknown format {fmt!r} (known: {', '.join(FORMATS)})")
     if not isinstance(data, dict) or not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
         raise ExportError("not a BizMap graph (expected an object with `nodes` and `edges` lists)")
@@ -49,6 +52,10 @@ def export_graph(
         svc_of = assign_services(data, cfg["services"])
     except ExportConfigError as exc:
         raise ExportError(str(exc)) from exc
+    if fmt == "mermaid":
+        from bizmap.views import context_from_data, mermaid_markdown
+
+        return mermaid_markdown(context_from_data(data, svc_of))
     from bizmap.export.html import render_html
     from bizmap.export.openapi import SpecError, find_specs, load_spec
 

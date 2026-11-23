@@ -100,6 +100,7 @@ nav:
       - mcp: commands/mcp.md
       - export: commands/export.md
       - export — start screen: commands/export-home.md
+      - export — architecture and queues: commands/export-views.md
   - Languages and detectors: languages.md
   - MCP server: mcp.md
   - GitHub Action: github-action.md

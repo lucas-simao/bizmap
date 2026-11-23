@@ -1,0 +1,467 @@
+{
+ "edges": [
+  {
+   "from": "db:Firestore",
+   "guess": 0,
+   "id": "db:Firestore>s1>trigger",
+   "items": [
+    [
+     "firestore payment_events/{id}",
+     1,
+     -1,
+     "entrypoint",
+     "src/index.ts:6",
+     "payment_events",
+     0
+    ]
+   ],
+   "more": 0,
+   "n": 1,
+   "rel": "trigger",
+   "rw": 0,
+   "to": "s1",
+   "w": 3.1
+  },
+  {
+   "from": "q:queue:pubsub:order-placed",
+   "guess": 0,
+   "id": "q:queue:pubsub:order-placed>s0>sub",
+   "items": [
+    [
+     "pubsub order-placed",
+     0,
+     -1,
+     "entrypoint",
+     "billing/main.py:9"
+    ]
+   ],
+   "more": 0,
+   "n": 1,
+   "rel": "sub",
+   "rw": 0,
+   "to": "s0",
+   "w": 3.1
+  },
+  {
+   "from": "s0",
+   "guess": 0,
+   "id": "s0>db:Firestore>rw",
+   "items": [
+    [
+     "billing.handlers.on_order_placed",
+     0,
+     -1,
+     "function",
+     "billing/handlers.py:14",
+     "payment_events",
+     2
+    ]
+   ],
+   "more": 0,
+   "n": 1,
+   "rel": "rw",
+   "rw": 2,
+   "to": "db:Firestore",
+   "w": 3.1
+  },
+  {
+   "from": "s0",
+   "guess": 0,
+   "id": "s0>db:Postgres>rw",
+   "items": [
+    [
+     "billing.handlers.on_order_placed",
+     0,
+     -1,
+     "function",
+     "billing/handlers.py:14",
+     "invoices",
+     2
+    ]
+   ],
+   "more": 0,
+   "n": 1,
+   "rel": "rw",
+   "rw": 2,
+   "to": "db:Postgres",
+   "w": 3.1
+  },
+  {
+   "from": "s1",
+   "guess": 0,
+   "id": "s1>db:Firestore>rw",
+   "items": [
+    [
+     "index.notifyPayment",
+     1,
+     -1,
+     "function",
+     "src/index.ts:6",
+     "payment_events",
+     1
+    ],
+    [
+     "index.notifyPayment",
+     1,
+     -1,
+     "function",
+     "src/index.ts:6",
+     "notifications",
+     2
+    ]
+   ],
+   "more": 0,
+   "n": 2,
+   "rel": "rw",
+   "rw": 3,
+   "to": "db:Firestore",
+   "w": 4.04
+  },
+  {
+   "from": "s2",
+   "guess": 0,
+   "id": "s2>db:Postgres>rw",
+   "items": [
+    [
+     "orders.Service.Cancel",
+     2,
+     -1,
+     "function",
+     "internal/orders/orders.go:60",
+     "orders",
+     2
+    ],
+    [
+     "orders.Service.Get",
+     2,
+     -1,
+     "function",
+     "internal/orders/orders.go:80",
+     "order_items",
+     1
+    ],
+    [
+     "orders.Service.Get",
+     2,
+     -1,
+     "function",
+     "internal/orders/orders.go:80",
+     "orders",
+     1
+    ],
+    [
+     "orders.Service.PlaceOrder",
+     2,
+     -1,
+     "function",
+     "internal/orders/orders.go:30",
+     "customers",
+     1
+    ],
+    [
+     "orders.Service.PlaceOrder",
+     2,
+     -1,
+     "function",
+     "internal/orders/orders.go:30",
+     "order_items",
+     2
+    ],
+    [
+     "orders.Service.PlaceOrder",
+     2,
+     -1,
+     "function",
+     "internal/orders/orders.go:30",
+     "orders",
+     2
+    ]
+   ],
+   "more": 0,
+   "n": 6,
+   "rel": "rw",
+   "rw": 3,
+   "to": "db:Postgres",
+   "w": 6.0
+  },
+  {
+   "from": "s2",
+   "guess": 0,
+   "id": "s2>q:queue:pubsub:order-cancelled>pub",
+   "items": [
+    [
+     "events.Publisher.OrderCancelled",
+     2,
+     -1,
+     "function",
+     "internal/events/events.go:30"
+    ]
+   ],
+   "more": 0,
+   "n": 1,
+   "rel": "pub",
+   "rw": 0,
+   "to": "q:queue:pubsub:order-cancelled",
+   "w": 3.1
+  },
+  {
+   "from": "s2",
+   "guess": 0,
+   "id": "s2>q:queue:pubsub:order-placed>pub",
+   "items": [
+    [
+     "events.Publisher.OrderPlaced",
+     2,
+     -1,
+     "function",
+     "internal/events/events.go:12"
+    ]
+   ],
+   "more": 0,
+   "n": 1,
+   "rel": "pub",
+   "rw": 0,
+   "to": "q:queue:pubsub:order-placed",
+   "w": 3.1
+  },
+  {
+   "from": "s3",
+   "guess": 0,
+   "id": "s3>s2>http",
+   "items": [
+    [
+     "src.api.orders.getOrder",
+     3,
+     -1,
+     "function",
+     "src/api/orders.ts:12",
+     "GET /orders/{id}",
+     0
+    ],
+    [
+     "src.api.orders.placeOrder",
+     3,
+     -1,
+     "function",
+     "src/api/orders.ts:5",
+     "POST /orders",
+     0
+    ]
+   ],
+   "more": 0,
+   "n": 2,
+   "rel": "http",
+   "rw": 0,
+   "to": "s2",
+   "w": 4.04
+  }
+ ],
+ "layers": [
+  "front",
+  "api",
+  "topic",
+  "worker",
+  "store"
+ ],
+ "nodes": [
+  {
+   "all": [
+    [
+     "notify-fn/collection:notifications",
+     "notifications",
+     "collection"
+    ],
+    [
+     "collection:payment_events",
+     "payment_events",
+     "collection"
+    ]
+   ],
+   "count": {
+    "collection": 2
+   },
+   "ents": [
+    [
+     "notify-fn/collection:notifications",
+     "notifications",
+     "collection",
+     [
+      [
+       1,
+       2,
+       0
+      ]
+     ]
+    ],
+    [
+     "collection:payment_events",
+     "payment_events",
+     "collection",
+     [
+      [
+       0,
+       2,
+       0
+      ],
+      [
+       1,
+       1,
+       0
+      ]
+     ]
+    ]
+   ],
+   "id": "db:Firestore",
+   "kind": "store",
+   "label": "Firestore",
+   "layer": 4,
+   "n": 2,
+   "x": 960,
+   "y": 0
+  },
+  {
+   "all": [
+    [
+     "shop-api/table:customers",
+     "customers",
+     "table"
+    ],
+    [
+     "billing-worker/table:invoices",
+     "invoices",
+     "table"
+    ],
+    [
+     "shop-api/table:order_items",
+     "order_items",
+     "table"
+    ],
+    [
+     "shop-api/table:orders",
+     "orders",
+     "table"
+    ]
+   ],
+   "count": {
+    "table": 4
+   },
+   "ents": [
+    [
+     "shop-api/table:customers",
+     "customers",
+     "table",
+     [
+      [
+       2,
+       1,
+       0
+      ]
+     ]
+    ],
+    [
+     "billing-worker/table:invoices",
+     "invoices",
+     "table",
+     [
+      [
+       0,
+       2,
+       0
+      ]
+     ]
+    ],
+    [
+     "shop-api/table:order_items",
+     "order_items",
+     "table",
+     [
+      [
+       2,
+       3,
+       0
+      ]
+     ]
+    ],
+    [
+     "shop-api/table:orders",
+     "orders",
+     "table",
+     [
+      [
+       2,
+       3,
+       0
+      ]
+     ]
+    ]
+   ],
+   "id": "db:Postgres",
+   "kind": "store",
+   "label": "Postgres",
+   "layer": 4,
+   "n": 4,
+   "x": 960,
+   "y": 72
+  },
+  {
+   "id": "q:queue:pubsub:order-cancelled",
+   "key": "order-cancelled",
+   "kind": "topic",
+   "label": "order-cancelled",
+   "layer": 2,
+   "status": "no_consumer",
+   "x": 480,
+   "y": 0
+  },
+  {
+   "id": "q:queue:pubsub:order-placed",
+   "key": "order-placed",
+   "kind": "topic",
+   "label": "order-placed",
+   "layer": 2,
+   "status": "ok",
+   "x": 480,
+   "y": 72
+  },
+  {
+   "id": "s0",
+   "kind": "service",
+   "label": "billing-worker",
+   "layer": 3,
+   "role": "worker",
+   "svc": 0,
+   "x": 720,
+   "y": 72
+  },
+  {
+   "id": "s1",
+   "kind": "service",
+   "label": "notify-fn",
+   "layer": 3,
+   "role": "worker",
+   "svc": 1,
+   "x": 720,
+   "y": 0
+  },
+  {
+   "id": "s2",
+   "kind": "service",
+   "label": "shop-api",
+   "layer": 1,
+   "role": "api",
+   "svc": 2,
+   "x": 240,
+   "y": 36
+  },
+  {
+   "id": "s3",
+   "kind": "service",
+   "label": "shop-web",
+   "layer": 0,
+   "role": "web",
+   "svc": 3,
+   "x": 0,
+   "y": 36
+  }
+ ]
+}

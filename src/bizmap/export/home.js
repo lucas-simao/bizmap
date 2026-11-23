@@ -260,6 +260,7 @@
     var ex = exampleRefs();
     h += '<div class="ask"><h1>' + esc(H.ask) + "</h1>" + askBox("hq", "ask") +
          (ex.length ? '<p class="muted small">' + esc(H.askHint) + ": " + ex.map(function (r) { return '<a href="' + hrefOf(qPath(r[0], "w")) + '"><code>' + esc(r[1]) + "</code></a>"; }).join(" · ") + "</p>" : "") + "</div>";
+    h += viewCards();
     h += "<h2>" + esc(H.finds) + '</h2><div class="finds" id="finds">' + cardsHtml() + "</div>";
     h += "<h2>" + esc(H.matrix) + '</h2><div id="mx"></div>';
     read(h + "</div>");

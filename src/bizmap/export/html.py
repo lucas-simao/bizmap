@@ -77,7 +77,7 @@ def render_html(
         "<!--__DATA__-->": "\n".join(blocks),
         "/*__CYTOSCAPE__*/": _js_safe("cytoscape", _asset("vendor/cytoscape.min.js")),
         "/*__QUERY__*/": _js_safe("query.js", _asset("query.js")),
-        "/*__APP__*/": _js_safe("book.js", _asset("book.js").replace("/*__HOME__*/", _asset("home.js"), 1)),
+        "/*__APP__*/": _js_safe("book.js", _asset("book.js").replace("/*__HOME__*/", _asset("home.js") + _asset("views.js"), 1)),
     }
     out: list[str] = []
     pos = 0

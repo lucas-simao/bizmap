@@ -57,6 +57,7 @@ was not scanned, or a framework BizMap does not know yet.
 | `--json` | The report as JSON. |
 | `--limit N` | Max rows per list (default 20). |
 | `--cross-service` | Count entrypoints that reach data only through another scanned service (`calls_http`) as reaching data. |
+| `--mermaid` | Append the architecture and each queue / trigger flow as Mermaid diagrams ([details](export-views.md#mermaid-for-github)). Not with `--redact` or `--json`. |
 | `--redact` | Replace every name, route, table, URL, env key and file with a salted hash. |
 | `--salt TEXT` | Salt for `--redact` (or env `BIZMAP_REDACT_SALT`). Same salt, comparable runs. |
 | `--salt-file PATH` | Read the salt from this file, creating a private random one (mode 0600) on first use. |

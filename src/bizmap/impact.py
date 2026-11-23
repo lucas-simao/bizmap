@@ -1925,6 +1925,20 @@ def render_markdown(
             rows.append(f"Full list: [workflow run summary]({details_url}).")
         return _details(f"<b>Changed functions</b> · {n_fn}", rows)
 
+    flows = _event_flows(graph, impact)
+
+    def event_section(with_diagram: bool) -> list[str]:
+        out: list[str] = []
+        for f, notes_f, diagram in flows:
+            kind = {"topic": "topic", "firestore": "Firestore trigger", "cron": "scheduled job"}[f["kind"]]
+            rows = [f"- {x}" for x in notes_f] or ["- publisher → consumer flow"]
+            if with_diagram and mermaid:
+                rows += ["", "```mermaid", diagram, "```"]
+            warn = " ⚠" if f["status"] != "ok" or "unpublished_fields" in f["warnings"] else ""
+            out += _details(f"<b>Event flow</b> · {kind} <code>{f['label'].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}</code>{warn}", rows,
+                            open_=bool(warn))
+        return out
+
     def build(n_rows: int, with_diagram: bool) -> str:
         body = list(head)
         top = [f"- {text}" for _lvl, text in facts.reasons[:5]]
@@ -1952,6 +1966,7 @@ def render_markdown(
         if cap:
             body += trigger_section(cap)
             body += http_section(cap)
+        body += event_section(with_diagram)
         body += fn_section(n_rows)
         if notes:
             body += _details(f"<b>Unresolved &amp; notes</b> · {len(notes)}", notes_md(max(cap, 5)))
@@ -1967,6 +1982,29 @@ def render_markdown(
     if size(text) > max_chars:
         text = _hard_cut(text, head, max_chars, details_url, size)
     return text
+
+
+MAX_EVENT_FLOWS = 2  # flows shown in a PR comment
+
+
+def _event_flows(graph: Graph, impact: Impact) -> list[tuple[dict[str, Any], list[str], str]]:
+    """The topics / Firestore triggers / jobs the changed functions publish to,
+    consume or handle (their call closure included): (flow, notes, Mermaid)."""
+    fns = {fi.function for fi in impact.functions}
+    if not fns:
+        return []
+    events = any(n.type == "queue" for n in graph.nodes.values()) or any(
+        n.type == "entrypoint" and str(n.attrs.get("kind") or "") in ("firestore", "scheduled_job") for n in graph.nodes.values()
+    )
+    if not events:
+        return []
+    from bizmap.views import context_from_data, event_flows, flow_notes, mermaid_flow
+
+    ctx = context_from_data(graph.to_dict())
+    flows = event_flows(ctx, only=fns)
+    # the ones with a problem first, then by name
+    flows.sort(key=lambda f: (f["status"] == "ok" and "unpublished_fields" not in f["warnings"], f["label"]))
+    return [(f, flow_notes(f, ctx.services), mermaid_flow(f)) for f in flows[:MAX_EVENT_FLOWS]]
 
 
 def _hard_cut(text: str, head: list[str], max_chars: int, details_url: str | None, size=len) -> str:
