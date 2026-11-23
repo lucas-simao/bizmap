@@ -122,3 +122,35 @@ def arch_graph() -> dict[str, Any]:
         _e("writes", nf, f"{FN}/collection:notifications", evidence={"file": "src/index.ts", "line": 12}),
     ]
     return {"version": "test", "nodes": nodes, "edges": edges}
+
+
+def front_functions_graph() -> dict[str, Any]:
+    """shop-api (Go) and shop-web (TS) whose repo also holds a Cloud Function:
+    `notifyOnOrderEvent`, a Firestore trigger on `order_events/{id}` that
+    writes `notifications`. shop-api writes `order_events`."""
+    nodes: list[dict[str, Any]] = [
+        _n(f"{API}/table:orders", "table", name="orders", engine="postgres", db="shop"),
+        _n(f"{API}/entrypoint:http:POST:/orders", "entrypoint", kind="http", method="POST", path="/orders",
+           handler="handlers.Create", evidence={"file": "internal/http/routes.go", "line": 10}),
+        _fn(API, "handlers.Create", "internal/http/orders.go", 20),
+        _n(f"{API}/collection:order_events", "collection", name="order_events", db="firestore:default"),
+        _fn(WEB, "src.api.orders.placeOrder", "src/api/orders.ts", 5),
+        _fn(WEB, "src.pages.Checkout", "src/pages/Checkout.tsx", 8),
+        _n(f"{WEB}/entrypoint:firestore:order_events:create", "entrypoint", kind="firestore", method="CREATE",
+           path="order_events/{id}", symbol="functions.notifyOnOrderEvent", collection="order_events",
+           document="order_events/{id}", event="create", evidence={"file": "functions/src/index.ts", "line": 4}),
+        _fn(WEB, "functions.notifyOnOrderEvent", "functions/src/index.ts", 4),
+        _n(f"{WEB}/collection:order_events", "collection", name="order_events", db="firestore:default"),
+        _n(f"{WEB}/collection:notifications", "collection", name="notifications", db="firestore:default"),
+    ]
+    edges = [
+        _e("triggers", f"{API}/entrypoint:http:POST:/orders", f"{API}/function:handlers.Create"),
+        _e("writes", f"{API}/function:handlers.Create", f"{API}/table:orders", evidence={"file": "internal/http/orders.go", "line": 22}),
+        _e("writes", f"{API}/function:handlers.Create", f"{API}/collection:order_events", evidence={"file": "internal/http/orders.go", "line": 25}),
+        _e("calls", f"{WEB}/function:src.pages.Checkout", f"{WEB}/function:src.api.orders.placeOrder"),
+        _e("calls_http", f"{WEB}/function:src.api.orders.placeOrder", f"{API}/entrypoint:http:POST:/orders", "inferred"),
+        _e("triggers", f"{WEB}/entrypoint:firestore:order_events:create", f"{WEB}/function:functions.notifyOnOrderEvent"),
+        _e("reads", f"{WEB}/function:functions.notifyOnOrderEvent", f"{WEB}/collection:order_events", evidence={"file": "functions/src/index.ts", "line": 5}),
+        _e("writes", f"{WEB}/function:functions.notifyOnOrderEvent", f"{WEB}/collection:notifications", evidence={"file": "functions/src/index.ts", "line": 9}),
+    ]
+    return {"version": "test", "nodes": nodes, "edges": edges}

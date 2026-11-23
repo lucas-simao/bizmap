@@ -7,6 +7,7 @@ installed. In CI: `pip install playwright && playwright install chromium`."""
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -333,3 +334,56 @@ def test_architecture_and_event_flow_pages(tmp_path: Path) -> None:
     assert "order-cancelled" in cancelled and "consumes" in warn
     assert "payment_events" in trigger and "Firestore trigger" in trigger
     assert by_qid == placed
+
+
+def _mermaid_js() -> Path | None:
+    """Mermaid's browser build: BIZMAP_MERMAID_JS (CI installs it), else a local npm copy."""
+    for cand in (os.environ.get("BIZMAP_MERMAID_JS"), "/opt/npm-tools/node_modules/mermaid/dist/mermaid.min.js",
+                 "node_modules/mermaid/dist/mermaid.min.js"):
+        if cand and Path(cand).is_file():
+            return Path(cand)
+    return None
+
+
+def test_mermaid_architecture_renders_in_the_html_column_order() -> None:
+    """Mermaid lays out by link direction, not by the subgraph order: render it
+    and check the columns' x positions."""
+    mjs = _mermaid_js()
+    if mjs is None:
+        pytest.skip("no mermaid.min.js (set BIZMAP_MERMAID_JS)")
+    from bizmap import views
+    from fixtures.arch_demo import arch_graph, front_functions_graph
+
+    with sync_api.sync_playwright() as p:
+        browser = _launch(p)
+        page = browser.new_page()
+        page.set_content("<html><body><div id=o></div></body></html>")
+        page.add_script_tag(path=str(mjs))
+        for data in (arch_graph(), front_functions_graph()):
+            arch = views.architecture(views.context_from_data(data))
+            text = views.mermaid_architecture(arch)
+            centres = page.evaluate(
+                """async (src) => {
+                    mermaid.initialize({ startOnLoad: false });
+                    const { svg } = await mermaid.render("g" + Math.floor(Math.random() * 1e9), src);
+                    document.getElementById("o").innerHTML = svg;
+                    const out = {};
+                    document.querySelectorAll("#o g.node").forEach(n => {
+                        const r = n.getBoundingClientRect();
+                        out[n.id.replace(/^.*flowchart-/, "").replace(/-\\d+$/, "")] = r.x + r.width / 2;
+                    });
+                    return out;
+                }""",
+                text,
+            )
+            layer_x: dict[int, list[float]] = {}
+            for line in text.splitlines():
+                m = re.match(r"^    (\w+)[\[\(>]", line)
+                if m and m.group(1) in centres:
+                    layer = int(re.findall(r"subgraph L(\d)", text[: text.index(line)])[-1])
+                    layer_x.setdefault(layer, []).append(centres[m.group(1)])
+            assert len(layer_x) == len({n["layer"] for n in arch["nodes"]}), (centres, text)
+            layers = sorted(layer_x)
+            for left, right in zip(layers, layers[1:], strict=False):
+                assert max(layer_x[left]) < min(layer_x[right]), (left, right, layer_x, text)
+        browser.close()

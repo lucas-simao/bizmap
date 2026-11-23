@@ -9,9 +9,10 @@
       queues: "Queues and events", queuesLead: "Every topic, Firestore trigger and scheduled job: who publishes, who consumes, and what is missing.",
       layers: ["Front ends", "APIs / services", "Topics", "Workers / functions", "Stores"],
       flowCols: ["Publisher reads", "Publishes", "Event", "Consumers", "Writes"], next: "Next: event", nextC: "Next: consumers", nextW: "Next: writes",
-      st_ok: "ok", st_no_consumer: "no consumer", st_no_publisher: "no publisher",
+      st_ok: "ok", st_no_consumer: "no consumer in the scanned repos", st_no_publisher: "no publisher in the scanned repos",
+      box_no_consumer: "no consumer", box_no_publisher: "no publisher",
       k_topic: "topic", k_firestore: "Firestore trigger", k_cron: "scheduled job",
-      w_no_consumer: "Nothing in the scanned repos consumes {q}: messages published here are not read by any scanned service.",
+      w_no_consumer: "Nothing in the scanned repos consumes {q}: messages published here are not read by any scanned service (a consumer may live in a repo outside this scan).",
       w_no_publisher: "Nothing in the scanned repos publishes to {q}: its consumers only run if something outside these repos sends to it.",
       w_cross: "Links services: {a} → {b}.", w_fields: "Read by the consumer but sent by no publisher: {f}.",
       w_no_writer: "Nothing in the scanned repos writes {q}: the trigger only fires on writes from outside these repos.",
@@ -30,9 +31,10 @@
       queues: "Filas e eventos", queuesLead: "Todo tópico, trigger do Firestore e job agendado: quem publica, quem consome e o que falta.",
       layers: ["Front-ends", "APIs / serviços", "Tópicos", "Workers / functions", "Bancos"],
       flowCols: ["O publicador lê", "Publica", "Evento", "Consumidores", "Grava"], next: "Próximo: evento", nextC: "Próximo: consumidores", nextW: "Próximo: grava",
-      st_ok: "ok", st_no_consumer: "sem consumidor", st_no_publisher: "sem publicador",
+      st_ok: "ok", st_no_consumer: "nenhum consumidor nos repos escaneados", st_no_publisher: "nenhum publicador nos repos escaneados",
+      box_no_consumer: "sem consumidor", box_no_publisher: "sem publicador",
       k_topic: "tópico", k_firestore: "trigger do Firestore", k_cron: "job agendado",
-      w_no_consumer: "Nada nos repos escaneados consome {q}: o que é publicado aqui não é lido por nenhum serviço escaneado.",
+      w_no_consumer: "Nada nos repos escaneados consome {q}: o que é publicado aqui não é lido por nenhum serviço escaneado (o consumidor pode estar num repo fora deste scan).",
       w_no_publisher: "Nada nos repos escaneados publica em {q}: os consumidores só rodam se algo fora destes repos enviar.",
       w_cross: "Liga serviços: {a} → {b}.", w_fields: "Lido pelo consumidor, mas nenhum publicador envia: {f}.",
       w_no_writer: "Nada nos repos escaneados grava {q}: o trigger só dispara com gravações de fora destes repos.",
@@ -88,7 +90,7 @@
     { selector: 'edge[rel = "trigger"]', style: { "line-color": "#1a7f37", "target-arrow-color": "#1a7f37" } },
     { selector: "edge[guess = 1]", style: { "line-style": "dashed" } },
     { selector: "edge[taxi = 1]", style: { "curve-style": "taxi", "taxi-direction": "horizontal", "taxi-turn": "data(turn)", "taxi-turn-min-distance": 10,
-      "label": "", "source-label": "data(label)", "source-text-offset": 46, "text-background-opacity": 1 } },
+      "label": "", "source-label": "data(label)", "source-text-offset": "data(lofs)", "text-background-opacity": 1 } },
     { selector: "edge[dim = 1]", style: { "opacity": 0.2 } },
     { selector: "edge:selected", style: { "line-color": "#cf222e", "target-arrow-color": "#cf222e" } },
   ];
@@ -105,9 +107,20 @@
     // just before its target column, so the long lines read as one bus
     var at = {};
     els.forEach(function (e) { if (e.position && e.data.kind !== "head") at[e.data.id] = e.position; });
+    var longBySrc = {};
     els.forEach(function (e) {
       var a = at[e.data.source], b = at[e.data.target];
-      if (a && b && Math.abs(b.x - a.x) > 300) { e.data.taxi = 1; e.data.turn = Math.round(Math.abs(b.x - a.x) - 70); }
+      if (a && b && Math.abs(b.x - a.x) > 300) (longBySrc[e.data.source] = longBySrc[e.data.source] || []).push(e);
+    });
+    // several long lines from one box: each turns a little earlier and has its label further along, so none hides another
+    Object.keys(longBySrc).forEach(function (src) {
+      var list = longBySrc[src].sort(function (p, q) { return at[p.data.target].y - at[q.data.target].y; });
+      list.forEach(function (e, k) {
+        var a = at[e.data.source], b = at[e.data.target];
+        e.data.taxi = 1;
+        e.data.turn = Math.round(Math.abs(b.x - a.x) - 70 - 16 * k);
+        e.data.lofs = 46 + 64 * k;
+      });
     });
     var ys = els.filter(function (e) { return e.position; }).map(function (e) { return e.position.y; });
     var xs = els.filter(function (e) { return e.position; }).map(function (e) { return e.position.x; });
@@ -150,7 +163,7 @@
     A.edges.forEach(function (e) { edgeById[e.id] = e; });
     function nodeLabel(n) {
       if (n.kind === "store") return n.label + "\n" + Object.keys(n.count).map(function (k) { return n.count[k] + " " + (k === "collection" ? H.kindCollection : k === "view" ? H.kindView : H.kindTable) + (n.count[k] === 1 ? "" : "s"); }).join(" · ");
-      if (n.kind === "topic") return n.label + (n.status !== "ok" ? "\n⚠ " + (V["st_" + n.status] || n.status) : "");
+      if (n.kind === "topic") return n.label + (n.status !== "ok" ? "\n⚠ " + (V["box_" + n.status] || n.status) : "");
       return n.label;
     }
     function edgeLabel(e) {
