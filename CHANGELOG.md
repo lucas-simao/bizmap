@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.17.0 — 2026-11-23
+
 ### Changed (HTML export: diagrams)
 
 - **The architecture, queue-flow and map diagrams are drawn by Mermaid**, the
