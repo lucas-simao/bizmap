@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.2 — 2026-11-23
+
 ### Fixed (architecture view, queues, Python scan)
 
 - **Same columns as the side menu**: the architecture (HTML and Mermaid) and
