@@ -1120,6 +1120,30 @@ class PyAnalysis:
     unresolved_reasons: dict[tuple[str, str], str] = field(default_factory=dict)
 
 
+_ASYNC_TASK_RECV = re.compile(r"(?:^|\.)(?:asyncio|anyio|trio|loop|_loop|event_loop|tg|task_group|taskgroup|nursery|group)$", re.I)
+
+
+def _cloud_tasks_call(node: Node, qual: str, pos: list[Node]) -> bool:
+    """`create_task` is Google Cloud Tasks only with a Cloud Tasks client
+    (`tasks_v2`, `CloudTasksClient`, a `tasks_client`) or its arguments
+    (`parent=`, `task=`, `request=`, or `create_task(parent, task)`);
+    `asyncio.create_task(coro)` and `loop` / `TaskGroup` `.create_task(coro)`
+    start a coroutine in the same process."""
+    low = qual.lower()
+    if "tasks_v2" in low or "cloudtasks" in low or "tasks_client" in low:
+        return True
+    recv = qual.rsplit(".", 1)[0] if "." in qual else ""
+    if recv and _ASYNC_TASK_RECV.search(recv):
+        return False
+    args = node.child_by_field_name("arguments")
+    kws = {
+        text(a.child_by_field_name("name"))
+        for a in (args.named_children if args is not None else [])
+        if a.type == "keyword_argument"
+    }
+    return bool(kws & {"parent", "task", "request"}) or len(pos) >= 2
+
+
 class PythonAnalyzer:
     def __init__(self, rules: list[Rule]) -> None:
         self.rules = [r for r in rules if r.language == "python" and not r.is_stub]
@@ -2567,6 +2591,8 @@ class PythonAnalyzer:
                 )
             return
         if method == "create_task" or "create_task" in qual:
+            if not _cloud_tasks_call(node, qual, pos):
+                return  # asyncio.create_task(coro), loop / TaskGroup .create_task: not a queue
             url_res = find_dict_string(node, {"url"}, resolve)
             method_res = find_dict_string(node, {"http_method", "method"}, resolve)
             parent_res = find_dict_string(node, {"parent", "queue"}, resolve)

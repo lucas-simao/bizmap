@@ -69,7 +69,7 @@
 
   // ── one Cytoscape drawing with column headers (positions from the export) ──
   var VSTYLE = [
-    { selector: "node", style: { "label": "data(label)", "shape": "round-rectangle", "width": 170, "height": 46, "text-wrap": "wrap", "text-max-width": 160,
+    { selector: "node", style: { "label": "data(label)", "shape": "round-rectangle", "width": 206, "height": 46, "text-wrap": "wrap", "text-max-width": 196, "text-overflow-wrap": "anywhere",
       "text-valign": "center", "text-halign": "center", "font-size": 11, "background-color": "#eaeef2", "border-width": 1, "border-color": "#d0d7de", "color": "#1f2328" } },
     { selector: 'node[kind = "service"]', style: { "background-color": "#0969da", "border-color": "#0969da", "color": "#fff", "font-weight": 600 } },
     { selector: 'node[kind = "service"][role = "web"]', style: { "background-color": "#8250df", "border-color": "#8250df" } },

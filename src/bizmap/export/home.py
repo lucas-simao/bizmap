@@ -65,6 +65,7 @@ def build_home(
     services: list[str],
     book_index: dict[str, int],
     lang: str = "en",
+    roles: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """-> (the ``home`` part of the page index, {chunk id: chunk})."""
     ix = Index.from_dict(data)
@@ -300,11 +301,11 @@ def build_home(
         "neverRead": len(never_read), "neverWritten": len(never_written),
     }
     # ── architecture and event flows (#/architecture, #/queues, #/topic/<name>) ──
-    from bizmap.views import Ctx, architecture, entities_of, event_flows, guess_roles, queue_rows
+    from bizmap.views import Ctx, architecture, entities_of, event_flows, queue_rows
 
     ent_of, ents = entities_of(ix, {tuple(sorted(e["ids"])): e["ref"] for e in tables})
-    # the same role rule as the CLI's Mermaid (views.guess_roles), so both draw the same columns
-    vctx = Ctx(ix, services, guess_roles(ix, services, svc), svc, hidden, ent_of, ents,
+    # the side menu's kinds (book.classify_service), as the CLI's Mermaid (book.service_kinds)
+    vctx = Ctx(ix, services, roles or ["lib"] * len(services), svc, hidden, ent_of, ents,
                link=lambda nid: [book_index.get(nid, -1), ix.kind(nid)])
     arch = architecture(vctx)
     flows = event_flows(vctx)

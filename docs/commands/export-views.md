@@ -36,13 +36,20 @@ Find it in the side menu or in the *Architecture* card on the start screen.
   side menu's rule (the HTML and the Mermaid output use the same one):
   - a JS/TS code base that calls APIs is a front end when it has UI files or
     no routes of its own;
-  - otherwise, HTTP routes make it an API;
-  - otherwise, consumers, triggers or jobs make it a worker.
+  - otherwise, HTTP routes (`http` entrypoints) make it an API;
+  - otherwise, any other entrypoint (consumer, trigger, job, HTTP or callable
+    Cloud Function) makes it a worker.
+
+  The side menu, the HTML architecture and the Mermaid output call the same
+  function (`classify_service`), so they always agree.
 - **Functions inside a front end or an API**: Cloud Functions with a trigger,
   queue consumers and jobs living in the same repo as screens or routes get a
   box of their own in the workers column, `<service> · functions` (e.g.
   `shop-web · functions`, with the trigger on `order_events`), together with
-  what they run. The screens stay in the front-end column.
+  what they run. The screens stay in the front-end column. A front end's HTTP
+  Cloud Functions go there too, since a front end serves no routes. A
+  background loop (a Go goroutine the scan marks `scheduled_job` with no
+  schedule) stays with its service: it is part of that process, not an event.
 - **Stores, not tables**: each store (Postgres, Firestore, SQL Server…) is a
   single box that shows its number of tables / collections. Click it to list
   them with a filter. A store with up to 40 tables can also be expanded in the
@@ -82,7 +89,13 @@ reads a field no publisher sends. The sources are:
 - topics and queues (Pub/Sub, Celery, RQ…);
 - **Firestore triggers**: the collection is the source and the code that
   writes it is the publisher;
-- **scheduled jobs**.
+- **scheduled jobs**: those with a schedule. A loop started at boot is not
+  one.
+
+A queue the scan created for a Firestore trigger (`kind: firestore`) is
+listed as that trigger, not as a topic. Two topics with the same name in
+different repos (for example `cloud-tasks`) show their repo:
+`cloud-tasks (worker-a)`.
 
 ![Queues and events](../img/views-queues.png)
 

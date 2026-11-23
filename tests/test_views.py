@@ -24,7 +24,7 @@ from bizmap import views
 from bizmap.export import export_graph
 from bizmap.impact import compute_impact, render_markdown
 from bizmap.registry import graph_from_json
-from fixtures.arch_demo import arch_graph, front_functions_graph
+from fixtures.arch_demo import arch_graph, front_functions_graph, mixed_kinds_graph
 
 SNAP_DIR = Path(__file__).parent / "snapshots"
 
@@ -358,7 +358,7 @@ def test_html_and_mermaid_use_the_same_roles() -> None:
     from bizmap.export.book import build_book
     from bizmap.export.services import assign_services
 
-    for data in (arch_graph(), front_functions_graph()):
+    for data in (arch_graph(), front_functions_graph(), mixed_kinds_graph()):
         ix, chunks = build_book(data, assign_services(data))
         side_menu = [s["kind"] for s in ix["services"]]
         cli = views.architecture(_ctx(data))
@@ -382,3 +382,52 @@ def test_mermaid_columns_keep_the_html_order() -> None:
         assert any(arrow.startswith("<") for _a, arrow, _b in links)
         chain = [line for line in text.splitlines() if "~~~" in line]
         assert len(chain) == 1 and [layer_of[x.strip()] for x in chain[0].split("~~~")] == sorted(set(layer_of.values()))
+
+
+# ── entrypoint kinds of a real workspace (feedback on 0.16.1) ────────────────
+
+
+def test_roles_follow_the_side_menu_for_every_entrypoint_kind() -> None:
+    from bizmap.export.book import build_book
+    from bizmap.export.services import assign_services
+
+    data = mixed_kinds_graph()
+    ix, _chunks = build_book(data, assign_services(data))
+    ctx = _ctx(data)
+    menu = {s["name"]: s["kind"] for s in ix["services"]}
+    assert dict(zip(ctx.services, ctx.roles, strict=True)) == menu
+    # HTTP Cloud Functions only: a worker in the menu, so in the workers column too
+    assert menu["ingest"] == "worker"
+    by_label = {n["label"]: n for n in views.architecture(ctx)["nodes"]}
+    assert by_label["ingest"]["layer"] == 3
+
+
+def test_front_end_server_functions_and_background_loops() -> None:
+    arch = views.architecture(_ctx(mixed_kinds_graph()))
+    by_label = {n["label"]: n for n in arch["nodes"]}
+    # a front end serves no routes: its HTTP Cloud Function joins "portal · functions"
+    assert by_label["portal"]["layer"] == 0 and by_label["portal · functions"]["layer"] == 3
+    # a goroutine loop (scheduled_job, no schedule) stays with its API, no "· functions" box
+    assert "core · functions" not in by_label
+    flows = {f["key"]: f for f in views.event_flows(_ctx(mixed_kinds_graph()))}
+    assert not any(k.startswith("cron:") for k in flows)
+
+
+def test_firestore_queue_nodes_are_triggers_not_topics() -> None:
+    ctx = _ctx(mixed_kinds_graph())
+    arch = views.architecture(ctx)
+    topics = sorted(n["label"] for n in arch["nodes"] if n["kind"] == "topic")
+    assert "jobs" not in topics
+    flows = {f["key"]: f for f in views.event_flows(ctx)}
+    assert "jobs" not in flows and flows["firestore:jobs"]["status"] == "ok"
+    assert [p["fn"][0] for p in flows["firestore:jobs"]["publishers"]] == ["main.produce"]
+
+
+def test_topics_with_the_same_name_show_their_repo() -> None:
+    ctx = _ctx(mixed_kinds_graph())
+    topics = sorted(n["label"] for n in views.architecture(ctx)["nodes"] if n["kind"] == "topic")
+    assert topics == ["cloud-tasks (assistant)", "cloud-tasks (ingest)"]
+    rows = views.queue_rows(views.event_flows(ctx))
+    keys = {r[2]: r[0] for r in rows if r[1] == "topic"}
+    assert keys == {"cloud-tasks (assistant)": "assistant/queue:cloud_tasks:cloud-tasks",
+                    "cloud-tasks (ingest)": "ingest/queue:cloud_tasks:cloud-tasks"}
