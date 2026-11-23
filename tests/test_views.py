@@ -24,7 +24,7 @@ from bizmap import views
 from bizmap.export import export_graph
 from bizmap.impact import compute_impact, render_markdown
 from bizmap.registry import graph_from_json
-from fixtures.arch_demo import arch_graph
+from fixtures.arch_demo import arch_graph, front_functions_graph
 
 SNAP_DIR = Path(__file__).parent / "snapshots"
 
@@ -216,11 +216,11 @@ def test_mermaid_blocks() -> None:
     arch = views.mermaid_architecture(views.architecture(ctx))
     assert arch.startswith("flowchart LR\n")
     assert '[("Postgres · 4 tables")]' in arch and '[("Firestore · 2 collections")]' in arch
-    assert re.search(r's_s3 -->\|"HTTP 2"\| s_s2', arch), arch
+    assert re.search(r'svc_s3 -->\|"HTTP 2"\| svc_s2', arch), arch
     assert "⚠ no consumer" in arch
     md = views.mermaid_markdown(ctx)
     assert md.count("```mermaid") == 4  # the architecture and 3 event sources
-    assert "| `order-cancelled` | topic | no consumer | 1 | 0 |" in md
+    assert "| `order-cancelled` | topic | no consumer in the scanned repos | 1 | 0 |" in md
     assert "⚠ read but never published: `couponCode`" in md
     for block in re.findall(r"```mermaid\n(.*?)```", md, re.S):
         for line in block.strip().splitlines()[1:]:
@@ -311,3 +311,74 @@ def test_inlined_scripts_declare_each_name_once() -> None:
                 dupes.append((ident, seen[ident], name))
             seen.setdefault(ident, name)
     assert not dupes, dupes
+
+
+# ── roles: one rule for the HTML and the Mermaid ─────────────────────────────
+
+
+def _mermaid_layers(text: str) -> tuple[list[str], dict[str, int], list[tuple[str, str, str]]]:
+    """(subgraph order, node -> layer, links (a, arrow, b)) of a flowchart."""
+    order, layer_of, links, cur = [], {}, [], None
+    for line in text.splitlines():
+        m = re.match(r'\s*subgraph (L\d)\[', line)
+        if m:
+            cur = int(m.group(1)[1:])
+            order.append(m.group(1))
+            continue
+        if line.strip() == "end":
+            cur = None
+            continue
+        m = re.match(r"\s*(\w+)[\[\(>]", line)
+        if cur is not None and m:
+            layer_of[m.group(1)] = cur
+            continue
+        m = re.match(r'\s*(\w+) (<---|<-\.-|-->|-\.->)\|"[^"]*"\| (\w+)$', line)
+        if m:
+            links.append((m.group(1), m.group(2), m.group(3)))
+    return order, layer_of, links
+
+
+def test_functions_inside_a_front_end_get_their_own_box() -> None:
+    data = front_functions_graph()
+    ctx = _ctx(data)
+    assert ctx.roles == ["api", "web"]
+    arch = views.architecture(ctx)
+    by_label = {n["label"]: n for n in arch["nodes"]}
+    assert by_label["shop-web"]["layer"] == 0  # the screens stay a front end
+    fns = by_label["shop-web · functions"]
+    assert fns["layer"] == 3 and fns["role"] == "worker" and fns["svc"] == by_label["shop-web"]["svc"]
+    edges = {(e["from"], e["to"], e["rel"]) for e in arch["edges"]}
+    assert ("db:Firestore", fns["id"], "trigger") in edges and (fns["id"], "db:Firestore", "rw") in edges
+    assert (by_label["shop-web"]["id"], by_label["shop-api"]["id"], "http") in edges
+    # nothing of the trigger hangs off the front-end box
+    assert not any(by_label["shop-web"]["id"] in (a, b) and r != "http" for a, b, r in edges)
+
+
+def test_html_and_mermaid_use_the_same_roles() -> None:
+    from bizmap.export.book import build_book
+    from bizmap.export.services import assign_services
+
+    for data in (arch_graph(), front_functions_graph()):
+        ix, chunks = build_book(data, assign_services(data))
+        side_menu = [s["kind"] for s in ix["services"]]
+        cli = views.architecture(_ctx(data))
+        assert _ctx(data).roles == side_menu
+        html_arch = chunks["ar"]
+        assert [(n["id"], n["label"], n["layer"]) for n in html_arch["nodes"]] == [(n["id"], n["label"], n["layer"]) for n in cli["nodes"]]
+        _o, layer_of, _l = _mermaid_layers(views.mermaid_architecture(cli))
+        drawn = {n["label"]: n["layer"] for n in html_arch["nodes"]}
+        assert sorted(drawn.values()) == sorted(layer_of.values())
+
+
+def test_mermaid_columns_keep_the_html_order() -> None:
+    for data in (arch_graph(), front_functions_graph()):
+        text = views.mermaid_architecture(views.architecture(_ctx(data)))
+        order, layer_of, links = _mermaid_layers(text)
+        assert order == sorted(order) and "direction" not in text
+        # Mermaid ranks by link direction: every link is written left column → right column
+        for a, arrow, b in links:
+            assert layer_of[a] <= layer_of[b], (a, arrow, b)
+        # the trigger flows store → function: written left to right, arrowhead on the function
+        assert any(arrow.startswith("<") for _a, arrow, _b in links)
+        chain = [line for line in text.splitlines() if "~~~" in line]
+        assert len(chain) == 1 and [layer_of[x.strip()] for x in chain[0].split("~~~")] == sorted(set(layer_of.values()))

@@ -36,7 +36,11 @@ jobs:
         run: |
           pip install -e ".[dev]" playwright
           python -m playwright install --with-deps chromium
+      - name: Mermaid (renders the architecture diagram in test_browser.py)
+        run: npm install --no-save --prefix "$RUNNER_TEMP/mermaid" mermaid@11
       - name: Pytest (browser)
+        env:
+          BIZMAP_MERMAID_JS: ${{ runner.temp }}/mermaid/node_modules/mermaid/dist/mermaid.min.js
         run: pytest -q -m browser
 
   package:

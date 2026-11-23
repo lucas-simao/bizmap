@@ -137,28 +137,85 @@ def _ep_kind(node: dict[str, Any]) -> str:
 
 
 def guess_roles(ix: Index, services: list[str], svc: Callable[[str], int]) -> list[str]:
-    """web / api / worker / lib from what each service exposes (the HTML export
-    has its own, finer rule and passes it instead)."""
-    http_eps: dict[int, int] = defaultdict(int)
-    other_eps: dict[int, int] = defaultdict(int)
+    """web / api / worker / lib per service, the HTML side menu's rule: a JS/TS
+    code base that calls APIs is a front end when it has UI files or no routes
+    of its own; else routes make an API, consumers / triggers / jobs a worker.
+    The HTML and the Mermaid output both use this; the functions of a front end
+    or an API that run on a trigger, a queue or a schedule get their own
+    "· functions" box (see :func:`worker_parts`)."""
+    from bizmap.export.book import FRONT_EXT, SCREEN_DIRS, UI_EXT
+
+    routes: dict[int, int] = defaultdict(int)
+    jobs: dict[int, int] = defaultdict(int)
     calls_out: dict[int, int] = defaultdict(int)
+    files: dict[int, list[str]] = defaultdict(list)
     for nid, node in ix.nodes.items():
+        s = svc(nid)
         if node.get("type") == "entrypoint":
-            (http_eps if _ep_kind(node) == "http" else other_eps)[svc(nid)] += 1
+            if _ep_kind(node) == "http":
+                routes[s] += 1
+            else:
+                jobs[s] += 1
+        elif node.get("type") == "function":
+            ev = node.get("evidence")
+            f = str(ev.get("file") or "") if isinstance(ev, dict) else ""
+            if f:
+                files[s].append(f)
+            if node.get("unresolved_http"):
+                calls_out[s] += 1
     for edge in ix.out.edges:
         if edge.get("type") == "calls_http":
             calls_out[svc(edge["from"])] += 1
+    for u in ix.unresolved_http or []:
+        if isinstance(u, dict) and u.get("from"):
+            calls_out[svc(str(u["from"]))] += 1
     roles = []
     for s in range(len(services)):
-        if http_eps[s]:
-            roles.append("api")
-        elif other_eps[s]:
-            roles.append("worker")
-        elif calls_out[s]:
+        fs = files[s]
+        front = sum(1 for f in fs if f.endswith(FRONT_EXT))
+        ui = any(f.endswith(UI_EXT) for f in fs) or any(f"/{d}/" in f"/{f}" for f in fs for d in SCREEN_DIRS[:3] + ("components",))
+        if fs and front / len(fs) >= 0.6 and calls_out[s] and (ui or not routes[s]):
             roles.append("web")
+        elif routes[s]:
+            roles.append("api")
+        elif jobs[s]:
+            roles.append("worker")
         else:
             roles.append("lib")
     return roles
+
+
+def worker_parts(ctx: Ctx) -> set[str]:
+    """Entrypoints and functions of a front end / API / library that run on a
+    trigger, a queue or a schedule (and nothing its routes or screens reach):
+    they are drawn in the workers column as "<service> · functions"."""
+    ix = ctx.ix
+    out: set[str] = set()
+    for s, role in enumerate(ctx.roles):
+        if role == "worker":
+            continue
+        event_eps, main_starts = [], []
+        for nid, node in ix.nodes.items():
+            if ctx.svc(nid) != s or ctx.hidden(nid):
+                continue
+            if node.get("type") == "entrypoint":
+                (main_starts if _ep_kind(node) == "http" else event_eps).append(nid)
+        if not event_eps:
+            continue
+        from bizmap.export.book import is_ui_file
+
+        for nid, node in ix.nodes.items():
+            if node.get("type") == "function" and ctx.svc(nid) == s:
+                ev = node.get("evidence")
+                if is_ui_file(str(ev.get("file") or "") if isinstance(ev, dict) else ""):
+                    main_starts.append(nid)
+        main: set[str] = set()
+        for nid in main_starts:
+            main |= _closure(ix, nid)
+        for ep in event_eps:
+            out.add(ep)
+            out |= {f for f in _closure(ix, ep) if f not in main and ctx.svc(f) == s}
+    return out
 
 
 def _fn_item(ctx: Ctx, nid: str) -> list[Any]:
@@ -230,6 +287,7 @@ def architecture(ctx: Ctx) -> dict[str, Any]:
     ix = ctx.ix
     nodes: dict[str, dict[str, Any]] = {}
     acc: dict[tuple[str, str, str], dict[str, Any]] = {}
+    parts = worker_parts(ctx)
 
     def snode(s: int) -> str:
         nid = f"s{s}"
@@ -237,6 +295,18 @@ def architecture(ctx: Ctx) -> dict[str, Any]:
             role = ctx.roles[s] if s < len(ctx.roles) else "lib"
             nodes[nid] = {"id": nid, "kind": "service", "role": role, "label": ctx.services[s], "svc": s,
                           "layer": ROLE_LAYER.get(role, 1), "order": 0}
+        return nid
+
+    def owner(x: str) -> str:
+        """The box of a function / entrypoint: its service, or its service's
+        "· functions" box when it runs on an event inside a front end / API."""
+        s = ctx.svc(x)
+        if x not in parts:
+            return snode(s)
+        nid = f"s{s}f"
+        if nid not in nodes:
+            nodes[nid] = {"id": nid, "kind": "service", "role": "worker", "label": f"{ctx.services[s]} · functions", "svc": s,
+                          "layer": ROLE_LAYER["worker"], "order": 0}
         return nid
 
     def add(a: str, b: str, rel: str, rw: int, rank: int, item: list[Any] | None, key: str) -> None:
@@ -269,7 +339,7 @@ def architecture(ctx: Ctx) -> dict[str, Any]:
             cell[0] |= bit
             cell[1] = max(cell[1], rank)
             sid = f"db:{store}"
-            add(snode(s), sid, "rw", bit, rank, [*_fn_item(ctx, a), ctx.ents[ref]["name"], bit], f"{a}\x00{ref}")
+            add(owner(a), sid, "rw", bit, rank, [*_fn_item(ctx, a), ctx.ents[ref]["name"], bit], f"{a}\x00{ref}")
     # topics: publishers and consumers
     for qid, qnode in sorted(ix.nodes.items()):
         if qnode.get("type") != "queue":
@@ -279,11 +349,11 @@ def architecture(ctx: Ctx) -> dict[str, Any]:
         for edge in ix.inc.get(qid, []):
             if edge.get("type") == "enqueues" and not edge.get("derived") and ctx.svc(edge["from"]) >= 0 and not ctx.hidden(edge["from"]):
                 pubs.add(ctx.svc(edge["from"]))
-                add(snode(ctx.svc(edge["from"])), tid, "pub", 0, _rank(edge.get("confidence")), _fn_item(ctx, edge["from"]), edge["from"])
+                add(owner(edge["from"]), tid, "pub", 0, _rank(edge.get("confidence")), _fn_item(ctx, edge["from"]), edge["from"])
         for edge in ix.out.get(qid, []):
             if edge.get("type") == "triggers" and ctx.svc(edge["to"]) >= 0 and not ctx.hidden(edge["to"]):
                 subs.add(ctx.svc(edge["to"]))
-                add(tid, snode(ctx.svc(edge["to"])), "sub", 0, _rank(edge.get("confidence")), _fn_item(ctx, edge["to"]), edge["to"])
+                add(tid, owner(edge["to"]), "sub", 0, _rank(edge.get("confidence")), _fn_item(ctx, edge["to"]), edge["to"])
         if not pubs and not subs:
             continue
         status = "ok" if pubs and subs else "no_consumer" if pubs else "no_publisher"
@@ -298,7 +368,7 @@ def architecture(ctx: Ctx) -> dict[str, Any]:
             continue
         ref = _collection_ref(ctx, str(enode["collection"]), eid)
         store = ctx.ents[ref]["store"] if ref else "Firestore"
-        add(f"db:{store}", snode(s), "trigger", 0, _rank(enode.get("confidence") or "exact"),
+        add(f"db:{store}", owner(eid), "trigger", 0, _rank(enode.get("confidence") or "exact"),
             [*_fn_item(ctx, eid), str(enode["collection"]), 0], eid)
         if f"db:{store}" not in nodes:
             store_ents.setdefault(store, [])
@@ -309,7 +379,7 @@ def architecture(ctx: Ctx) -> dict[str, Any]:
         a, b = ctx.svc(edge["from"]), ctx.svc(edge["to"])
         if a < 0 or b < 0 or a == b or ctx.hidden(edge["from"]):
             continue
-        add(snode(a), snode(b), "http", 0, _rank(edge.get("confidence")), [*_fn_item(ctx, edge["from"]), ix.label(edge["to"]), 0],
+        add(owner(edge["from"]), owner(edge["to"]), "http", 0, _rank(edge.get("confidence")), [*_fn_item(ctx, edge["from"]), ix.label(edge["to"]), 0],
             f"{edge['from']}\x00{edge['to']}")
     for store, refs in sorted(store_ents.items()):
         sid = f"db:{store}"
@@ -724,16 +794,25 @@ LAYER_TITLE = {0: "Front ends", 1: "APIs / services", 2: "Topics", 3: "Workers /
 
 
 def mermaid_architecture(arch: dict[str, Any]) -> str:
+    """``flowchart LR`` in the HTML's column order. Mermaid ranks nodes by the
+    direction of the links, so every link is written from the left column to
+    the right one (a link that flows right to left, such as a Firestore
+    trigger from a store to its function, keeps its arrowhead on the left
+    with ``<---``), and an invisible chain (``~~~``) ties one node of each
+    column to the next."""
     ids: dict[str, str] = {}
     lines = ["flowchart LR"]
     by_layer: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    layer_of: dict[str, int] = {}
     for n in arch["nodes"]:
         by_layer[n["layer"]].append(n)
+        layer_of[n["id"]] = n["layer"]
+    anchors = []
     for lay in sorted(by_layer):
         lines.append(f'  subgraph L{lay}["{LAYER_TITLE.get(lay, "")}"]')
-        lines.append("    direction TB")
-        for n in sorted(by_layer[lay], key=lambda n: n["y"]):
-            m = _mid(n["kind"][0], n["id"], ids)
+        col = sorted(by_layer[lay], key=lambda n: (n["y"], n["id"]))
+        for n in col:
+            m = _mid({"service": "svc", "topic": "t", "store": "db"}.get(n["kind"], "n"), n["id"], ids)
             if n["kind"] == "store":
                 count = ", ".join(f"{v} {k}{'s' if v != 1 else ''}" for k, v in n["count"].items())
                 lines.append(f'    {m}[("{_mtext(n["label"])} · {count}")]')
@@ -742,14 +821,21 @@ def mermaid_architecture(arch: dict[str, Any]) -> str:
                 lines.append(f'    {m}>"{_mtext(n["label"])}{warn}"]')
             else:
                 lines.append(f'    {m}["{_mtext(n["label"])}"]')
+        anchors.append(ids[col[0]["id"]])
         lines.append("  end")
+    if len(anchors) > 1:
+        lines.append("  " + " ~~~ ".join(anchors))
     for e in arch["edges"]:
-        a, b = ids[e["from"]], ids[e["to"]]
         lab = RW_TXT.get(e["rw"], "") if e["rel"] == "rw" else {"pub": "publishes", "sub": "consumes", "http": "HTTP",
                                                                   "trigger": "trigger"}.get(e["rel"], e["rel"])
         lab = f"{lab} {e['n']}".strip()
-        arrow = "-.->" if e["guess"] else "-->"
-        lines.append(f'  {a} {arrow}|"{lab}"| {b}')
+        a, b = ids[e["from"]], ids[e["to"]]
+        if layer_of[e["from"]] > layer_of[e["to"]]:  # written left to right, arrowhead on the left
+            arrow = "<-.-" if e["guess"] else "<---"
+            lines.append(f'  {b} {arrow}|"{lab}"| {a}')
+        else:
+            arrow = "-.->" if e["guess"] else "-->"
+            lines.append(f'  {a} {arrow}|"{lab}"| {b}')
     return "\n".join(lines)
 
 
@@ -779,7 +865,7 @@ def flow_notes(flow: dict[str, Any], services: list[str]) -> list[str]:
     """Plain-text warnings and the message shape of a flow (Markdown-safe)."""
     out = []
     if "no_consumer" in flow["warnings"]:
-        out.append(f"⚠ `{flow['label']}` has no consumer in the scanned repos.")
+        out.append(f"⚠ `{flow['label']}` has no consumer in the scanned repos (one may live in a repo outside this scan).")
     if "no_publisher" in flow["warnings"]:
         out.append(f"⚠ nothing in the scanned repos publishes to `{flow['label']}`.")
     if "cross_service" in flow["warnings"]:
@@ -805,7 +891,8 @@ def mermaid_markdown(ctx: Ctx, flows: list[dict[str, Any]] | None = None, arch: 
     if flows:
         parts += ["# Event sources", "", "| source | kind | status | publishers | consumers |", "|---|---|---|---:|---:|"]
         for f in flows:
-            parts.append(f"| `{f['label']}` | {f['kind']} | {f['status'].replace('_', ' ')} | {len(f['publishers'])} | {len(f['consumers'])} |")
+            status = {"no_consumer": "no consumer in the scanned repos", "no_publisher": "no publisher in the scanned repos"}.get(f["status"], f["status"])
+            parts.append(f"| `{f['label']}` | {f['kind']} | {status} | {len(f['publishers'])} | {len(f['consumers'])} |")
         parts.append("")
     for f in flows:
         parts += [f"## {f['kind']}: {f['label']}", ""]

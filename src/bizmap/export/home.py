@@ -65,7 +65,6 @@ def build_home(
     services: list[str],
     book_index: dict[str, int],
     lang: str = "en",
-    roles: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """-> (the ``home`` part of the page index, {chunk id: chunk})."""
     ix = Index.from_dict(data)
@@ -304,7 +303,8 @@ def build_home(
     from bizmap.views import Ctx, architecture, entities_of, event_flows, guess_roles, queue_rows
 
     ent_of, ents = entities_of(ix, {tuple(sorted(e["ids"])): e["ref"] for e in tables})
-    vctx = Ctx(ix, services, roles or guess_roles(ix, services, svc), svc, hidden, ent_of, ents,
+    # the same role rule as the CLI's Mermaid (views.guess_roles), so both draw the same columns
+    vctx = Ctx(ix, services, guess_roles(ix, services, svc), svc, hidden, ent_of, ents,
                link=lambda nid: [book_index.get(nid, -1), ix.kind(nid)])
     arch = architecture(vctx)
     flows = event_flows(vctx)

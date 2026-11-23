@@ -32,9 +32,17 @@ Find it in the side menu or in the *Architecture* card on the start screen.
 ![Architecture: front ends → APIs → topics → workers → stores](../img/views-architecture.png)
 
 - **Columns, left to right**: front ends → APIs / services → topics → workers /
-  functions → stores. A service's column comes from what it exposes: HTTP
-  routes make it an API, only consumers / triggers / jobs make it a worker,
-  and a JS/TS code base that calls APIs is a front end.
+  functions → stores. A service's column comes from what it exposes, with the
+  side menu's rule (the HTML and the Mermaid output use the same one):
+  - a JS/TS code base that calls APIs is a front end when it has UI files or
+    no routes of its own;
+  - otherwise, HTTP routes make it an API;
+  - otherwise, consumers, triggers or jobs make it a worker.
+- **Functions inside a front end or an API**: Cloud Functions with a trigger,
+  queue consumers and jobs living in the same repo as screens or routes get a
+  box of their own in the workers column, `<service> · functions` (e.g.
+  `shop-web · functions`, with the trigger on `order_events`), together with
+  what they run. The screens stay in the front-end column.
 - **Stores, not tables**: each store (Postgres, Firestore, SQL Server…) is a
   single box that shows its number of tables / collections. Click it to list
   them with a filter. A store with up to 40 tables can also be expanded in the
@@ -67,7 +75,8 @@ fit buttons to zoom.
 ## Queues and events (`#/queues`)
 
 Every **event source** is listed with its publishers, consumers and a status:
-*ok*, *no consumer* or *no publisher*. A ⚠ *Message* tag means the consumer
+*ok*, *no consumer in the scanned repos* or *no publisher in the scanned
+repos*. A ⚠ *Message* tag means the consumer
 reads a field no publisher sends. The sources are:
 
 - topics and queues (Pub/Sub, Celery, RQ…);
@@ -97,7 +106,9 @@ The flow reads left to right:
   fields the consumer reads (`dataflow_in`). A field that is read but never
   published is flagged: `couponCode` above.
 - **Warnings**:
-  - *no consumer*: nothing in the scanned repos reads the topic;
+  - *no consumer in the scanned repos*: nothing scanned reads the topic. A
+    consumer may live in a repo outside the scan, so this is a gap in what was
+    scanned, not necessarily a bug;
   - *no publisher*: nothing in the scanned repos sends to it (for a Firestore
     trigger, nothing writes the collection);
   - *links services*: publisher and consumer live in different services.
@@ -109,6 +120,14 @@ The flow reads left to right:
 map keep working.
 
 ## Mermaid, for GitHub
+
+The columns keep the HTML order (front ends → APIs → topics → workers →
+stores) in any Mermaid renderer. Mermaid places nodes by the direction of the
+links, not by the order of the subgraphs, so every link is written from the
+left column to the right one. A link that flows right to left (a Firestore
+trigger from a store to its function, a topic consumed by an API) keeps its
+arrowhead on the left (`fn <---|trigger| store`). An invisible chain (`~~~`)
+also ties one node of each column to the next.
 
 `bizmap export --format mermaid` writes Markdown that GitHub renders:
 

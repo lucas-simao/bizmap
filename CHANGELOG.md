@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Fixed (architecture view, Mermaid)
+
+- **One role rule for the HTML and the Mermaid**: the architecture's columns
+  follow the side menu's rule in both (a JS/TS repo that calls APIs is a front
+  end when it has UI files or no routes; else routes → API; else consumers /
+  triggers / jobs → worker). `bizmap export --format mermaid` / `report
+  --mermaid` used to call a front-end repo with a Cloud Function a worker.
+- **Functions inside a front end / an API get their own box**: entrypoints on a
+  trigger, a queue or a schedule (and the functions they run that no route or
+  screen reaches) are drawn in the workers column as `<service> · functions`
+  (e.g. `shop-web · functions` for a Firestore trigger on `order_events`); the
+  screens stay in the front-end column.
+- **Mermaid keeps the column order** (front ends → APIs → topics → workers →
+  stores) in Mermaid 11 / mermaid-cli: every link is written left column →
+  right column (`fn <---|trigger| store` for a link that flows right to left),
+  an invisible `~~~` chain ties the columns, and the subgraphs no longer set
+  `direction`. A browser test renders it with Mermaid and checks the columns'
+  x positions (the CI browser job installs `mermaid@11`).
+- Two long lines from one box (a service writing Postgres and Firestore) no
+  longer hide each other's label.
+- "no consumer" / "no publisher" now say "in the scanned repos" (list, flow
+  page, Mermaid table), since the consumer may live in a repo outside the scan.
+
 ## 0.16.0 — 2026-11-23
 
 ### Added (HTML export, report, PR comment)
