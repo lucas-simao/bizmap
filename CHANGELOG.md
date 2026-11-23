@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.1 — 2026-11-23
+
 ### Fixed (architecture view, Mermaid)
 
 - **One role rule for the HTML and the Mermaid**: the architecture's columns
