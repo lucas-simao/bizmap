@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Changed (HTML export: diagrams)
+
+- **The architecture, queue-flow and map diagrams are drawn by Mermaid**, the
+  same renderer GitHub uses for the PR comment, instead of Cytoscape.
+  Columns are frames and the curved lines avoid the boxes. Mermaid 11.16.1
+  (MIT) is embedded in the page, so it works offline; it adds about 3.5 MB.
+  The legacy service map still uses Cytoscape.
+- **Hover a box** to light its lines and fade the rest; click a line's label
+  for what is behind it.
+- **Architecture, one layer at a time**: tabs *All · Data · HTTP · Queues and
+  triggers*, with their line counts. A system with more than 45 lines opens
+  on *Data*.
+- **Topics folded per publisher**: a service that is the only publisher of 3
+  or more topics shows them as one box (`shop-api · 4 topics`, with how many
+  have no consumer); a click opens it.
+- **Map, left to right**: writers on the left, the centre, readers on the
+  right. With intermediate functions, they sit inside their service's box
+  (no more service → function lines), under short names (`placeOrder`;
+  the full name on hover), at most 10 per service (+N more). A service that
+  writes and reads gets a box on each side.
+- The CLI's Mermaid (`export --format mermaid`, `report --mermaid`) uses the
+  same colours.
+- The CI no longer installs Mermaid for the browser tests: they use the
+  embedded copy.
+
 ## 0.16.2 — 2026-11-23
 
 ### Fixed (architecture view, queues, Python scan)

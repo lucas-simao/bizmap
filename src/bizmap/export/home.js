@@ -702,30 +702,89 @@
       '<div class="tabs" id="hops"><a data-h="1" class="' + (hops === 1 ? "on" : "") + '" href="' + hrefOf("map/" + kind + "/" + encodeURIComponent(key), { h: 1 }) + '">' + esc(H.hop1) + "</a>" +
       '<a data-h="2" class="' + (hops === 2 ? "on" : "") + '" href="' + hrefOf("map/" + kind + "/" + encodeURIComponent(key), { h: 2 }) + '">' + esc(H.hop2) + "</a>" +
       (c0[0] === "e" ? '<a href="' + hrefOf(qPath(c0[1], "w")) + '">' + esc(H.writes) + " / " + esc(H.reads) + "</a>" : "") + "</div>" +
-      (order.length > CAP ? '<p class="muted small">' + esc(fmt(H.mapCut, { n: CAP, t: order.length })) + "</p>" : "") + '<div id="map"></div></div>';
+      (order.length > CAP ? '<p class="muted small">' + esc(fmt(H.mapCut, { n: CAP, t: order.length })) + "</p>" : "") + '<div id="map" class="mm"></div></div>';
     read(h); detail("");
     window.__bizmap.mapNodes = els.filter(function (x) { return !x.data.source; }).map(function (x) { return x.data.label.split("\n")[0] + "|" + x.data.kind; });
-    if (typeof cytoscape !== "function") return;
-    var cy = cytoscape({ container: $("map"), elements: els, minZoom: 0.2, maxZoom: 2.5, boxSelectionEnabled: false,
-      style: [
-        { selector: "node", style: { "label": "data(label)", "shape": "round-rectangle", "width": 150, "height": 44, "text-wrap": "wrap", "text-valign": "center", "text-halign": "center",
-          "font-size": 11, "background-color": "#eaeef2", "border-width": 1, "border-color": "#d0d7de", "color": "#1f2328" } },
-        { selector: 'node[kind = "e"]', style: { "background-color": "#ddf4ff", "border-color": "#54aeff" } },
-        { selector: 'node[kind = "s"]', style: { "background-color": "#0969da", "color": "#fff", "font-weight": 600 } },
-        { selector: 'node[kind = "q"]', style: { "shape": "barrel", "background-color": "#fff8c5", "border-color": "#d4a72c" } },
-        { selector: 'node[kind = "f"]', style: { "shape": "rectangle", "height": 28, "font-size": 10, "background-color": "#fff" } },
-        { selector: 'node[kind = "c"]', style: { "shape": "ellipse", "width": 90, "height": 26, "font-size": 10, "background-color": "#f6f8fa" } },
-        { selector: "node[center = 1]", style: { "border-width": 3, "border-color": "#cf222e" } },
-        { selector: "edge", style: { "label": "data(label)", "curve-style": "bezier", "target-arrow-shape": "triangle", "width": 1.5, "font-size": 10, "line-color": "#8c959f",
-          "target-arrow-color": "#8c959f", "text-background-color": "#fff", "text-background-opacity": 1 } },
-        { selector: "edge[guess = 1]", style: { "line-style": "dashed" } },
-      ],
-      layout: { name: "concentric", concentric: function (n) { return n.data("level") || 0; }, levelWidth: function () { return 1; },
-                minNodeSpacing: 40, animate: false } });
-    cy.on("tap", "node", function (ev) {
-      var id = ev.target.id();
-      if (id.charAt(0) !== "n") return;
-      var n = G.n[+id.slice(1)];
-      location.hash = n[0] === "e" ? hrefOf(qPath(n[1], "w")) : n[0] === "s" ? hrefOf("s/" + n[1]) : hrefOf("topic/" + encodeURIComponent(n[1]));
+    mmDraw($("map"), mapDef(els, G, center), { minScale: 0.8, node: function (id) {
+      if (id.charAt(0) === "n") {
+        var n = G.n[+id.slice(1)];
+        location.hash = n[0] === "e" ? hrefOf(qPath(n[1], "w")) : n[0] === "s" ? hrefOf("s/" + n[1]) : hrefOf("topic/" + encodeURIComponent(n[1]));
+      } else if (id.charAt(0) === "f") {
+        var m = meta(id.slice(1));
+        if (m.bi >= 0) location.hash = "#/f/" + m.bi;
+      }
+    }, group: function (id) {
+      if (id.charAt(0) === "n") location.hash = hrefOf("s/" + G.n[+id.slice(1)][1]);
+    } });
+  }
+  // a function's short name: `Class.method` or `name` (the full one shows on hover)
+  function mapFnName(label) {
+    var parts = String(label).split(/[./]/).filter(Boolean);
+    if (parts.length < 2) return String(label);
+    var last = parts[parts.length - 1], prev = parts[parts.length - 2];
+    return /^[A-Z]/.test(prev) ? prev + "." + last : last;
+  }
+  // the map as a Mermaid flowchart: who writes on the left, the centre, who reads on the
+  // right; with details, functions sit inside their service's box (no service → function lines)
+  var MAP_FN_CAP = 10;
+  function mapDef(els, G, center) {
+    var nodesIn = els.filter(function (x) { return !x.data.source; });
+    var edges = els.filter(function (x) { return x.data.source; });
+    var parentOf = {}, kids = {};
+    edges.forEach(function (x) {
+      if (x.data.rel !== "own") return;
+      parentOf[x.data.target] = x.data.source;
+      (kids[x.data.source] = kids[x.data.source] || []).push(x.data.target);
     });
+    // cap the functions per service; the rest is one "+N more" box
+    var dropped = {}, more = {};
+    Object.keys(kids).forEach(function (sid) {
+      var list = kids[sid].filter(function (v, i, a) { return a.indexOf(v) === i; }).sort();
+      kids[sid] = list.slice(0, MAP_FN_CAP);
+      list.slice(MAP_FN_CAP).forEach(function (f) { dropped[f] = 1; });
+      if (list.length > MAP_FN_CAP) more[sid] = list.length - MAP_FN_CAP;
+    });
+    var cid = "n" + center, groups = [], nodes = [], isGroup = {};
+    // a function that writes the centre sits left of it, one that only reads sits right:
+    // a service with both gets two boxes of the same name, so every line runs left to right
+    var writes = {};
+    edges.forEach(function (x) { if (x.data.rel === "rw" && x.data.target === cid && x.data.label !== H.R) writes[x.data.source] = 1; });
+    Object.keys(kids).sort().forEach(function (sid) {
+      var sn = G.n[+sid.slice(1)], label = sn ? sn[2] : sid;
+      isGroup[sid] = 1;
+      var w = kids[sid].filter(function (f) { return writes[f]; }), r = kids[sid].filter(function (f) { return !writes[f]; });
+      if (more[sid]) (w.length ? w : r).push("more:" + sid);
+      if (w.length && r.length) {
+        groups.push({ id: sid, label: label, nodes: w });
+        groups.push({ id: sid + ":r", label: label, nodes: r });
+      } else groups.push({ id: sid, label: label, nodes: w.length ? w : r });
+    });
+    nodesIn.forEach(function (x) {
+      var d = x.data, id = d.id;
+      if (isGroup[id] || dropped[id]) return;
+      var label = String(d.label).split("\n");
+      if (d.kind === "f") nodes.push({ id: id, label: mapFnName(label[0]), title: label[0], cls: "fn" });
+      else if (d.kind === "e") nodes.push({ id: id, label: label[0], sub: label[1] || "", shape: "db", cls: "store" + (id === cid ? " center" : "") });
+      else if (d.kind === "q") nodes.push({ id: id, label: label[0], sub: label[1] || "", shape: "topic", cls: "topic" + (id === cid ? " center" : "") });
+      else if (d.kind === "c") nodes.push({ id: id, label: label[0], shape: "round", cls: "col" });
+      else nodes.push({ id: id, label: label[0], cls: "api" + (id === cid ? " center" : "") });
+    });
+    Object.keys(more).forEach(function (sid) { nodes.push({ id: "more:" + sid, label: fmt(H.moreFns || "+{n} more", { n: more[sid] }), cls: "more" }); });
+    var out = [], colIds = [];
+    edges.forEach(function (x) {
+      var d = x.data;
+      if (d.rel === "own" || dropped[d.source] || dropped[d.target]) return;
+      if (d.rel === "col") { colIds.push(d.target); return; }
+      var a = d.source, b = d.target, back = false;
+      // reads flow from the data to the reader: the reader sits right of what it reads
+      if (d.rel === "rw" && d.label === H.R && b === cid) { back = true; }
+      out.push({ from: a, to: b, label: d.label, dashed: !!d.guess, color: REL_COLOR[d.rel] || "#8c959f", width: d.rel === "rw" ? 1.8 : 1.5, back: back, rev: back });
+    });
+    // a reader drawn left to right: data → reader
+    out.forEach(function (e) { if (e.rev) { var t = e.from; e.from = e.to; e.to = t; e.back = false; } delete e.rev; });
+    if (colIds.length) {
+      groups.push({ id: "cols", label: H.columns || "columns", nodes: colIds });
+      out.push({ from: cid, to: "cols", label: "", dashed: true, plain: true, color: "#d0d7de" });
+    }
+    return { groups: groups, nodes: nodes, edges: out };
   }

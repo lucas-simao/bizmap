@@ -125,6 +125,14 @@ between services (at most 150 nodes). From `orders · table`, 1 hop shows the
 collection that feeds it and the two services that write it; 2 hops adds the
 `order-created` topic and `shop-web`.
 
+The map is drawn by Mermaid, like the PR comment. It reads left to right:
+what writes the centre on the left, what only reads it on the right. With
+*Show details → intermediate functions*, each function sits inside its
+service's box under its short name (`placeOrder`, `Repo.ListOrders`; the
+full name shows on hover). A service that both writes and reads gets one box
+on each side. Up to 10 functions per service are shown, the rest as *+N
+more*. Hover a box to light its lines.
+
 ## 6. Show details
 
 By default the page hides intermediate functions (they become *via N

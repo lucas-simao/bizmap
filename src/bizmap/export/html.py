@@ -76,6 +76,10 @@ def render_html(
         "__LANG__": lang,
         "<!--__DATA__-->": "\n".join(blocks),
         "/*__CYTOSCAPE__*/": _js_safe("cytoscape", _asset("vendor/cytoscape.min.js")),
+        # Mermaid 11.16.1 (MIT): the architecture, queue-flow and map diagrams, the
+        # same renderer GitHub uses for the PR comment; vendored with `<!--` written
+        # `<\!--` (inside strings and one regex, where it reads the same) so it can sit in <script>
+        "/*__MERMAID__*/": _js_safe("mermaid", _asset("vendor/mermaid.min.js")),
         "/*__QUERY__*/": _js_safe("query.js", _asset("query.js")),
         "/*__APP__*/": _js_safe("book.js", _asset("book.js").replace("/*__HOME__*/", _asset("home.js") + _asset("views.js"), 1)),
     }
