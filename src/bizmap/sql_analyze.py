@@ -428,10 +428,12 @@ PLACEHOLDER_N = re.compile(r"\$(\d+)")
 
 def normalize_placeholders(sql: str) -> str:
     sql = mask_sql_holes(sql)
-    # Every placeholder becomes `?`. Never rewrite one to `@name`: since sqlglot 30.34
-    # the postgres dialect reads `@` as ABS(), so `@p1` became ABS(p1) and a phantom
-    # column `p1`. A bare `$1` is not safe either: `VALUES ($1,$2)` does not parse.
-    sql = PLACEHOLDER_N.sub("?", sql)
+    # Never rewrite a placeholder to `@name`: since sqlglot 30.34 the postgres dialect
+    # reads `@` as ABS(), so `@p1` became ABS(p1) and a phantom column `p1`. A bare `$1`
+    # is not safe either (`VALUES ($1,$2)` does not parse), and on older sqlglot
+    # `?::timestamptz AND x = ...` drops `x`. `NULL` parses the same everywhere,
+    # casts included, and is never a column.
+    sql = PLACEHOLDER_N.sub("NULL", sql)
     sql = PY_PERCENT.sub("?", sql)
     sql = NAMED_PARAM.sub("?", sql)
     return sql
