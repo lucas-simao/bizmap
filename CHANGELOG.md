@@ -4,6 +4,8 @@
 
 ### Docs
 
+- The README's *Development* and *Releasing* sections moved to
+  `CONTRIBUTING.md`; the README keeps a short *Contributing* section.
 - The demo is now **Northwind Outfitters**, two repos:
   [bizmap-demo-api](https://github.com/lucas-simao/bizmap-demo-api) (Go, Echo, Postgres, Firestore) and
   [bizmap-demo-web](https://github.com/lucas-simao/bizmap-demo-web) (TypeScript storefront, Firebase), with a
