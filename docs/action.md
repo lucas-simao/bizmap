@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4   # the base commit is fetched if missing; fetch-depth: 0 also works
-      - uses: lucas-simao/bizmap@v0.17.1   # pin a tag or a commit SHA
+      - uses: lucas-simao/bizmap@v0.17.2   # pin a tag or a commit SHA
         with:
           path: .            # or the workspace dir holding bizmap.yaml with `repos:`
 ```
@@ -33,7 +33,7 @@ A stricter setup that fails the check on high-risk PRs and leaves the diagram
 out:
 
 ```yaml
-      - uses: lucas-simao/bizmap@v0.17.1
+      - uses: lucas-simao/bizmap@v0.17.2
         id: bizmap
         with:
           path: services
@@ -151,7 +151,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: lucas-simao/bizmap@v0.17.1
+      - uses: lucas-simao/bizmap@v0.17.2
         id: bizmap
         with:
           path: .
