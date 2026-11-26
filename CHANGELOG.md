@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.17.2 — 2026-11-26
+
 ### Fixed
 
 - **Phantom `p1` / `cid` columns with sqlglot 30.34+.** The SQL analysis
