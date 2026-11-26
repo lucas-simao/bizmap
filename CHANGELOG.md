@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Phantom `p1` columns with sqlglot 30.35.** sqlglot 30.35 (released after
+  0.17.1) reads a Postgres placeholder (`WHERE id = $1`) as a column, so a fresh
+  install reported reads of `orders.p1`, `users.p1`… BizMap now requires
+  `sqlglot<30.35` until the SQL analysis ignores placeholders on newer
+  versions.
+
 ## 0.17.1 — 2026-11-23
 
 ### Fixed (HTML export: map)

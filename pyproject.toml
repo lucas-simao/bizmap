@@ -19,7 +19,7 @@ classifiers = [
 ]
 dependencies = [
     "click>=8.1",
-    "sqlglot>=25.0",
+    "sqlglot>=25.0,<30.35",  # 30.35 reads Postgres placeholders ($1) as columns (phantom orders.p1)
     "pyyaml>=6.0",
     "tree-sitter>=0.23",
     "tree-sitter-go>=0.23",
