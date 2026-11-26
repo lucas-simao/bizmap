@@ -10,7 +10,6 @@ from sqlglot.errors import ErrorLevel
 
 from bizmap.graph import Confidence
 
-PLACEHOLDER_N = re.compile(r"\$(\d+)")
 NAMED_PARAM = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 PY_PERCENT = re.compile(r"%s")
 # Leading `-- comment` lines and `/* … */` blocks are allowed: sqlc puts
@@ -424,11 +423,19 @@ def _column_only_in_holes(sql: str | None, column: str | None) -> bool:
     return re.search(rf"\b{re.escape(name)}\b", masked, re.IGNORECASE) is None
 
 
+PLACEHOLDER_N = re.compile(r"\$(\d+)")
+
+
 def normalize_placeholders(sql: str) -> str:
     sql = mask_sql_holes(sql)
-    sql = PLACEHOLDER_N.sub(r"@p\1", sql)
+    # Never rewrite a placeholder to `@name`: since sqlglot 30.34 the postgres dialect
+    # reads `@` as ABS(), so `@p1` became ABS(p1) and a phantom column `p1`. A bare `$1`
+    # is not safe either (`VALUES ($1,$2)` does not parse), and on older sqlglot
+    # `?::timestamptz AND x = ...` drops `x`. `NULL` parses the same everywhere,
+    # casts included, and is never a column.
+    sql = PLACEHOLDER_N.sub("NULL", sql)
     sql = PY_PERCENT.sub("?", sql)
-    sql = NAMED_PARAM.sub(r"@\1", sql)
+    sql = NAMED_PARAM.sub("?", sql)
     return sql
 
 

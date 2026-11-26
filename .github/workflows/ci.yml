@@ -9,15 +9,25 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+        sqlglot: ["latest"]
+        include:
+          # the last release before sqlglot read `@` as ABS() (30.34): both must stay clean
+          - python-version: "3.12"
+            sqlglot: "30.33.0"
+    name: test (${{ matrix.python-version }}, sqlglot ${{ matrix.sqlglot }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: pip install -e ".[dev]"
+        run: |
+          pip install -e ".[dev]"
+          if [ "${{ matrix.sqlglot }}" != "latest" ]; then pip install "sqlglot==${{ matrix.sqlglot }}"; fi
+          python -c "import sqlglot; print('sqlglot', sqlglot.__version__)"
       - name: Ruff
         run: ruff check src tests
       - name: Pytest

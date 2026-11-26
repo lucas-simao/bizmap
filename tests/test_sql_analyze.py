@@ -119,3 +119,38 @@ def test_lateral_star_alias_is_not_a_table() -> None:
     tables = {a.table.lower() for a in acc}
     assert "l" not in tables
     assert "appointments" in tables
+
+
+# sqlglot 30.34+ reads `@` as ABS() in the postgres dialect: placeholders must never
+# reach the parser as `@name`, or `WHERE id = $1` reports a phantom column `p1`.
+
+
+def _cols(sql: str) -> set[tuple[str, str | None]]:
+    return {(a.table, a.column) for a in analyze_sql(sql)}
+
+
+def test_dollar_placeholder_is_not_a_column() -> None:
+    got = _cols("SELECT id FROM orders WHERE id = $1")
+    assert ("orders", "id") in got
+    assert not any(c in ("p1", "1", "$1") for _t, c in got), got
+
+
+def test_named_placeholder_is_not_a_column() -> None:
+    got = _cols("SELECT id, total FROM orders WHERE customer_id = :cid AND status = :status")
+    assert {("orders", "id"), ("orders", "total"), ("orders", "customer_id"), ("orders", "status")} <= got
+    assert not any(c in ("cid", "status_param") for _t, c in got) and ("orders", "cid") not in got, got
+
+
+def test_placeholders_in_writes_are_not_columns() -> None:
+    got = _cols("UPDATE orders SET status = $2, paid_at = now() WHERE id = $1")
+    assert ("orders", "status") in got and ("orders", "paid_at") in got
+    assert not any(c in ("p1", "p2") for _t, c in got), got
+    got = _cols("INSERT INTO orders (id, customer_id) VALUES (:id, :cid)")
+    assert {("orders", "id"), ("orders", "customer_id")} <= got
+    assert ("orders", "cid") not in got, got
+
+
+def test_casts_and_percent_placeholders_still_parse() -> None:
+    got = _cols("SELECT id FROM orders WHERE created_at > $1::timestamptz AND tier = %s")
+    assert ("orders", "id") in got and ("orders", "created_at") in got and ("orders", "tier") in got
+    assert not any(c in ("p1", "timestamptz") for _t, c in got), got

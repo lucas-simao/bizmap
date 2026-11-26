@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Phantom `p1` / `cid` columns with sqlglot 30.34+.** The SQL analysis
+  rewrote placeholders before parsing (`$1` → `@p1`, `:cid` → `@cid`), and
+  since sqlglot 30.34 (released after 0.17.1) the postgres dialect reads `@` as
+  `ABS()`. So `WHERE id = $1` reported a phantom column `orders.p1`, and
+  `:cid` a column `cid`, on a fresh install. Placeholders are no longer
+  rewritten to `@`: `$1` becomes `NULL` (it parses the same on every sqlglot,
+  casts included) and `:name` becomes `?`, like `%s`. No upper bound on sqlglot; the CI runs
+  the newest sqlglot and 30.33 (the last release before the change).
+
 ## 0.17.1 — 2026-11-23
 
 ### Fixed (HTML export: map)
