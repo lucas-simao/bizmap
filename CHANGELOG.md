@@ -9,8 +9,7 @@
   since sqlglot 30.34 (released after 0.17.1) the postgres dialect reads `@` as
   `ABS()`. So `WHERE id = $1` reported a phantom column `orders.p1`, and
   `:cid` a column `cid`, on a fresh install. Placeholders are no longer
-  rewritten to `@`: `$1` stays as it is (sqlglot parses it as a placeholder
-  since 25.0) and `:name` becomes `?`. No upper bound on sqlglot; the CI runs
+  rewritten to `@`: `$1`, `:name` and `%s` all become `?`. No upper bound on sqlglot; the CI runs
   the newest sqlglot and 30.33 (the last release before the change).
 
 ## 0.17.1 — 2026-11-23
