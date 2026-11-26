@@ -39,8 +39,8 @@ the Markdown, and `downstream` (`from`, `to`, `via`, `confidence`, `because`,
 
 ## Example
 
-In [bizmap-demo](https://github.com/lucas-simao/bizmap-demo), PR #4 changes the
-handler behind `POST /orders/:id/paid`. The shop route is called by the
+In an earlier version of the demo (a TypeScript shop and a Python payments
+service), a pull request changed the handler behind `POST /orders/:id/paid`. The shop route is called by the
 payments service, so the comment lists `payments: POST /webhooks/provider`
 among the entrypoints, and the database trigger's table among the writes:
 

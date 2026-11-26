@@ -11,7 +11,7 @@ bizmap report [PATH ...] [options]
 With `PATH` it scans in memory (nothing is written); without, it reads
 `--graph` (default `bizmap.graph.json`).
 
-![bizmap report on bizmap-demo](../assets/demo/report.gif){ .shot }
+![bizmap report on an earlier version of the demo (shop + payments)](../assets/demo/report.gif){ .shot }
 
 ```text
 $ bizmap report

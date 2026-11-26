@@ -20,7 +20,7 @@ and deterministic: no LLM, no tokens, no account, no server.
 <sub>`bizmap export --format html` on a fictional three-repo shop: the page opens on *who writes / reads X?* and answers like `bizmap who-writes`.</sub>
 
 **[Documentation](https://lucas-simao.github.io/bizmap/)** ·
-**[Demo repository](https://github.com/lucas-simao/bizmap-demo)** ·
+**[Live demo](https://lucas-simao.github.io/bizmap-demo-api/)** ([Go API](https://github.com/lucas-simao/bizmap-demo-api) + [TypeScript storefront](https://github.com/lucas-simao/bizmap-demo-web)) ·
 [Changelog](CHANGELOG.md) · [PyPI](https://pypi.org/project/bizmap/)
 
 ## Install
@@ -41,9 +41,9 @@ bizmap why orders.status         # writers, readers, what triggers them, who cal
 bizmap report                    # how much of the code BizMap understood
 ```
 
-![bizmap scan and bizmap why on the demo repository](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/assets/demo/hero.gif)
+![bizmap scan and bizmap why in the terminal](https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/assets/demo/hero.gif)
 
-<sub>Recorded on [bizmap-demo](https://github.com/lucas-simao/bizmap-demo): a TypeScript shop and a Python payments service sharing one Postgres database.</sub>
+<sub>`bizmap scan` and `bizmap why`, recorded on an earlier version of the demo (a TypeScript shop and a Python payments service).</sub>
 
 Several services at once — one graph, HTTP calls between them matched:
 
@@ -53,11 +53,17 @@ bizmap report --cross-service               # which routes reach which services 
 bizmap scan ./web ./api ./billing           # or list them (or a bizmap.yaml with `repos:`)
 ```
 
-Try it on the demo in one minute:
+Try it on the demo in one minute: **Northwind Outfitters**, a fictional shop split
+in two repos — a [Go API](https://github.com/lucas-simao/bizmap-demo-api) (Echo, Postgres, Firestore) and a
+[TypeScript storefront](https://github.com/lucas-simao/bizmap-demo-web) that calls it and shares a Firestore collection
+with it. Or open its [live map](https://lucas-simao.github.io/bizmap-demo-api/) without installing anything.
 
 ```bash
-git clone https://github.com/lucas-simao/bizmap-demo && cd bizmap-demo
-bizmap scan . && bizmap why orders.status
+git clone https://github.com/lucas-simao/bizmap-demo-api && cd bizmap-demo-api
+git clone https://github.com/lucas-simao/bizmap-demo-web .bizmap/web
+bizmap scan .bizmap --out bizmap.graph.json   # both repos, one graph
+bizmap who-writes orders.status               # the 4 routes and the expiry job
+bizmap trace order_events                     # Postgres → Firestore → a Cloud Function in the other repo
 ```
 
 ## What it answers
@@ -136,7 +142,8 @@ jobs:
 
 <img alt="BizMap impact comment on a pull request" src="https://raw.githubusercontent.com/lucas-simao/bizmap/main/docs/assets/demo/pr-comment-small.png" width="720">
 
-Live examples: [bizmap-demo pull requests](https://github.com/lucas-simao/bizmap-demo/pulls).
+Live examples: the pull requests of [bizmap-demo-api](https://github.com/lucas-simao/bizmap-demo-api/pulls) and
+[bizmap-demo-web](https://github.com/lucas-simao/bizmap-demo-web/pulls).
 Inputs, outputs and behaviour: [GitHub Action](https://lucas-simao.github.io/bizmap/github-action/).
 
 ## Ask the graph from your coding agent (MCP)

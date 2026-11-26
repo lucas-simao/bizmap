@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Docs
+
+- The demo is now **Northwind Outfitters**, two repos:
+  [bizmap-demo-api](https://github.com/lucas-simao/bizmap-demo-api) (Go, Echo, Postgres, Firestore) and
+  [bizmap-demo-web](https://github.com/lucas-simao/bizmap-demo-web) (TypeScript storefront, Firebase), with a
+  [live map](https://lucas-simao.github.io/bizmap-demo-api/). README, the docs home, Getting started and the GitHub
+  Action page point there (try-it commands, live PR examples); the old
+  `bizmap-demo` is no longer referenced. Recordings made on the earlier demo
+  are labelled as such.
+
 ## 0.17.2 — 2026-11-26
 
 ### Fixed
@@ -14,6 +24,7 @@
   rewritten to `@`: `$1` becomes `NULL` (it parses the same on every sqlglot,
   casts included) and `:name` becomes `?`, like `%s`. No upper bound on sqlglot; the CI runs
   the newest sqlglot and 30.33 (the last release before the change).
+
 
 ## 0.17.1 — 2026-11-23
 

@@ -29,7 +29,7 @@ matrix and a map around what you pick ([start screen](commands/export-home.md)).
 
 `bizmap why orders.status` still prints everything around one column at once:
 
-![bizmap scan and bizmap why on bizmap-demo](assets/demo/hero.gif){ .shot }
+![bizmap scan and bizmap why, recorded on an earlier version of the demo](assets/demo/hero.gif){ .shot }
 
 <div class="grid cards" markdown>
 
@@ -73,16 +73,19 @@ guessing. See [FAQ and limitations](faq.md).
 
 ## Try it on the demo
 
-[bizmap-demo](https://github.com/lucas-simao/bizmap-demo) is a small
-fictional shop with two services sharing one Postgres database: **shop**
-(TypeScript + Express) and **payments** (Python + FastAPI), a database trigger,
-and the GitHub Action running on its pull requests.
+**Northwind Outfitters** is a fictional shop in two repos: a
+[Go API](https://github.com/lucas-simao/bizmap-demo-api) (Echo, Postgres, Firestore) and a
+[TypeScript storefront](https://github.com/lucas-simao/bizmap-demo-web) (axios, Firebase, a Cloud Function). The
+storefront calls the API over HTTP, and both write the Firestore collection
+`order_events`. Both run the GitHub Action on their pull requests and publish
+their [live map](https://lucas-simao.github.io/bizmap-demo-api/).
 
 ```bash
-git clone https://github.com/lucas-simao/bizmap-demo && cd bizmap-demo
-bizmap scan . --mermaid
+git clone https://github.com/lucas-simao/bizmap-demo-api && cd bizmap-demo-api
+git clone https://github.com/lucas-simao/bizmap-demo-web .bizmap/web
+bizmap scan .bizmap --out bizmap.graph.json
 bizmap who-writes orders.status
-bizmap export --format html --out bizmap.html
+bizmap export --format html --config .bizmap/bizmap.yaml --out bizmap.html
 ```
 
 The walk-through is in [Getting started](getting-started.md).
