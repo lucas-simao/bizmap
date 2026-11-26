@@ -38,7 +38,7 @@ bizmap scan --discover ~/work --list         # what would be scanned, and why
 
 ## What it prints
 
-![bizmap scan on bizmap-demo: the workspace, then the shop service alone](../assets/demo/scan.gif){ .shot }
+![bizmap scan on an earlier version of the demo: the workspace, then the shop service alone](../assets/demo/scan.gif){ .shot }
 
 ```text
 wrote bizmap.graph.json  (59 nodes, 139 edges)
@@ -46,8 +46,8 @@ wrote bizmap.graph.mmd
 ```
 
 When something could not be linked, the summary says what and why. Scanning
-only the `shop` service of the [demo](../getting-started.md), the call to
-the payments service has no target:
+only the `shop` service of a two-service workspace (an earlier version of the
+demo), the call to the payments service has no target:
 
 ```text
 wrote /tmp/shop.json  (46 nodes, 119 edges)

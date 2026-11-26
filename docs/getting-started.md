@@ -15,38 +15,30 @@ account, no network.
 
 ## Scan the demo
 
-[bizmap-demo](https://github.com/lucas-simao/bizmap-demo) is a small,
-fictional shop with two services that share one Postgres database:
+**Northwind Outfitters** is a fictional shop split in two repos:
 
-```text
-bizmap-demo/
-├── bizmap.yaml          workspace: repos [shop, payments] + services
-├── shop/                TypeScript + Express + pg
-│   ├── src/             routes, orders, inventory, checkout, payments client
-│   └── db/              schema.sql + migrations (a status-history trigger)
-└── payments/            Python + FastAPI + SQLAlchemy
-    ├── app.py           /charges, /webhooks/provider
-    └── migrations/
-```
-
-At checkout the shop calls `POST /charges` on payments; when the payment
-provider confirms, payments calls `POST /orders/:id/paid` back on the shop.
-A database trigger records every change of `orders.status`.
+- [bizmap-demo-api](https://github.com/lucas-simao/bizmap-demo-api): Go (Echo) on Postgres (`customers`, `products`,
+  `orders`, `order_items`, `payments`, `shipments`), and it writes every status
+  change to the Firestore collection `order_events`. The business rules live
+  in plain functions: discounts in `pricing.go`, stock reservation and payment
+  in `repo.go`, the order states in `status.go`, an expiry job in `jobs.go`.
+- [bizmap-demo-web](https://github.com/lucas-simao/bizmap-demo-web): a TypeScript storefront (axios + Firebase). Its
+  screens call the API over HTTP, read `order_events` live and add notes to it;
+  a Cloud Function triggered by `order_events` writes `notifications`.
 
 ```bash
-git clone https://github.com/lucas-simao/bizmap-demo && cd bizmap-demo
-bizmap scan . --mermaid
-bizmap who-writes orders.status     # who writes this column, from which entrypoint
-bizmap trace orders                 # where the data comes from and where it goes
-bizmap why orders.status            # everything around the column at once
+git clone https://github.com/lucas-simao/bizmap-demo-api && cd bizmap-demo-api
+git clone https://github.com/lucas-simao/bizmap-demo-web .bizmap/web
+bizmap scan .bizmap --out bizmap.graph.json   # the two-repo workspace in .bizmap/bizmap.yaml
+bizmap who-writes orders.status               # who writes this column, from which entrypoint
+bizmap trace order_events                     # where the data comes from and where it goes
+bizmap why orders.discount_cents              # everything around the column at once
 ```
 
-![bizmap scan and bizmap why on bizmap-demo](assets/demo/hero.gif){ .shot }
-
-`bizmap scan .` reads the workspace `bizmap.yaml`, scans `shop` and
-`payments` together and writes `bizmap.graph.json` (plus
-`bizmap.graph.mmd` with `--mermaid`). The questions then answer from that
-file.
+`bizmap scan .bizmap` reads the workspace `bizmap.yaml`, scans both repos
+together, matches each storefront call to the Go route it hits, and writes
+`bizmap.graph.json`. The questions then answer from that file. Prefer not to
+install anything yet? The demo publishes its [live map](https://lucas-simao.github.io/bizmap-demo-api/).
 
 ### Ask: who writes, who reads, trace
 
@@ -80,36 +72,14 @@ tables matrix and a **Mapa** tab around one entity. See
 
 ### Everything around one column: `why`
 
-`bizmap why orders.status` prints every writer, reader, trigger and caller at
-once:
+`bizmap why orders.discount_cents` prints every writer, reader, trigger and
+caller at once, each with `file:line`. On the demo the writer is the pricing
+rule in the Go API, and the chain ends in the other repo: *invoked via HTTP
+from web/src.screens.checkout.placeOrder*, the storefront function behind the
+checkout button. `[exact]` is the SQL in that function; `[inferred]` was
+carried up to the route that calls it.
 
-- three functions **write** `orders.status`, each with `file:line` and the
-  comment above it;
-- `markPaid` is **triggered by** `POST /orders/:id/paid`, which is
-  **invoked via HTTP from** `payments/app.provider_webhook` — a different
-  service, in a different language;
-- `[exact]` is SQL in that function; `[inferred]` was carried up to the route
-  handler that calls it.
-
-The trigger shows up on the table it writes:
-
-```text
-$ bizmap why order_status_history.new_status
-column: order_status_history.new_status (TEXT)
-
-writers:
-  [inferred] shop/src.orders.markPaid  (src/orders.ts:29 src.orders.markPaid) via db_trigger:trg_orders_status_history — Marks an order as paid.
-      triggered by shop/HTTP POST /orders/:id/paid
-      invoked via HTTP from payments/app.provider_webhook
-  ...
-
-defined/altered by:
-  [exact] db trigger trg_orders_status_history on orders  (db/migrations/001_order_status_history.sql:18 trg_orders_status_history)
-  [exact] shop/log_order_status  (db/migrations/001_order_status_history.sql:10 log_order_status)
-```
-
-An `UPDATE orders SET status = …` in the shop is enough for BizMap to know
-that `order_status_history` is written too, and by which routes.
+![bizmap scan and bizmap why, recorded on an earlier version of the demo](assets/demo/hero.gif){ .shot }
 
 ## Check what it understood
 
@@ -117,64 +87,17 @@ that `order_status_history` is written too, and by which routes.
 bizmap report
 ```
 
-![bizmap report on bizmap-demo](assets/demo/report.png){ .shot }
+![bizmap report, recorded on an earlier version of the demo](assets/demo/report.png){ .shot }
 
-All 10 routes reach a table, both cross-service calls are linked, nothing is
-unresolved. On your own code, start here: the report says what BizMap could
-not link and why.
+How many entrypoints reach a table, how many HTTP calls between services were
+linked, and what is unresolved. On your own code, start here: the report says
+what BizMap could not link and why.
 
 ## The diagram
 
-`--mermaid` writes an entrypoint → table rollup, one box per service, with
-the HTTP calls between them. This is `bizmap.graph.mmd` for the demo, as written:
-
-```mermaid
-flowchart LR
-  subgraph payments
-    payments_entrypoint_http_GET__charges__charge_id_["GET /charges/{charge_id}"]
-    payments_entrypoint_http_POST__charges["POST /charges"]
-    payments_entrypoint_http_POST__webhooks_provider["POST /webhooks/provider"]
-    table_payments["payments"]
-  end
-  subgraph shop
-    shop_entrypoint_http_GET__customers__id["GET /customers/:id"]
-    shop_entrypoint_http_GET__inventory__sku["GET /inventory/:sku"]
-    shop_entrypoint_http_GET__orders__id["GET /orders/:id"]
-    shop_entrypoint_http_POST__customers["POST /customers"]
-    shop_entrypoint_http_POST__orders["POST /orders"]
-    shop_entrypoint_http_POST__orders__id_checkout["POST /orders/:id/checkout"]
-    shop_entrypoint_http_POST__orders__id_paid["POST /orders/:id/paid"]
-    shop_function_src_payments_createCharge["src.payments.createCharge"]
-    table_customers["customers"]
-    table_inventory["inventory"]
-    table_order_status_history["order_status_history"]
-    table_orders["orders"]
-  end
-  shop_function_src_payments_createCharge -->|calls_http inferred| payments_entrypoint_http_POST__charges
-  payments_entrypoint_http_POST__webhooks_provider -->|calls_http inferred| shop_entrypoint_http_POST__orders__id_paid
-  shop_entrypoint_http_GET__customers__id -->|reads inferred| table_customers
-  shop_entrypoint_http_POST__customers -->|writes inferred| table_customers
-  shop_entrypoint_http_GET__inventory__sku -->|reads inferred| table_inventory
-  shop_entrypoint_http_POST__orders -->|reads inferred| table_inventory
-  shop_entrypoint_http_POST__orders -->|writes inferred| table_inventory
-  payments_entrypoint_http_POST__webhooks_provider -->|writes inferred| table_order_status_history
-  shop_entrypoint_http_POST__orders__id_checkout -->|writes inferred| table_order_status_history
-  shop_entrypoint_http_POST__orders__id_paid -->|writes inferred| table_order_status_history
-  payments_entrypoint_http_POST__webhooks_provider -->|reads inferred| table_orders
-  payments_entrypoint_http_POST__webhooks_provider -->|writes inferred| table_orders
-  shop_entrypoint_http_GET__orders__id -->|reads inferred| table_orders
-  shop_entrypoint_http_POST__orders -->|writes inferred| table_orders
-  shop_entrypoint_http_POST__orders__id_checkout -->|reads inferred| table_orders
-  shop_entrypoint_http_POST__orders__id_checkout -->|writes inferred| table_orders
-  shop_entrypoint_http_POST__orders__id_paid -->|reads inferred| table_orders
-  shop_entrypoint_http_POST__orders__id_paid -->|writes inferred| table_orders
-  payments_entrypoint_http_GET__charges__charge_id_ -->|reads inferred| table_payments
-  payments_entrypoint_http_POST__charges -->|writes inferred| table_payments
-  payments_entrypoint_http_POST__webhooks_provider -->|reads inferred| table_payments
-  payments_entrypoint_http_POST__webhooks_provider -->|writes inferred| table_payments
-  shop_entrypoint_http_POST__orders__id_checkout -->|writes inferred| table_payments
-  %% cross-service calls_http + entrypoint→table rollup
-```
+`bizmap scan --mermaid` also writes `bizmap.graph.mmd`: an entrypoint → table
+rollup, one box per service, with the HTTP calls between them. For browsing,
+the [HTML page](commands/export-home.md) is usually the better view.
 
 ## Your own code
 

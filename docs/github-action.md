@@ -4,7 +4,7 @@ On every pull request, the Action scans the PR head, maps the diff onto the
 graph and posts **one** comment — updated on each push — with the routes,
 functions, tables and columns the change reaches, and a Mermaid diagram.
 
-![The BizMap comment on bizmap-demo PR #1](assets/demo/pr-comment-small.png){ .shot width="760" }
+![The BizMap comment on a pull request](assets/demo/pr-comment-small.png){ .shot width="760" }
 
 ## Setup
 
@@ -35,23 +35,23 @@ same ref, so the CLI and the Action always match.
 
 ## See it running
 
-[bizmap-demo](https://github.com/lucas-simao/bizmap-demo/pulls) keeps four
-pull requests open as live examples:
+The two demo repos keep pull requests open as live examples, each scanned
+together with the other repo:
 
-| PR | What the comment shows |
+| PR | The change |
 | --- | --- |
-| [#1 Bulk order discount](https://github.com/lucas-simao/bizmap-demo/pull/1) | A new route and a changed insert: columns written, stock touched. |
-| [#2 Schema-only change](https://github.com/lucas-simao/bizmap-demo/pull/2) | No function changed; the columns added or changed and the routes that use them. |
-| [#3 Shipping migration](https://github.com/lucas-simao/bizmap-demo/pull/3) | A migration that drops and renames columns still in use, flagged ⚠️. |
-| [#4 Order lifecycle handlers](https://github.com/lucas-simao/bizmap-demo/pull/4) | Many handlers; one is reached from the **payments** service across HTTP. |
+| [api #1 Pricing: gold discount 12%, new silver tier, cap 20%](https://github.com/lucas-simao/bizmap-demo-api/pull/1) | A business rule in `pricing.go`: the routes that reach it and the order columns it writes. |
+| [api #2 Migration: add orders.shipping_cents, rename shipments.tracking_code](https://github.com/lucas-simao/bizmap-demo-api/pull/2) | A migration only: the columns added or renamed and the code that uses them. |
+| [web #1 Returns screen: request a return on the shared order timeline](https://github.com/lucas-simao/bizmap-demo-web/pull/1) | A new storefront screen writing the Firestore collection both repos share. |
+| [web #2 Order page: show the shipment tracking code](https://github.com/lucas-simao/bizmap-demo-web/pull/2) | A front-end change whose data lives in the other repo (*crosses services: web → api*). |
 
-??? example "PR #4: a change reached from another service"
+??? example "A change reached from another service (earlier version of the demo)"
 
-    ![The BizMap comment on bizmap-demo PR #4](assets/demo/pr-comment.png){ .shot }
+    ![The BizMap comment on a change reached from another service](assets/demo/pr-comment.png){ .shot }
 
-??? example "PR #3: a migration that drops and renames columns still in use"
+??? example "A migration that drops and renames columns still in use (earlier version of the demo)"
 
-    ![The BizMap comment on bizmap-demo PR #3](assets/demo/pr-comment-schema.png){ .shot }
+    ![The BizMap comment on a migration that drops and renames columns still in use](assets/demo/pr-comment-schema.png){ .shot }
 
 ## Inputs
 
